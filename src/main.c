@@ -359,6 +359,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
      * 640x480) rather than whichever surface a frame's last draw hit. */
     if (!getenv("RECOMP_PRESENT_SCANOUT"))
         _putenv_s("RECOMP_PRESENT_SCANOUT", "1");
+    /* The console presents at the display's 60 Hz; uncapped the title screen
+     * swung between 100 and 240 fps. RECOMP_FPS_CAP=0 runs uncapped. */
+    if (!getenv("RECOMP_FPS_CAP"))
+        _putenv_s("RECOMP_FPS_CAP", "60");
     printf("Loading XBE...\n");
 
     /* Install VEH handler (first handler in chain) */
