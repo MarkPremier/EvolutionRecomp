@@ -41,6 +41,7 @@ game/
 
 # Run/build logs
 build_log.txt
+configure_log.txt
 stderr.txt
 stdout.txt
 
