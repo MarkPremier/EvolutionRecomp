@@ -224,6 +224,13 @@ extern bool apu_hook_handle_mmio(PCONTEXT ctx, uintptr_t fault_addr,
 extern int xbox_Nv2aNativeFencesEnabled(void);
 extern int xbox_Nv2aSoftwareMethodHandler(uint32_t routine, uint32_t context);
 
+/* The MCPX USB host controllers (src/usb/ohci.c). The title's statically
+ * linked XAPI finds its pads by driving these registers directly; the model
+ * answers them and feeds a host XInput pad in as an Xbox controller. */
+extern void xbox_OhciInit(void);
+extern int xbox_OhciOwnsAddress(uint32_t xbox_va);
+extern int xbox_OhciHandleMmio(void *ctx, uint32_t xbox_va);
+
 /* xbox_nv2a's MMIO hook (src/nv2a/nv2a_mmio_hook.h). */
 extern void nv2a_hook_init(ptrdiff_t xbox_mem_offset);
 extern bool nv2a_hook_handle_mmio(PCONTEXT ctx, uintptr_t fault_addr,
@@ -264,6 +271,10 @@ static LONG CALLBACK veh_handler(PEXCEPTION_POINTERS ep)
             if (xbox_va >= XBOX_MCPX_BASE && xbox_va < XBOX_MCPX_APU_MMIO_END
                     && apu_hook_handle_mmio(ep->ContextRecord, fault_addr, xbox_va,
                            ep->ExceptionRecord->ExceptionInformation[0] ? 1 : 0))
+                return EXCEPTION_CONTINUE_EXECUTION;
+            /* USB host controller registers -> the OHCI model (RECOMP_USB). */
+            if (xbox_OhciOwnsAddress(xbox_va)
+                    && xbox_OhciHandleMmio(ep->ContextRecord, xbox_va))
                 return EXCEPTION_CONTINUE_EXECUTION;
         }
 
@@ -366,6 +377,15 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
      * clocks drifted apart. RECOMP_FPS_CAP=0 runs uncapped, =<hz> fixed. */
     if (!getenv("RECOMP_FPS_CAP"))
         _putenv_s("RECOMP_FPS_CAP", "vblank");
+    /* Controllers: the emulated USB host controllers, two root ports, and
+     * whichever XInput slot has a pad plugged in (as in the fork's scghost
+     * project). */
+    if (!getenv("RECOMP_USB"))
+        _putenv_s("RECOMP_USB", "1");
+    if (!getenv("RECOMP_USB_NDP"))
+        _putenv_s("RECOMP_USB_NDP", "2");
+    if (!getenv("RECOMP_XINPUT_SLOT"))
+        _putenv_s("RECOMP_XINPUT_SLOT", "auto");
     /* No timeBeginPeriod(1): it slowed the intro movie to a few fps. The
      * toolkit's vblank and flip waits use high-resolution waitable timers. */
     printf("Loading XBE...\n");
@@ -405,6 +425,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
      * after the VEH handler above is installed (that is what routes the
      * faults). */
     nv2a_hook_init(g_xbox_mem_offset);
+
+    /* The USB host controllers: traps their registers (they fault into the
+     * VEH above) and attaches the host's XInput pad. After the memory layout,
+     * which maps the MCPX aperture the traps are placed in. */
+    xbox_OhciInit();
 
     /* Bring up the emulated APU.
      *
