@@ -355,6 +355,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
         _putenv_s("RECOMP_TITLE_KEVENTS", "1");
     if (!getenv("RECOMP_HEAP_RECLAIM"))
         _putenv_s("RECOMP_HEAP_RECLAIM", "1");
+    /* Show the display buffer AvSetDisplayMode registered (Turok has one,
+     * 640x480) rather than whichever surface a frame's last draw hit. */
+    if (!getenv("RECOMP_PRESENT_SCANOUT"))
+        _putenv_s("RECOMP_PRESENT_SCANOUT", "1");
     printf("Loading XBE...\n");
 
     /* Install VEH handler (first handler in chain) */

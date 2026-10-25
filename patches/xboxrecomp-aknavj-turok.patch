@@ -203,7 +203,7 @@ index f031faf..54dd8f4 100644
          constants.texture_key[stage][0] = binding.color_key;
          constants.texture_key[stage][1] = binding.format == 0x03 || binding.format == 0x07 ||
 diff --git a/src/kernel/nv2a_pb_exec.c b/src/kernel/nv2a_pb_exec.c
-index d7c0f20..5432b78 100644
+index d7c0f20..b40527a 100644
 --- a/src/kernel/nv2a_pb_exec.c
 +++ b/src/kernel/nv2a_pb_exec.c
 @@ -437,6 +437,13 @@ static struct {
@@ -326,7 +326,7 @@ index d7c0f20..5432b78 100644
      *count = 0;
      return 1;
  }
-@@ -4276,25 +4333,27 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -4276,25 +4333,50 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
           * per-frame re-decode of render-to-texture surfaces. */
          if (s_gpu.pitch) {
              extern void xbox_FramebufferWindowPresent(uint32_t, uint32_t);
@@ -335,13 +335,36 @@ index d7c0f20..5432b78 100644
 +            int drawn = s_gpu.drawn_offset != 0;
 +            uint32_t done = drawn ? s_gpu.drawn_offset : s_gpu.color_offset;
 +            uint32_t pitch = drawn && s_gpu.drawn_pitch ? s_gpu.drawn_pitch : s_gpu.pitch;
++            uint32_t present_h = drawn ? s_gpu.drawn_height : 0;
++            /* RECOMP_PRESENT_SCANOUT: present the buffer AvSetDisplayMode
++             * registered, which is what the CRTC scans out, rather than the
++             * surface the last draw hit. Turok's last draw before a flip goes
++             * to its 1280x480 scene buffer on some frames and to the 640x480
++             * display buffer on others, and alternating between the two read
++             * as flicker. Opt-in: a title that flips between two front
++             * buffers by rewriting PCRTC_START needs the drawn-surface rule. */
++            {
++                static int scanout = -1;
++                uint32_t scan_pitch = 0, scan;
++                if (scanout < 0) {
++                    const char *e = getenv("RECOMP_PRESENT_SCANOUT");
++                    scanout = e && *e && *e != '0';
++                }
++                if (scanout && (scan = xbox_GetDisplayFramebuffer(&scan_pitch)) != 0 && scan_pitch) {
++                    uint32_t phys = scan & 0x0FFFFFFFu;
++                    if (!drawn || (s_gpu.drawn_offset & 0x0FFFFFFFu) != phys)
++                        present_h = 480u;   /* the display buffer's own rows */
++                    drawn = 1;
++                    done = phys;
++                    pitch = scan_pitch;
++                }
++            }
              if (done) {
                  uint32_t show = done;
                  if (lazy_flip()) {
                      uint8_t *base = (uint8_t *)xbox_GetMemoryOffset() + dma_resolve(done);
 -                    uint32_t h = s_gpu.clip_y + s_gpu.clip_h;
-+                    uint32_t h = drawn && s_gpu.drawn_height ? s_gpu.drawn_height
-+                                                             : s_gpu.clip_y + s_gpu.clip_h;
++                    uint32_t h = present_h ? present_h : s_gpu.clip_y + s_gpu.clip_h;
                      /* With RECOMP_ASYNC_FLIP the call returns the previous
                       * frame's buffer (published without a GPU wait); the window
                       * shows that, one frame behind. */
@@ -478,3 +501,15 @@ index 712b158..9edea73 100644
          } else if (bpp == 2) {
              const uint16_t *p = (const uint16_t *)row;
              for (x = 0; x < s_fb_width; x++) {
+diff --git a/tests/d3d8_smoke/test_nv2a_shader.c b/tests/d3d8_smoke/test_nv2a_shader.c
+index 0650472..634a848 100644
+--- a/tests/d3d8_smoke/test_nv2a_shader.c
++++ b/tests/d3d8_smoke/test_nv2a_shader.c
+@@ -73,6 +73,7 @@ int xbox_Nv2aSoftwareMethodDeferred(uint32_t parameter, uint32_t depth_clear,
+ int xbox_Nv2aSoftwareMethodPending(void) { return 0; }
+ void xbox_Nv2aAcknowledgeHandshakes(void) {}
+ void xbox_Nv2aFlipPacingReport(void) {}
++uint32_t xbox_GetDisplayFramebuffer(uint32_t *pitch) { if (pitch) *pitch = 0; return 0; }
+ void xbox_FramebufferWindowSet(uint32_t address, uint32_t pitch) { (void)address; (void)pitch; }
+ void xbox_FramebufferWindowStart(void) {}
+ void xbox_FramebufferWindowPresent(uint32_t address, uint32_t pitch) { (void)address; (void)pitch; }
