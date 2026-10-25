@@ -203,10 +203,24 @@ index f031faf..54dd8f4 100644
          constants.texture_key[stage][0] = binding.color_key;
          constants.texture_key[stage][1] = binding.format == 0x03 || binding.format == 0x07 ||
 diff --git a/src/kernel/nv2a_pb_exec.c b/src/kernel/nv2a_pb_exec.c
-index d7c0f20..da06bfb 100644
+index d7c0f20..5432b78 100644
 --- a/src/kernel/nv2a_pb_exec.c
 +++ b/src/kernel/nv2a_pb_exec.c
-@@ -1252,6 +1252,31 @@ static void raster_triangle(const float a[2], const float b[2],
+@@ -437,6 +437,13 @@ static struct {
+      * that has not been drawn yet -- which is how a correctly rendered
+      * sequence came out as 12 black BMPs. */
+     uint32_t drawn_offset;
++    /* The pitch and height of that surface when it was drawn. By the flip the
++     * title has usually set up the next frame's surface, and its pitch is not
++     * this one's: Turok draws its 1280x480 scene, resolves it into the
++     * 640x480 display buffer, then rebinds the scene surface before
++     * FLIP_STALL. Presenting the display buffer at the scene's 5120-byte
++     * pitch showed its top half doubled with alternate rows garbled. */
++    uint32_t drawn_pitch, drawn_height;
+     uint64_t pixels;
+     uint32_t pixel_max;   /* brightest value any pixel write carried */
+     uint32_t clip_x, clip_w, clip_y, clip_h;
+@@ -1252,6 +1259,42 @@ static void raster_triangle(const float a[2], const float b[2],
                              const float uv[3][2], const Nv2aCpuVertex varying[3]);
  
  #ifdef _WIN32
@@ -235,10 +249,21 @@ index d7c0f20..da06bfb 100644
 +    return (packed & 0xF000F000u) | (lo & 4095u) | (hi << 16);
 +}
 +
++/* Remember the surface just drawn into, with its own geometry (see
++ * drawn_pitch). Height is in real rows: an anti-aliased surface has more. */
++static void note_drawn_surface(void)
++{
++    uint32_t sx, sy;
++    surface_aa_scale(&sx, &sy);
++    s_gpu.drawn_offset = s_gpu.color_offset;
++    s_gpu.drawn_pitch = s_gpu.pitch;
++    s_gpu.drawn_height = (s_gpu.clip_y + s_gpu.clip_h) * sy;
++}
++
  static int gpu_clear_surface(uint32_t param)
  {
      static int enabled = -1;
-@@ -1264,8 +1289,13 @@ static int gpu_clear_surface(uint32_t param)
+@@ -1264,8 +1307,13 @@ static int gpu_clear_surface(uint32_t param)
      }
      if (!enabled || s_gpu.clip_x || s_gpu.clip_y || !s_gpu.clip_w || !s_gpu.clip_h)
          return 0;
@@ -254,7 +279,16 @@ index d7c0f20..da06bfb 100644
      state.bytes_per_pixel = surface_bpp();
      state.pitch = s_gpu.pitch;
      state.depth_pitch = s_gpu.depth_pitch;
-@@ -2772,13 +2802,22 @@ static int gpu_raster_batch(void)
+@@ -2211,7 +2259,7 @@ static void raster_triangle(const float a[2], const float b[2],
+         }
+     }
+     s_gpu.tris_drawn++;
+-    s_gpu.drawn_offset = s_gpu.color_offset;
++    note_drawn_surface();
+ }
+ 
+ /* Attribute 3 is diffuse colour in every NV2A layout that sets one. Absent it,
+@@ -2772,13 +2820,22 @@ static int gpu_raster_batch(void)
      if (!s_gpu.combiners_configured) return gpu_batch_rejected("unconfigured combiners");
      if (surface_bpp() != 4) return gpu_batch_rejected("surface pixel format");
      if (!s_gpu.clip_w || !s_gpu.clip_h || !surface_begin_batch(memory)) return gpu_batch_rejected("surface mapping or clip extent");
@@ -283,3 +317,93 @@ index d7c0f20..da06bfb 100644
      state.stage_program = s_gpu.shader_stage_program; state.combiners = s_gpu.combiners;
      state.shader_clip_mode = s_gpu.shader_clip_mode;
      state.shader_other_stage_input = s_gpu.shader_other_stage_input;
+@@ -3008,7 +3065,7 @@ static int gpu_submit_chunk(Nv2aGpuDraw *state, uint32_t *count)
+     }
+     s_gpu.gpu_batches++;
+     if (state->topology == NV2A_GPU_TOPOLOGY_TRIANGLES) s_gpu.tris_drawn += gpu_index_count / 3;
+-    s_gpu.drawn_offset = s_gpu.color_offset;
++    note_drawn_surface();
+     *count = 0;
+     return 1;
+ }
+@@ -4276,25 +4333,27 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+          * per-frame re-decode of render-to-texture surfaces. */
+         if (s_gpu.pitch) {
+             extern void xbox_FramebufferWindowPresent(uint32_t, uint32_t);
+-            uint32_t done = s_gpu.drawn_offset ? s_gpu.drawn_offset
+-                                               : s_gpu.color_offset;
++            int drawn = s_gpu.drawn_offset != 0;
++            uint32_t done = drawn ? s_gpu.drawn_offset : s_gpu.color_offset;
++            uint32_t pitch = drawn && s_gpu.drawn_pitch ? s_gpu.drawn_pitch : s_gpu.pitch;
+             if (done) {
+                 uint32_t show = done;
+                 if (lazy_flip()) {
+                     uint8_t *base = (uint8_t *)xbox_GetMemoryOffset() + dma_resolve(done);
+-                    uint32_t h = s_gpu.clip_y + s_gpu.clip_h;
++                    uint32_t h = drawn && s_gpu.drawn_height ? s_gpu.drawn_height
++                                                             : s_gpu.clip_y + s_gpu.clip_h;
+                     /* With RECOMP_ASYNC_FLIP the call returns the previous
+                      * frame's buffer (published without a GPU wait); the window
+                      * shows that, one frame behind. */
+-                    show = nv2a_gpu_flip(base, (size_t)s_gpu.pitch * (h ? h : 1u),
+-                                         done, s_gpu.pitch);
++                    show = nv2a_gpu_flip(base, (size_t)pitch * (h ? h : 1u),
++                                         done, pitch);
+                     if (!show) show = done;
+                 } else {
+                     nv2a_pb_exec_flush();
+                 }
+                 present_pvideo_overlay(show);
+-                xbox_FramebufferWindowSet(dma_resolve(show), s_gpu.pitch);
+-                xbox_FramebufferWindowPresent(dma_resolve(show), s_gpu.pitch);
++                xbox_FramebufferWindowSet(dma_resolve(show), pitch);
++                xbox_FramebufferWindowPresent(dma_resolve(show), pitch);
+             } else {
+                 nv2a_pb_exec_flush();
+             }
+diff --git a/src/video/fb_present.c b/src/video/fb_present.c
+index 712b158..9edea73 100644
+--- a/src/video/fb_present.c
++++ b/src/video/fb_present.c
+@@ -91,6 +91,20 @@ void xbox_FramebufferWindowPresent(uint32_t fb_va, uint32_t pitch)
+ 
+         if (bpp == 4) {
+             memcpy(dst, row, (size_t)s_fb_width * 4);
++        } else if (bpp == 8) {
++            /* A 2x1 anti-aliased 32-bit surface: twice the window's width at
++             * the same height. A title whose last draw before the flip went
++             * into its supersampled scene buffer rather than the display
++             * buffer (Turok Evolution, logo and title screens) presents that;
++             * blanking it left the window black. Averaging each pair is the
++             * resolve the title would have done. */
++            const uint32_t *p = (const uint32_t *)row;
++            for (x = 0; x < s_fb_width; x++) {
++                uint32_t a = p[2 * x], b = p[2 * x + 1];
++                dst[x] = ((((a >> 16) & 0xFF) + ((b >> 16) & 0xFF)) / 2) << 16
++                       | ((((a >> 8) & 0xFF) + ((b >> 8) & 0xFF)) / 2) << 8
++                       | (((a & 0xFF) + (b & 0xFF)) / 2);
++            }
+         } else if (bpp == 2) {
+             const uint16_t *p = (const uint16_t *)row;
+             for (x = 0; x < s_fb_width; x++) {
+@@ -667,6 +681,20 @@ static void fb_convert(const uint8_t *src, uint32_t bpp)
+ 
+         if (bpp == 4) {
+             memcpy(dst, row, (size_t)s_fb_width * 4);
++        } else if (bpp == 8) {
++            /* A 2x1 anti-aliased 32-bit surface: twice the window's width at
++             * the same height. A title whose last draw before the flip went
++             * into its supersampled scene buffer rather than the display
++             * buffer (Turok Evolution, logo and title screens) presents that;
++             * blanking it left the window black. Averaging each pair is the
++             * resolve the title would have done. */
++            const uint32_t *p = (const uint32_t *)row;
++            for (x = 0; x < s_fb_width; x++) {
++                uint32_t a = p[2 * x], b = p[2 * x + 1];
++                dst[x] = ((((a >> 16) & 0xFF) + ((b >> 16) & 0xFF)) / 2) << 16
++                       | ((((a >> 8) & 0xFF) + ((b >> 8) & 0xFF)) / 2) << 8
++                       | (((a & 0xFF) + (b & 0xFF)) / 2);
++            }
+         } else if (bpp == 2) {
+             const uint16_t *p = (const uint16_t *)row;
+             for (x = 0; x < s_fb_width; x++) {
