@@ -219,6 +219,10 @@ static void print_guest_context(void *rip)
 typedef struct MCPXAPUState MCPXAPUState;
 extern MCPXAPUState *mcpx_apu_init_standalone(uint8_t *ram_ptr);
 extern MCPXAPUState *g_apu_state;
+extern bool apu_hook_handle_mmio(PCONTEXT ctx, uintptr_t fault_addr,
+                                 uint32_t fault_xbox_va, int is_write);
+extern int xbox_Nv2aNativeFencesEnabled(void);
+extern int xbox_Nv2aSoftwareMethodHandler(uint32_t routine, uint32_t context);
 
 /* xbox_nv2a's MMIO hook (src/nv2a/nv2a_mmio_hook.h). */
 extern void nv2a_hook_init(ptrdiff_t xbox_mem_offset);
@@ -247,15 +251,21 @@ static LONG CALLBACK veh_handler(PEXCEPTION_POINTERS ep)
             }
         }
 
-        /* Trapped hardware registers (APU, USB OHCI) -> their models.
+        /* APU registers -> the emulated APU.
          *
          * The other half of RECOMP_AC97_READY: reporting the codec ready is
          * what lets DirectSoundCreate past its first gate, and from there it
          * drives the APU directly, so the registers have to fault to be seen.
          * "Handled" means the access was decoded and the instruction stepped
-         * over, so execution resumes instead of unwinding. */
-        if (xbox_VehMmioFault(ep))
-            return EXCEPTION_CONTINUE_EXECUTION;
+         * over, so execution resumes instead of unwinding. (The aknavj fork
+         * has no xbox_VehMmioFault; this is its template's routing.) */
+        {
+            uint32_t xbox_va = (uint32_t)(fault_addr - (uintptr_t)g_xbox_mem_offset);
+            if (xbox_va >= XBOX_MCPX_BASE && xbox_va < XBOX_MCPX_APU_MMIO_END
+                    && apu_hook_handle_mmio(ep->ContextRecord, fault_addr, xbox_va,
+                           ep->ExceptionRecord->ExceptionInformation[0] ? 1 : 0))
+                return EXCEPTION_CONTINUE_EXECUTION;
+        }
 
         fprintf(stderr, "[CRASH] Access violation at RIP=0x%llX, fault addr=0x%llX (%s)\n",
             (unsigned long long)ep->ContextRecord->Rip,
@@ -331,6 +341,20 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
      * and renders with nothing on screen. */
     if (!getenv("RECOMP_FB_WINDOW"))
         _putenv_s("RECOMP_FB_WINDOW", "1");
+    /* The aknavj fork's executor writes semaphore releases through the
+     * GPU's own DMA context ("native fences"); its pushbuffer walker relies
+     * on those being honest. Off by default in the fork. */
+    if (!getenv("RECOMP_NV2A_NATIVE_FENCES"))
+        _putenv_s("RECOMP_NV2A_NATIVE_FENCES", "1");
+    /* What the aknavj fork pairs with native fences (as in its scghost
+     * project): the vblank clock, events D3D builds itself (its fence wait
+     * sleeps on one at device+0x2564), and heap reuse. */
+    if (!getenv("RECOMP_VBLANK"))
+        _putenv_s("RECOMP_VBLANK", "1");
+    if (!getenv("RECOMP_TITLE_KEVENTS"))
+        _putenv_s("RECOMP_TITLE_KEVENTS", "1");
+    if (!getenv("RECOMP_HEAP_RECLAIM"))
+        _putenv_s("RECOMP_HEAP_RECLAIM", "1");
     printf("Loading XBE...\n");
 
     /* Install VEH handler (first handler in chain) */
@@ -431,6 +455,18 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     if (!recomp_dispatch_init())
         fprintf(stderr, "[BOOT] flat dispatch unavailable; "
                         "indirect calls will use the binary search\n");
+
+    /* D3D's software methods (NV097 method 0x0100 carrying a request).
+     * When D3D finds the GPU far behind a fence it patches one into the
+     * pushbuffer and sleeps on an event that the GPU's interrupt sets by
+     * running CMiniport::SoftwareMethod. That is sub_0019D840 here: thiscall,
+     * this[0] the register base, a switch on (param & 0x1F) - 1, ret 4. Its
+     * object is the context D3D gives KeConnectInterrupt (0x001A4350, vector
+     * 3). Unregistered, the fence wait slept forever ~10 s into boot. Needs
+     * the dispatch table, hence after recomp_dispatch_init. */
+    if (xbox_Nv2aNativeFencesEnabled()
+            && xbox_Nv2aSoftwareMethodHandler(0x0019D840u, 0x001A4350u) < 0)
+        fprintf(stderr, "[BOOT] D3D software-method handler not registered\n");
 
     /* Arm the hang watchdog. Does nothing unless RECOMP_WATCHDOG_SECS is set,
      * and must be called from this thread -- the guest registers it samples are

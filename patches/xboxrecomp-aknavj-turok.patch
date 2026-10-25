@@ -1,0 +1,177 @@
+diff --git a/src/kernel/kernel_file.c b/src/kernel/kernel_file.c
+index 3446243..a728be6 100644
+--- a/src/kernel/kernel_file.c
++++ b/src/kernel/kernel_file.c
+@@ -52,6 +52,22 @@ static const char* get_xbox_path(PXBOX_OBJECT_ATTRIBUTES ObjectAttributes)
+ #define XBOX_BYTES_PER_SECTOR       512u
+ #define XBOX_SECTORS_PER_CLUSTER    32u      /* 512 * 32 = 16384 */
+ 
++/* The utility drive is the exception to 16 KB. XAPI formats the cache
++ * partition it mounts as Z: with the cluster size the XBE asks for in
++ * InitFlags bits 30-31 (16 KB << n), and re-checks it on every boot against
++ * FileFsSizeInformation. Turok Evolution asks for 64 KB: told 16 KB, it decides
++ * the drive is unformatted, formats it, and reboots to the dashboard -- a clean
++ * HalReturnToFirmware(2) before the title has drawn anything. The header is
++ * mapped at its XBE base, so InitFlags is read from guest memory. */
++extern ptrdiff_t g_xbox_mem_offset;
++#define XBOX_XBE_INIT_FLAGS_VA      0x00010124u
++
++static ULONG xbox_utility_sectors_per_cluster(void)
++{
++    uint32_t flags = *(const uint32_t *)((uintptr_t)XBOX_XBE_INIT_FLAGS_VA + g_xbox_mem_offset);
++    return XBOX_SECTORS_PER_CLUSTER << (flags >> 30);
++}
++
+ /* ======================================================================== */
+ /* Shared by both backends. kernel_bridge.c calls xbox_LastFileError()
+  * unconditionally, so defining it only under _WIN32 leaves every POSIX link
+@@ -114,6 +130,49 @@ static DWORD xbox_share_to_win32(ULONG Share)
+     return result;
+ }
+ 
++/* Volume handles on a cache partition (3-5), the ones whose cluster size
++ * comes from InitFlags (see xbox_utility_sectors_per_cluster). A volume open
++ * is redirected to the directory holding the image, and every partition's
++ * image lives in the same directory, so the host path cannot tell Partition5
++ * from Partition1 afterwards. NtCreateFile marks the handle while it still
++ * knows; NtClose drops the mark. */
++#define UTILITY_VOLUME_MAX 16
++static HANDLE s_utility_volume[UTILITY_VOLUME_MAX];
++static SRWLOCK s_utility_volume_lock = SRWLOCK_INIT;
++
++static int is_cache_partition_image(const WCHAR *leaf)
++{
++    return _wcsicmp(leaf, L"Partition3.img") == 0
++        || _wcsicmp(leaf, L"Partition4.img") == 0
++        || _wcsicmp(leaf, L"Partition5.img") == 0;
++}
++
++static void utility_volume_mark(HANDLE h)
++{
++    int i;
++    AcquireSRWLockExclusive(&s_utility_volume_lock);
++    for (i = 0; i < UTILITY_VOLUME_MAX; i++)
++        if (!s_utility_volume[i]) { s_utility_volume[i] = h; break; }
++    ReleaseSRWLockExclusive(&s_utility_volume_lock);
++}
++
++/* Returns 1 if h was marked; drop also clears it. */
++static int utility_volume_find(HANDLE h, int drop)
++{
++    int i, was = 0;
++    if (!h || h == INVALID_HANDLE_VALUE)
++        return 0;
++    AcquireSRWLockExclusive(&s_utility_volume_lock);
++    for (i = 0; i < UTILITY_VOLUME_MAX; i++)
++        if (s_utility_volume[i] == h) {
++            if (drop) s_utility_volume[i] = NULL;
++            was = 1;
++            break;
++        }
++    ReleaseSRWLockExclusive(&s_utility_volume_lock);
++    return was;
++}
++
+ /* Translate an Xbox OBJECT_ATTRIBUTES path to a Win32 wide path */
+ static BOOL translate_obj_path(PXBOX_OBJECT_ATTRIBUTES ObjectAttributes,
+                                WCHAR* win_path, DWORD buf_size)
+@@ -144,6 +203,7 @@ NTSTATUS __stdcall xbox_NtCreateFile(
+     WCHAR win_path[MAX_PATH];
+     HANDLE h;
+     DWORD flags_and_attrs = FILE_ATTRIBUTE_NORMAL;
++    int utility_volume = 0;
+     (void)AllocationSize;
+ 
+     if (!FileHandle || !ObjectAttributes)
+@@ -171,6 +231,7 @@ NTSTATUS __stdcall xbox_NtCreateFile(
+         !(GetFileAttributesW(win_path) & FILE_ATTRIBUTE_DIRECTORY)) {
+         WCHAR *slash = wcsrchr(win_path, L'\\');
+         if (slash && slash != win_path) {
++            utility_volume = is_cache_partition_image(slash + 1);
+             *slash = 0;
+             xbox_log(XBOX_LOG_INFO, XBOX_LOG_FILE,
+                      "NtCreateFile: directory open of a device image, "
+@@ -223,6 +284,10 @@ NTSTATUS __stdcall xbox_NtCreateFile(
+     }
+ 
+     *FileHandle = h;
++    /* Reused HANDLE values: clear any stale mark before deciding. */
++    utility_volume_find(h, 1);
++    if (utility_volume)
++        utility_volume_mark(h);
+     if (IoStatusBlock) {
+         IoStatusBlock->Status = STATUS_SUCCESS;
+         IoStatusBlock->Information = (CreateDisposition == XBOX_FILE_CREATE) ? 2 : 1;
+@@ -321,6 +386,7 @@ NTSTATUS __stdcall xbox_NtClose(HANDLE Handle)
+ {
+     XBOX_TRACE(XBOX_LOG_FILE, "NtClose(handle=%p)", Handle);
+     if (Handle && Handle != INVALID_HANDLE_VALUE) {
++        utility_volume_find(Handle, 1);
+         xbox_dir_context_drop(Handle);
+         CloseHandle(Handle);
+         return STATUS_SUCCESS;
+@@ -519,7 +585,7 @@ NTSTATUS __stdcall xbox_NtQueryVolumeInformationFile(
+     HANDLE FileHandle, PXBOX_IO_STATUS_BLOCK IoStatusBlock,
+     PVOID FsInformation, ULONG Length, XBOX_FS_INFORMATION_CLASS FsInformationClass)
+ {
+-    (void)FileHandle; (void)Length;
++    (void)Length;
+     if (!IoStatusBlock || !FsInformation)
+         return STATUS_INVALID_PARAMETER;
+ 
+@@ -527,15 +593,18 @@ NTSTATUS __stdcall xbox_NtQueryVolumeInformationFile(
+         case XboxFileFsSizeInformation: {
+             PXBOX_FILE_FS_SIZE_INFORMATION info = (PXBOX_FILE_FS_SIZE_INFORMATION)FsInformation;
+             ULARGE_INTEGER free_bytes, total_bytes, total_free;
++            ULONG spc = utility_volume_find(FileHandle, 0)
++                      ? xbox_utility_sectors_per_cluster()
++                      : XBOX_SECTORS_PER_CLUSTER;
+             if (GetDiskFreeSpaceExW(NULL, &free_bytes, &total_bytes, &total_free)) {
+                 info->BytesPerSector = XBOX_BYTES_PER_SECTOR;
+-                info->SectorsPerAllocationUnit = XBOX_SECTORS_PER_CLUSTER;
++                info->SectorsPerAllocationUnit = spc;
+                 ULONGLONG cs = (ULONGLONG)info->BytesPerSector * info->SectorsPerAllocationUnit;
+                 info->TotalAllocationUnits.QuadPart = total_bytes.QuadPart / cs;
+                 info->AvailableAllocationUnits.QuadPart = free_bytes.QuadPart / cs;
+             } else {
+                 info->BytesPerSector = XBOX_BYTES_PER_SECTOR;
+-                info->SectorsPerAllocationUnit = XBOX_SECTORS_PER_CLUSTER;
++                info->SectorsPerAllocationUnit = spc;
+                 info->TotalAllocationUnits.QuadPart = 1048576;
+                 info->AvailableAllocationUnits.QuadPart = 524288;
+             }
+diff --git a/src/kernel/nv2a_gpu_d3d11.cpp b/src/kernel/nv2a_gpu_d3d11.cpp
+index f031faf..99ffb16 100644
+--- a/src/kernel/nv2a_gpu_d3d11.cpp
++++ b/src/kernel/nv2a_gpu_d3d11.cpp
+@@ -2520,6 +2520,14 @@ static bool make_sampler(const Nv2aGpuTexture &binding, ComPtr<ID3D11SamplerStat
+     uint32_t minimum = (binding.filter >> 16) & 255u, maximum = (binding.filter >> 24) & 15u;
+     if (!minimum) minimum = 1;
+     if (!maximum) maximum = 1;
++    /* The 2D convolution kernels (MIN 7 CONVOLUTION_2D_LOD0, MAG 4
++     * CONVOLUTION_2D) have no D3D11 sampler. Xbox D3D uses them to resolve an
++     * anti-aliased surface into the displayed one (Turok Evolution's
++     * 1280x480 -> 640x480 present, filter 0x04072000); rejecting them dropped
++     * that draw, so nothing reached the screen. Bilinear is the nearest
++     * built-in equivalent. */
++    if (minimum == 7) minimum = 2;
++    if (maximum == 4) maximum = 2;
+     if (minimum > 6 || maximum > 2) return false;
+     D3D11_SAMPLER_DESC description = {};
+     description.AddressU = texture_address(binding.address_u);
+@@ -3092,7 +3100,14 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+         if (!binding.source_bytes) return reject("missing texture data");
+         views[stage] = get_texture(binding, *surface);
+         if (!views[stage]) return reject("texture upload or resource alias");
+-        if (!make_sampler(binding, samplers[stage])) return reject("texture filter, addressing or LOD state");
++        if (!make_sampler(binding, samplers[stage])) {
++            static unsigned shown;   /* which state was refused, not just that one was */
++            if (shown++ < 8)
++                std::fprintf(stderr, "[GPU-D3D11] sampler: stage %u filter %08X address %u/%u/%u control0 %08X valid %u\n",
++                             stage, binding.filter, binding.address_u, binding.address_v, binding.address_w,
++                             binding.control0, binding.control0_valid);
++            return reject("texture filter, addressing or LOD state");
++        }
+         constants.texture_info[stage][0] = (float)binding.width; constants.texture_info[stage][1] = (float)binding.height; constants.texture_info[stage][2] = (float)binding.linear;
+         constants.texture_key[stage][0] = binding.color_key;
+         constants.texture_key[stage][1] = binding.format == 0x03 || binding.format == 0x07 ||
