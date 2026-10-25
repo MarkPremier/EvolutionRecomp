@@ -53,6 +53,49 @@ extern ptrdiff_t g_xbox_mem_offset;
  * here: on the aknavj toolkit, native fences (RECOMP_NV2A_NATIVE_FENCES)
  * write the semaphore through the GPU's own DMA context instead. */
 
+#define TUROK_MEM32(va) (*(volatile uint32_t *)((uintptr_t)(va) + g_xbox_mem_offset))
+#define TUROK_D3D_DEVICE_PTR   0x001A1AD0u
+
+/* Thread-local like the rest of the register file; see main.c. */
+extern __declspec(thread) uint32_t g_esp;
+
+/* ── D3D GetVisibilityTestResult (sub_00194B40) ────────────── */
+
+/*
+ * GetVisibilityTestResult(index, *result, *timestamp) finds the test's 16-byte
+ * report slot (table at device+0x39C, 256 slots per page) and returns
+ * D3DERR_TESTINCOMPLETE (0x88760828) while the slot's status word is still
+ * 0xFFFFFFFF, i.e. until the GPU has executed the GET_REPORT.
+ *
+ * Turok tests its foliage clusters (palm crowns, bushes) this way and leaves
+ * out any whose result is not in. The pushbuffer executor runs behind the
+ * title, so some results were not in yet, and the foliage came and went from
+ * frame to frame. The toolkit answers every test "fully visible" anyway (it
+ * has no real occlusion counter on the D3D11 path), so an unfinished test is
+ * given that same answer now rather than "not yet": the slot is completed as
+ * visible and the original function reads it. When the executor reaches the
+ * GET_REPORT it writes the same verdict.
+ */
+extern void sub_00194B40_gen(void);
+
+void sub_00194B40(void)
+{
+    uint32_t index = TUROK_MEM32(g_esp + 4);
+    uint32_t dev = TUROK_MEM32(TUROK_D3D_DEVICE_PTR);
+    uint32_t page = dev ? TUROK_MEM32(dev + 0x39C + (index >> 8) * 4) : 0;
+
+    if (page) {
+        uint32_t slot = page + (index & 0xFFu) * 16u;
+        if (TUROK_MEM32(slot + 0xC) == 0xFFFFFFFFu) {
+            TUROK_MEM32(slot + 0x0) = 0;           /* timestamp */
+            TUROK_MEM32(slot + 0x4) = 0;
+            TUROK_MEM32(slot + 0x8) = 640u * 480u; /* pixels passed: all */
+            TUROK_MEM32(slot + 0xC) = 0;           /* done */
+        }
+    }
+    sub_00194B40_gen();
+}
+
 /* ── Manual function overrides ─────────────────────────────── */
 
 /*
