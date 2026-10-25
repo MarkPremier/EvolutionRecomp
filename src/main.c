@@ -359,10 +359,15 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
      * 640x480) rather than whichever surface a frame's last draw hit. */
     if (!getenv("RECOMP_PRESENT_SCANOUT"))
         _putenv_s("RECOMP_PRESENT_SCANOUT", "1");
-    /* The console presents at the display's 60 Hz; uncapped the title screen
-     * swung between 100 and 240 fps. RECOMP_FPS_CAP=0 runs uncapped. */
+    /* One flip per emulated vertical blank, as FLIP_STALL does on the console.
+     * Turok draws its title overlay (logo, Press START) only on frames that saw
+     * a vblank tick: uncapped, the overlay was missing from ~60% of frames, and
+     * a fixed 60 fps cap on the host clock still dropped it whenever the two
+     * clocks drifted apart. RECOMP_FPS_CAP=0 runs uncapped, =<hz> fixed. */
     if (!getenv("RECOMP_FPS_CAP"))
-        _putenv_s("RECOMP_FPS_CAP", "60");
+        _putenv_s("RECOMP_FPS_CAP", "vblank");
+    /* No timeBeginPeriod(1): it slowed the intro movie to a few fps. The
+     * toolkit's vblank and flip waits use high-resolution waitable timers. */
     printf("Loading XBE...\n");
 
     /* Install VEH handler (first handler in chain) */
