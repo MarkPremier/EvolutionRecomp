@@ -32,6 +32,7 @@
 
 #include <windows.h>
 #include <dbghelp.h>
+#include <tlhelp32.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
@@ -236,6 +237,71 @@ extern void nv2a_hook_init(ptrdiff_t xbox_mem_offset);
 extern bool nv2a_hook_handle_mmio(PCONTEXT ctx, uintptr_t fault_addr,
                                   uint32_t fault_xbox_va, int is_write);
 
+/* DIAG: hardware watchpoint on one guest byte.
+ * RECOMP_HWWATCH=<guest address> armed RECOMP_HWWATCH_SEC seconds in, on every
+ * thread; each distinct instruction that reads or writes it is printed once
+ * (look the address up with tools/symbolize.py and the .map). */
+static uintptr_t g_watch_native;
+static volatile LONG g_watch_seen_count;
+static uintptr_t g_watch_seen[64];
+
+static LONG CALLBACK watch_veh(PEXCEPTION_POINTERS ep)
+{
+    if (ep->ExceptionRecord->ExceptionCode != EXCEPTION_SINGLE_STEP || !(ep->ContextRecord->Dr6 & 1))
+        return EXCEPTION_CONTINUE_SEARCH;
+    uintptr_t rip = (uintptr_t)ep->ExceptionRecord->ExceptionAddress;
+    LONG n = g_watch_seen_count, i;
+    for (i = 0; i < n && g_watch_seen[i] != rip; i++) {}
+    if (i == n && n < 64) {
+        g_watch_seen[n] = rip;
+        InterlockedIncrement(&g_watch_seen_count);
+        fprintf(stderr, "[WATCH] access from RIP %p value %02X thread %lu\n", (void *)rip,
+                *(volatile uint8_t *)g_watch_native, GetCurrentThreadId());
+        fflush(stderr);
+    }
+    ep->ContextRecord->Dr6 = 0;
+    return EXCEPTION_CONTINUE_EXECUTION;
+}
+
+static DWORD WINAPI watch_arm_thread(LPVOID arg)
+{
+    (void)arg;
+    const char *sec = getenv("RECOMP_HWWATCH_SEC");
+    Sleep((DWORD)(sec ? atoi(sec) : 0) * 1000u);
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    THREADENTRY32 te = { sizeof te };
+    int armed = 0;
+    for (BOOL ok = Thread32First(snap, &te); ok; ok = Thread32Next(snap, &te)) {
+        if (te.th32OwnerProcessID != GetCurrentProcessId() || te.th32ThreadID == GetCurrentThreadId())
+            continue;
+        HANDLE th = OpenThread(THREAD_GET_CONTEXT | THREAD_SET_CONTEXT | THREAD_SUSPEND_RESUME, FALSE, te.th32ThreadID);
+        if (!th) continue;
+        SuspendThread(th);
+        CONTEXT c = { 0 };
+        c.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+        if (GetThreadContext(th, &c)) {
+            c.Dr0 = g_watch_native;
+            c.Dr7 = (c.Dr7 & ~0xF0003ull) | 1ull | (3ull << 16);   /* L0, read/write, 1 byte */
+            if (SetThreadContext(th, &c)) armed++;
+        }
+        ResumeThread(th);
+        CloseHandle(th);
+    }
+    CloseHandle(snap);
+    fprintf(stderr, "[WATCH] armed on %d threads at native %p\n", armed, (void *)g_watch_native);
+    fflush(stderr);
+    return 0;
+}
+
+static void watch_start(ptrdiff_t mem_offset)
+{
+    const char *addr = getenv("RECOMP_HWWATCH");
+    if (!addr) return;
+    g_watch_native = (uintptr_t)mem_offset + (uintptr_t)strtoul(addr, NULL, 0);
+    AddVectoredExceptionHandler(1, watch_veh);
+    CloseHandle(CreateThread(NULL, 0, watch_arm_thread, NULL, 0, NULL));
+}
+
 static LONG CALLBACK veh_handler(PEXCEPTION_POINTERS ep)
 {
     if (ep->ExceptionRecord->ExceptionCode == EXCEPTION_ACCESS_VIOLATION) {
@@ -377,13 +443,18 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
      * clocks drifted apart. RECOMP_FPS_CAP=0 runs uncapped, =<hz> fixed. */
     if (!getenv("RECOMP_FPS_CAP"))
         _putenv_s("RECOMP_FPS_CAP", "vblank");
-    /* Controllers: the emulated USB host controllers, two root ports, and
-     * whichever XInput slot has a pad plugged in (as in the fork's scghost
-     * project). */
+    /* Controllers: the emulated USB host controller and whichever XInput slot
+     * has a pad plugged in (as in the fork's scghost project). XAPI numbers
+     * the console's controller ports from root-hub ports 3, 4, 1, 2: the pad
+     * on root port 0 (of 2) was Turok's controller slot 3, measured in its
+     * per-port input state at 0x24F088 + slot * 0x118. Four root ports with
+     * the pad on index 2 make it controller 1, as on the console. */
     if (!getenv("RECOMP_USB"))
         _putenv_s("RECOMP_USB", "1");
     if (!getenv("RECOMP_USB_NDP"))
-        _putenv_s("RECOMP_USB_NDP", "2");
+        _putenv_s("RECOMP_USB_NDP", "4");
+    if (!getenv("RECOMP_USB_PORT"))
+        _putenv_s("RECOMP_USB_PORT", "2");
     if (!getenv("RECOMP_XINPUT_SLOT"))
         _putenv_s("RECOMP_XINPUT_SLOT", "auto");
     /* No timeBeginPeriod(1): it slowed the intro movie to a few fps. The
@@ -418,6 +489,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     }
 
     g_xbox_mem_offset = xbox_GetMemoryOffset();
+    watch_start(g_xbox_mem_offset);   /* DIAG: RECOMP_HWWATCH */
     printf("Xbox memory mapped. Offset: 0x%llX\n", (unsigned long long)g_xbox_mem_offset);
 
     /* The NV2A model, and the PVIDEO trap the video overlay needs. After the

@@ -21,6 +21,7 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <stddef.h>   /* ptrdiff_t */
+#include <stdlib.h>   /* getenv */
 
 /* ── ICALL trace ring buffer ───────────────────────────────── */
 
@@ -46,7 +47,7 @@ typedef void (*recomp_func_t)(void);
 
 /* ── Register state (defined in xbox_memory_layout.c) ──────── */
 
-extern uint32_t g_eax;
+extern __declspec(thread) uint32_t g_eax;   /* thread-local, like the whole register file */
 extern ptrdiff_t g_xbox_mem_offset;
 
 /* The D3D fence-wait wrapper and fence-rescue thread from main are not

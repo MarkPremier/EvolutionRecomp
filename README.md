@@ -19,10 +19,13 @@ CPU-renderer build (about 9 fps on the title screen).
   the title screen and menus.
 - New game reaches Chapter 1: terrain, jungle, weapon and HUD render at about
   58 fps, without flicker.
-- Controller works (any XInput pad).
-- Known issues: no cast shadows; the sky is often flat blue; an occasional
-  crash in the sound code; on some launches the game stops reading the
-  controller a few seconds after boot.
+- Controller works (any XInput pad), as controller 1: move, look, jump,
+  fire, weapon switching and pause.
+- Shadow maps render (the terrain receives them); not yet checked on screen
+  next to a caster. `RECOMP_SHADOWS=0` turns them off.
+- Known issues: the Xbox version runs at 30 fps and this runs at ~58, which
+  may speed up anything the game ties to frame rate; environment-map layers
+  (water, Tek bow) and cave lighting are not yet compared with the console.
 
 ## What you need
 
@@ -118,7 +121,7 @@ Recomp/
 | `src/main.c` | Host entry point: loads the XBE, sets the runtime defaults below, calls the game's entry point |
 | `src/recomp_manual.c` | Hand-written override: D3D's GetVisibilityTestResult (sub_00194B40) completes unfinished tests as visible |
 | `seeds/manual_seeds.json` | Functions only reached through pointers (XPP init) |
-| `seeds/recomp_extra_seeds.json` | Functions the disassembler misses, found by the upstream recompiler or at runtime (`tools.seed_from_log` on an `[ICALL] Failed to resolve` log) |
+| `seeds/recomp_extra_seeds.json` | Functions the disassembler misses, found by the upstream recompiler or at runtime (`tools.seed_from_log` on an `[ICALL] Failed to resolve` log). Includes the player-action thunks (`mov eax,[ecx]; mov [ecx+0x3A4],0; jmp [eax+N]`) reached only through runtime-built tables; without them fire, pause and previous weapon did nothing |
 | `patches/xboxrecomp-aknavj-turok.patch` | The toolkit changes as one diff against aknavj 11a8aa1 |
 
 ## Runtime switches
@@ -133,7 +136,7 @@ Recomp/
 | `RECOMP_NV2A_NATIVE_FENCES=1`, `RECOMP_VBLANK=1`, `RECOMP_TITLE_KEVENTS=1`, `RECOMP_HEAP_RECLAIM=1` | The fork's fence, vblank and event handling; D3D's waits hang without them |
 | `RECOMP_PRESENT_SCANOUT=1` | Shows the display buffer the game registered, not whichever surface was drawn last |
 | `RECOMP_FPS_CAP=vblank` | One flip per emulated vblank; the title overlay only draws on frames that saw one |
-| `RECOMP_USB=1`, `RECOMP_USB_NDP=2`, `RECOMP_XINPUT_SLOT=auto` | Emulated USB controller fed by an XInput pad |
+| `RECOMP_USB=1`, `RECOMP_USB_NDP=4`, `RECOMP_USB_PORT=2`, `RECOMP_XINPUT_SLOT=auto` | Emulated USB controller fed by an XInput pad, on the root port XAPI calls controller 1 |
 
 Useful while debugging:
 
@@ -143,3 +146,8 @@ Useful while debugging:
   `_EVERY=<n>` and `_COUNT=<n>` saves consecutive frames as BMPs
 - `py -3 ..\xboxrecomp_fork\tools\symbolize.py build\Release\turok_evolution.map <RIP>`
   on a `[CRASH]` line
+- `RECOMP_HWWATCH=<guest address>` with `RECOMP_HWWATCH_SEC=<s>` sets a
+  hardware watchpoint on one guest byte after that many seconds and prints
+  each instruction that touches it (symbolize the RIPs as above)
+- `RECOMP_DRAW_ONLY=<first>-<last>`, `RECOMP_BATCH_INFO=<s>:<first>-<last>`
+  and `RECOMP_DEPTH_DUMP=<s>` isolate, describe and dump GPU batches
