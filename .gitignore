@@ -42,6 +42,7 @@ game/
 # Run/build logs
 build_log.txt
 configure_log.txt
+xbox_kernel.log
 stderr.txt
 stdout.txt
 
