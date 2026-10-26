@@ -1,19 +1,28 @@
 # EvolutionDecomp
 
 A static recompilation of **Turok: Evolution** (Xbox, USA) to native Windows,
-built with [sp00nznet/xboxrecomp](https://github.com/sp00nznet/xboxrecomp).
+built with the xboxrecomp toolkit
+([sp00nznet/xboxrecomp](https://github.com/sp00nznet/xboxrecomp), with the
+Direct3D 11 renderer from [aknavj's fork](https://github.com/aknavj/xboxrecomp)).
 
 The game's x86 code is translated to C and compiled into a Windows `.exe`;
 the Xbox kernel, GPU (NV2A) and audio (MCPX APU) are provided by the
 xboxrecomp runtime. **No game code or data is in this repository.** You need
 your own disc image, and the C code is generated from it on your machine.
 
+This branch (`d3d11-fork-experiment`) renders on the GPU. `main` is the older
+CPU-renderer build (about 9 fps on the title screen).
+
 ## Status
 
-- Boots, plays the Acclaim logo and the intro movie, reaches the title screen.
-- Rendering runs on the toolkit's CPU rasterizer: about 9 fps, and the title
-  screen's 3D backdrop flickers. Next step is a Direct3D 11 GPU backend.
-- Controller input is untested.
+- Boots through the Acclaim logo and the intro movie (full rate, ~59 fps) to
+  the title screen and menus.
+- New game reaches Chapter 1: terrain, jungle, weapon and HUD render at about
+  58 fps, without flicker.
+- Controller works (any XInput pad).
+- Known issues: no cast shadows; the sky is often flat blue; an occasional
+  crash in the sound code; on some launches the game stops reading the
+  controller a few seconds after boot.
 
 ## What you need
 
@@ -30,8 +39,9 @@ The layout this project expects, side by side:
 ```
 Recomp/
   turok/Turok - Evolution (USA)/   extracted disc (default.xbe, supertree*.tre, Data/)
-  xboxrecomp/                      the toolkit, patched
-  turok_evolution/                 this repository
+  xboxrecomp/                      sp00nznet/xboxrecomp: only its disassembler is used
+  xboxrecomp_fork/                 MarkPremier/xboxrecomp, branch turok-evolution: the runtime
+  turok_evolution/                 this repository, branch d3d11-fork-experiment
 ```
 
 1. **Extract the disc**
@@ -43,41 +53,55 @@ Recomp/
    The disc path is hard-coded in `src/main.c` (`YOUR_GAME_XBE_PATH`,
    `YOUR_GAME_DIR`); change it if yours differs.
 
-2. **Get the toolkit at the tested commit and apply this project's fixes**
+2. **Get both toolkits**
 
    ```
-   git clone https://github.com/sp00nznet/xboxrecomp.git
-   cd xboxrecomp
-   git checkout f0f8a461496a4f23d9b0aeaa284b8d70ba7ab82b
-   git apply ../turok_evolution/patches/xboxrecomp-turok.patch
+   git clone https://github.com/sp00nznet/xboxrecomp.git xboxrecomp
+   git -C xboxrecomp checkout f0f8a461496a4f23d9b0aeaa284b8d70ba7ab82b
+
+   git clone -b turok-evolution https://github.com/MarkPremier/xboxrecomp.git xboxrecomp_fork
    ```
 
-   The patch fixes three toolkit bugs this game hits:
-   the utility-drive cluster size (the game asks for 64 KB clusters and was
-   rebooting to the dashboard), RunPushBuffer handling in the pushbuffer walker
-   (desyncs, crashes and missing geometry), and garbage semaphore releases.
+   `turok-evolution` is aknavj's `modded-software-aknavj-rebased` (11a8aa1)
+   plus this game's fixes, one commit each: the utility-drive cluster size,
+   RunPushBuffer handling in the DMA walker, USB address resolution, vblank-
+   locked flips, anti-aliased surfaces and present, shadow-map stages, and
+   unmapping dynamic buffers before drawing (the flicker fix).
+   `patches/xboxrecomp-aknavj-turok.patch` holds the same changes as one diff
+   against 11a8aa1, if you would rather apply them yourself.
 
-3. **Generate the C code** (from inside `xboxrecomp/`)
+3. **Generate the C code**
+
+   The fork's own disassembler misses about a thousand functions, so the
+   upstream one runs first and its output feeds the fork's later stages:
 
    ```powershell
-   $xbe = "../turok/Turok - Evolution (USA)/default.xbe"
-   py -3 -m tools.xbe_parser $xbe --json "../turok/Turok - Evolution (USA)/turok_analysis.json"
-   py -3 -m tools.disasm $xbe --force --seed-functions ../turok_evolution/seeds/manual_seeds.json
+   $xbe = "$PWD\turok\Turok - Evolution (USA)\default.xbe"
+   $out = "$PWD\disasm_out"
+
+   cd xboxrecomp
+   py -3 -m tools.disasm $xbe --force -o $out `
+       --seed-functions ..\turok_evolution\seeds\manual_seeds.json `
+       --seed-functions ..\turok_evolution\seeds\recomp_extra_seeds.json
+   Copy-Item "$out\*.json" ..\xboxrecomp_fork\tools\disasm\output\ -Force
+
+   cd ..\xboxrecomp_fork
    py -3 -m tools.func_id $xbe
    py -3 -m tools.abi_analysis $xbe
-   py -3 -m tools.recomp $xbe --all --split 250 --gen-dir ../turok_evolution/src/recomp/gen --exclude-manual ../turok_evolution/src/recomp_manual.c
+   py -3 -m tools.recomp $xbe --all --split 250 `
+       --gen-dir ..\turok_evolution\src\recomp\gen `
+       --exclude-manual ..\turok_evolution\src\recomp_manual.c
    ```
 
-   Two things that matter:
-   - Do **not** pass `--text-only` to `tools.disasm`. The Xbox libraries the game
-     links (D3D, DSOUND, XPP, XMV) are barely swept without it.
+   - Do **not** pass `--text-only` to `tools.disasm`. The Xbox libraries the
+     game links (D3D, DSOUND, XPP, XMV) are barely swept without it.
    - `--exclude-manual` is required. Without it the hand-written overrides in
      `src/recomp_manual.c` conflict with the generated code.
 
 4. **Build** (from `turok_evolution/`, in a Developer PowerShell for VS)
 
    ```
-   cmake -S . -B build
+   cmake -S . -B build -DXBOXRECOMP_DIR=../xboxrecomp_fork
    cmake --build build --config Release --parallel
    ```
 
@@ -91,21 +115,31 @@ Recomp/
 
 | Path | What it is |
 |------|------------|
-| `src/main.c` | Host entry point: loads the XBE, starts the runtime, calls the game's entry point |
-| `src/recomp_manual.c` | Hand-written overrides of game/XDK functions (the D3D fence wait) |
-| `seeds/manual_seeds.json` | Function addresses the disassembler cannot find on its own |
-| `patches/xboxrecomp-turok.patch` | Fixes to the toolkit, against the commit above |
+| `src/main.c` | Host entry point: loads the XBE, sets the runtime defaults below, calls the game's entry point |
+| `src/recomp_manual.c` | Hand-written override: D3D's GetVisibilityTestResult (sub_00194B40) completes unfinished tests as visible |
+| `seeds/manual_seeds.json` | Functions only reached through pointers (XPP init) |
+| `seeds/recomp_extra_seeds.json` | Functions the disassembler misses, found by the upstream recompiler or at runtime (`tools.seed_from_log` on an `[ICALL] Failed to resolve` log) |
+| `patches/xboxrecomp-aknavj-turok.patch` | The toolkit changes as one diff against aknavj 11a8aa1 |
 
 ## Runtime switches
 
-`main.c` turns these on by default; set one to `0` to override.
+`main.c` turns these on by default; set one yourself to override it.
 
 | Variable | Why |
 |----------|-----|
-| `RECOMP_PB_EXEC=1` | Executes the GPU pushbuffer; D3D's fence waits never return without it |
+| `RECOMP_PB_EXEC=1` | Executes the GPU pushbuffer |
 | `RECOMP_AC97_READY=1` | Emulated audio; the game's sound init spins forever without it |
 | `RECOMP_FB_WINDOW=1` | Opens the game window |
+| `RECOMP_NV2A_NATIVE_FENCES=1`, `RECOMP_VBLANK=1`, `RECOMP_TITLE_KEVENTS=1`, `RECOMP_HEAP_RECLAIM=1` | The fork's fence, vblank and event handling; D3D's waits hang without them |
+| `RECOMP_PRESENT_SCANOUT=1` | Shows the display buffer the game registered, not whichever surface was drawn last |
+| `RECOMP_FPS_CAP=vblank` | One flip per emulated vblank; the title overlay only draws on frames that saw one |
+| `RECOMP_USB=1`, `RECOMP_USB_NDP=2`, `RECOMP_XINPUT_SLOT=auto` | Emulated USB controller fed by an XInput pad |
 
-Useful while debugging: `RECOMP_WATCHDOG_SECS=N` (dump state on a hang),
-`RECOMP_FB_DUMP=<path>` with `RECOMP_FB_WINDOW_DUMP_EVERY=<frames>` (screenshots),
-and `tools/symbolize.py build/Release/turok_evolution.map <RIP>` on a `[CRASH]` line.
+Useful while debugging:
+
+- `RECOMP_PAD_SCRIPT=62000:start,66000:start,...` presses buttons at set
+  times (ms since the first controller poll)
+- `RECOMP_FLIP_DUMP_DIR=<dir>` with `RECOMP_FLIP_DUMP_AFTER_SEC=<s>`,
+  `_EVERY=<n>` and `_COUNT=<n>` saves consecutive frames as BMPs
+- `py -3 ..\xboxrecomp_fork\tools\symbolize.py build\Release\turok_evolution.map <RIP>`
+  on a `[CRASH]` line
