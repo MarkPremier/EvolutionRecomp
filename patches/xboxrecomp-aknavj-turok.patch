@@ -345,7 +345,7 @@ index f031faf..54dd8f4 100644
          constants.texture_key[stage][0] = binding.color_key;
          constants.texture_key[stage][1] = binding.format == 0x03 || binding.format == 0x07 ||
 diff --git a/src/kernel/nv2a_pb_exec.c b/src/kernel/nv2a_pb_exec.c
-index d7c0f20..6939955 100644
+index d7c0f20..48f1d0c 100644
 --- a/src/kernel/nv2a_pb_exec.c
 +++ b/src/kernel/nv2a_pb_exec.c
 @@ -437,6 +437,13 @@ static struct {
@@ -579,7 +579,33 @@ index d7c0f20..6939955 100644
      state.stage_program = s_gpu.shader_stage_program; state.combiners = s_gpu.combiners;
      state.shader_clip_mode = s_gpu.shader_clip_mode;
      state.shader_other_stage_input = s_gpu.shader_other_stage_input;
-@@ -3008,7 +3185,7 @@ static int gpu_submit_chunk(Nv2aGpuDraw *state, uint32_t *count)
+@@ -2869,6 +3046,25 @@ static int gpu_raster_batch(void)
+         if (!texture->valid) return gpu_batch_rejected("invalid texture binding");
+         if (((texture->raw_format >> 4) & 15u) == 3u)
+             binding->depth = 1u << (texture->raw_format >> 28);
++        if (mode == 2 && !binding->depth && !(texture->raw_format & 4u)) {
++            /* 3D projective lookup of a 2D texture: the NV2A shadow-map
++             * compare (r/q against a depth texture, SET_SHADOW_DEPTH_FUNC).
++             * The backend has no compare path, and rejecting deletes the
++             * shadow receivers (Turok's terrain and sky). Sample it as a
++             * lit (white) 2D stage instead. */
++            static uint32_t shown;
++            if (shown++ < 8)
++                fprintf(stderr, "[GPU] shadow-compare stage %u: texture format 0x%02X raw 0x%08X %ux%u stages 0x%X\n",
++                        stage, texture->color, texture->raw_format, texture->width, texture->height,
++                        state.stage_program);
++            state.stage_program = (state.stage_program & ~(31u << (stage * 5))) | (1u << (stage * 5));
++            binding->disabled = 1;
++            binding->source = NULL; binding->source_bytes = 0;
++            binding->width = 1; binding->height = 1; binding->pitch = 4;
++            binding->format = 0; binding->linear = 0;
++            binding->depth = 0; binding->cube = 0; binding->mip_levels = 1;
++            continue;
++        }
+         if ((mode == 2) != (binding->depth != 0) || (binding->depth && (texture->raw_format & 4u)))
+             return gpu_batch_rejected("projective volume texture dimensionality");
+         binding->source = memory + texture->offset; binding->width = texture->width; binding->height = texture->height;
+@@ -3008,7 +3204,7 @@ static int gpu_submit_chunk(Nv2aGpuDraw *state, uint32_t *count)
      }
      s_gpu.gpu_batches++;
      if (state->topology == NV2A_GPU_TOPOLOGY_TRIANGLES) s_gpu.tris_drawn += gpu_index_count / 3;
@@ -588,7 +614,7 @@ index d7c0f20..6939955 100644
      *count = 0;
      return 1;
  }
-@@ -4253,6 +4430,7 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -4253,6 +4449,7 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
          return;
  
      case NV097_FLIP_STALL:
@@ -596,7 +622,7 @@ index d7c0f20..6939955 100644
          s_gpu.flush_flip++;
          cloak_marker_idle();
          /* The stall ends when the buffer being read is the one just finished.
-@@ -4276,25 +4454,50 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -4276,25 +4473,50 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
           * per-frame re-decode of render-to-texture surfaces. */
          if (s_gpu.pitch) {
              extern void xbox_FramebufferWindowPresent(uint32_t, uint32_t);
