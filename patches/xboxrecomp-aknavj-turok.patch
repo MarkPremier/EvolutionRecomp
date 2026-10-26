@@ -1,8 +1,8 @@
 diff --git a/src/kernel/kernel_bridge.c b/src/kernel/kernel_bridge.c
-index 2f6660a..d20c9e3 100644
+index 2f6660a..bbf8a33 100644
 --- a/src/kernel/kernel_bridge.c
 +++ b/src/kernel/kernel_bridge.c
-@@ -2372,21 +2372,81 @@ static int kernel_raise_interrupt(uint32_t vector)
+@@ -2372,21 +2372,112 @@ static int kernel_raise_interrupt(uint32_t vector)
  #define NV2A_PCRTC_INTR_VBLANK (1u << 0)
  #define NV2A_VECTOR            3u
  
@@ -18,6 +18,10 @@ index 2f6660a..d20c9e3 100644
 + * the blank the way the hardware's FLIP_STALL does. */
 +static volatile LONG g_vblank_count;
 +static long long g_vblank_due, g_vblank_period, g_vblank_epoch;
++/* A flip asks for its blank (xbox_Nv2aVblankAtFlip); when the last one was
++ * raised, so the free-running schedule does not add a second in a period. */
++static volatile LONG g_vblank_flip_request;
++static long long g_vblank_last_raised;
 +
 +LONG xbox_Nv2aVblankCount(void)
 +{
@@ -31,6 +35,25 @@ index 2f6660a..d20c9e3 100644
 + * executor thread a counter wait would be holding. During Turok's intro
 + * movie that deadlock held each flip until a timeout: 2.5 fps. Returns 0
 + * while blanks are off. */
++static HANDLE g_nv2a_wake;   /* defined with the software-method dispatch */
++
++/* The flip has reached its blank: raise the vertical-blank interrupt now.
++ *
++ * On the console FLIP_STALL waits for the blank and the blank's interrupt
++ * fires at that moment, so every presented frame comes with exactly one
++ * vblank. A title that ticks its logic on the vblank and draws parts of a
++ * frame only on frames that saw a tick -- Turok Evolution's title overlay --
++ * depends on that. Blanks raised on a separate schedule drifted against the
++ * flips, and a flip that landed between two ticks showed the screen without
++ * its logo for a frame (10 times in 16 s in a screen recording). The
++ * scheduled blanks remain for when the title is not flipping. */
++void xbox_Nv2aVblankAtFlip(void)
++{
++    InterlockedExchange(&g_vblank_flip_request, 1);
++    if (g_nv2a_wake)
++        SetEvent(g_nv2a_wake);
++}
++
 +int xbox_Nv2aVblankSchedule(long long *epoch, long long *period)
 +{
 +    if (!g_vblank_period || !g_vblank_epoch)
@@ -76,22 +99,31 @@ index 2f6660a..d20c9e3 100644
  
 -    now = (long long)GetTickCount64();
 -    if (now < next_ms)
+-        return;
+-    next_ms = now + 16;                       /* ~60 Hz */
 +    QueryPerformanceCounter(&now);
 +    if (!g_vblank_epoch)
 +        g_vblank_epoch = now.QuadPart;
-+    if (now.QuadPart < g_vblank_due)
-         return;
--    next_ms = now + 16;                       /* ~60 Hz */
-+    /* The next boundary on the fixed schedule: after a stall this skips the
-+     * missed blanks rather than raising a burst of them, and stays in phase
-+     * with xbox_Nv2aVblankSchedule. */
-+    g_vblank_due = g_vblank_epoch
-+                 + ((now.QuadPart - g_vblank_epoch) / g_vblank_period + 1) * g_vblank_period;
++    if (InterlockedExchange(&g_vblank_flip_request, 0)) {
++        /* A flip's blank: raise it now. */
++    } else {
++        if (now.QuadPart < g_vblank_due)
++            return;
++        /* The next boundary on the fixed schedule: after a stall this skips
++         * the missed blanks rather than raising a burst of them, and stays in
++         * phase with xbox_Nv2aVblankSchedule. */
++        g_vblank_due = g_vblank_epoch
++                     + ((now.QuadPart - g_vblank_epoch) / g_vblank_period + 1) * g_vblank_period;
++        /* A flip already raised this period's blank. */
++        if (g_vblank_last_raised && now.QuadPart - g_vblank_last_raised < g_vblank_period * 3 / 4)
++            return;
++    }
++    g_vblank_last_raised = now.QuadPart;
 +    InterlockedIncrement(&g_vblank_count);
  
      if (!xbox_GetConnectedInterrupt(NV2A_VECTOR))
          return;
-@@ -2910,10 +2970,42 @@ static DWORD WINAPI kernel_timer_thread(LPVOID unused)
+@@ -2910,10 +3001,42 @@ static DWORD WINAPI kernel_timer_thread(LPVOID unused)
          long long now;
          int i;
  
@@ -343,7 +375,7 @@ index f031faf..54dd8f4 100644
          constants.texture_key[stage][0] = binding.color_key;
          constants.texture_key[stage][1] = binding.format == 0x03 || binding.format == 0x07 ||
 diff --git a/src/kernel/nv2a_pb_exec.c b/src/kernel/nv2a_pb_exec.c
-index d7c0f20..a23260f 100644
+index d7c0f20..9c8a1d8 100644
 --- a/src/kernel/nv2a_pb_exec.c
 +++ b/src/kernel/nv2a_pb_exec.c
 @@ -437,6 +437,13 @@ static struct {
@@ -360,7 +392,7 @@ index d7c0f20..a23260f 100644
      uint64_t pixels;
      uint32_t pixel_max;   /* brightest value any pixel write carried */
      uint32_t clip_x, clip_w, clip_y, clip_h;
-@@ -1252,6 +1259,166 @@ static void raster_triangle(const float a[2], const float b[2],
+@@ -1252,6 +1259,173 @@ static void raster_triangle(const float a[2], const float b[2],
                              const float uv[3][2], const Nv2aCpuVertex varying[3]);
  
  #ifdef _WIN32
@@ -442,16 +474,7 @@ index d7c0f20..a23260f 100644
 +        seen = count;
 +        return;
 +    }
-+    /* A blank has come since the last flip -- typically because the title
-+     * waited for it itself (BlockUntilVerticalBlank, as Turok's movie player
-+     * does): flip now. Waiting for the next boundary as well cost the movie a
-+     * second blank per frame (16-18 fps). Half a period is the floor, so this
-+     * never presents twice in one refresh. */
-+    if (count != seen && now.QuadPart - last_flip >= period / 2) {
-+        last_flip = now.QuadPart;
-+        seen = count;
-+        return;
-+    }
++    (void)count;
 +    boundary = epoch + ((last_flip - epoch) / period + 1) * period;
 +    if (now.QuadPart < boundary) {
 +        long long left = boundary - now.QuadPart;
@@ -469,6 +492,21 @@ index d7c0f20..a23260f 100644
 +    }
 +    last_flip = now.QuadPart;
 +    seen = xbox_Nv2aVblankCount();
++    /* This flip's blank, raised now as the hardware's would be. */
++    {
++        extern void xbox_Nv2aVblankAtFlip(void);
++        xbox_Nv2aVblankAtFlip();
++    }
++}
++
++/* PVIDEO is showing a frame (an XMV movie): its player paces itself off the
++ * audio clock and waits for blanks itself, so flips are left unpaced. Pacing
++ * them as well presented only 13-20 of the movie's frames a second. */
++static int pvideo_overlay_active(void)
++{
++    const uint8_t *mem = (const uint8_t *)xbox_GetMemoryOffset();
++    const volatile uint32_t *regs = (const volatile uint32_t *)(mem + 0xFD008000u);
++    return (regs[0x700 / 4] & 0x11u) && !(regs[0x704 / 4] & 1u);
 +}
 +
 +static void flip_fps_cap(void)
@@ -488,7 +526,8 @@ index d7c0f20..a23260f 100644
 +                                           TIMER_ALL_ACCESS);
 +    }
 +    if (hz == -2) {
-+        flip_wait_vblank(timer);
++        if (!pvideo_overlay_active())
++            flip_wait_vblank(timer);
 +        return;
 +    }
 +    if (!hz)
@@ -527,7 +566,7 @@ index d7c0f20..a23260f 100644
  static int gpu_clear_surface(uint32_t param)
  {
      static int enabled = -1;
-@@ -1264,8 +1431,13 @@ static int gpu_clear_surface(uint32_t param)
+@@ -1264,8 +1438,13 @@ static int gpu_clear_surface(uint32_t param)
      }
      if (!enabled || s_gpu.clip_x || s_gpu.clip_y || !s_gpu.clip_w || !s_gpu.clip_h)
          return 0;
@@ -543,7 +582,7 @@ index d7c0f20..a23260f 100644
      state.bytes_per_pixel = surface_bpp();
      state.pitch = s_gpu.pitch;
      state.depth_pitch = s_gpu.depth_pitch;
-@@ -2211,7 +2383,7 @@ static void raster_triangle(const float a[2], const float b[2],
+@@ -2211,7 +2390,7 @@ static void raster_triangle(const float a[2], const float b[2],
          }
      }
      s_gpu.tris_drawn++;
@@ -552,7 +591,7 @@ index d7c0f20..a23260f 100644
  }
  
  /* Attribute 3 is diffuse colour in every NV2A layout that sets one. Absent it,
-@@ -2772,13 +2944,22 @@ static int gpu_raster_batch(void)
+@@ -2772,13 +2951,22 @@ static int gpu_raster_batch(void)
      if (!s_gpu.combiners_configured) return gpu_batch_rejected("unconfigured combiners");
      if (surface_bpp() != 4) return gpu_batch_rejected("surface pixel format");
      if (!s_gpu.clip_w || !s_gpu.clip_h || !surface_begin_batch(memory)) return gpu_batch_rejected("surface mapping or clip extent");
@@ -581,7 +620,7 @@ index d7c0f20..a23260f 100644
      state.stage_program = s_gpu.shader_stage_program; state.combiners = s_gpu.combiners;
      state.shader_clip_mode = s_gpu.shader_clip_mode;
      state.shader_other_stage_input = s_gpu.shader_other_stage_input;
-@@ -3008,7 +3189,7 @@ static int gpu_submit_chunk(Nv2aGpuDraw *state, uint32_t *count)
+@@ -3008,7 +3196,7 @@ static int gpu_submit_chunk(Nv2aGpuDraw *state, uint32_t *count)
      }
      s_gpu.gpu_batches++;
      if (state->topology == NV2A_GPU_TOPOLOGY_TRIANGLES) s_gpu.tris_drawn += gpu_index_count / 3;
@@ -590,7 +629,7 @@ index d7c0f20..a23260f 100644
      *count = 0;
      return 1;
  }
-@@ -4253,6 +4434,7 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -4253,6 +4441,7 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
          return;
  
      case NV097_FLIP_STALL:
@@ -598,7 +637,7 @@ index d7c0f20..a23260f 100644
          s_gpu.flush_flip++;
          cloak_marker_idle();
          /* The stall ends when the buffer being read is the one just finished.
-@@ -4276,25 +4458,50 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -4276,25 +4465,50 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
           * per-frame re-decode of render-to-texture surfaces. */
          if (s_gpu.pitch) {
              extern void xbox_FramebufferWindowPresent(uint32_t, uint32_t);
@@ -802,7 +841,7 @@ index d8dc03b..595586d 100644
           ? (uint8_t *)xbox_GetMemoryOffset() + va : NULL;
  }
 diff --git a/src/video/fb_present.c b/src/video/fb_present.c
-index 712b158..3df151a 100644
+index 712b158..452100e 100644
 --- a/src/video/fb_present.c
 +++ b/src/video/fb_present.c
 @@ -91,6 +91,20 @@ void xbox_FramebufferWindowPresent(uint32_t fb_va, uint32_t pitch)
@@ -837,7 +876,7 @@ index 712b158..3df151a 100644
 +        const char *every = getenv("RECOMP_FLIP_DUMP_EVERY");
 +        unsigned step = every ? (unsigned)atoi(every) : 1u;
 +        presents++;
-+        if (dir && after && seq < 120 && presents > (unsigned)atoi(after)
++        if (dir && after && seq < (getenv("RECOMP_FLIP_DUMP_COUNT") ? (unsigned)atoi(getenv("RECOMP_FLIP_DUMP_COUNT")) : 120u) && presents > (unsigned)atoi(after)
 +                && (step <= 1u || presents % step == 0)) {
 +            char path[512];
 +            FILE *f;
@@ -885,16 +924,17 @@ index 712b158..3df151a 100644
              const uint16_t *p = (const uint16_t *)row;
              for (x = 0; x < s_fb_width; x++) {
 diff --git a/tests/d3d8_smoke/test_nv2a_shader.c b/tests/d3d8_smoke/test_nv2a_shader.c
-index 0650472..81a57ea 100644
+index 0650472..bb17462 100644
 --- a/tests/d3d8_smoke/test_nv2a_shader.c
 +++ b/tests/d3d8_smoke/test_nv2a_shader.c
-@@ -73,6 +73,9 @@ int xbox_Nv2aSoftwareMethodDeferred(uint32_t parameter, uint32_t depth_clear,
+@@ -73,6 +73,10 @@ int xbox_Nv2aSoftwareMethodDeferred(uint32_t parameter, uint32_t depth_clear,
  int xbox_Nv2aSoftwareMethodPending(void) { return 0; }
  void xbox_Nv2aAcknowledgeHandshakes(void) {}
  void xbox_Nv2aFlipPacingReport(void) {}
 +uint32_t xbox_GetDisplayFramebuffer(uint32_t *pitch) { if (pitch) *pitch = 0; return 0; }
 +long xbox_Nv2aVblankCount(void) { return 0; }
 +int xbox_Nv2aVblankSchedule(long long *epoch, long long *period) { (void)epoch; (void)period; return 0; }
++void xbox_Nv2aVblankAtFlip(void) {}
  void xbox_FramebufferWindowSet(uint32_t address, uint32_t pitch) { (void)address; (void)pitch; }
  void xbox_FramebufferWindowStart(void) {}
  void xbox_FramebufferWindowPresent(uint32_t address, uint32_t pitch) { (void)address; (void)pitch; }
