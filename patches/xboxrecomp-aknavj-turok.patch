@@ -1,3 +1,59 @@
+diff --git a/src/apu/apu_core.c b/src/apu/apu_core.c
+index c5c8a86..e703fc0 100644
+--- a/src/apu/apu_core.c
++++ b/src/apu/apu_core.c
+@@ -135,6 +135,8 @@ extern void xbox_worker_stack_free(int slot);
+ extern uint32_t xbox_GetConnectedInterrupt(uint32_t vector);
+ extern uint32_t xbox_AllocThreadTib(void);
+ extern int xbox_IrqlBlocksInterrupts(void);
++extern int xbox_AsyncGateEnter(int force);
++extern void xbox_AsyncGateLeave(void);
+ extern int xbox_IrqlEnterInterrupt(int level);
+ extern void xbox_IrqlLeaveInterrupt(int saved);
+ #if defined(_MSC_VER)
+@@ -158,12 +160,15 @@ static void apu_deliver_irq(MCPXAPUState *d)
+     uint32_t kint, routine, context;
+     uint8_t *guest_ram = (uint8_t *)(uintptr_t)xbox_GetMemoryOffset();
+     apu_guest_fn fn;
+-    int slot;
++    int slot, force = 0;
+ 
+     if (!InterlockedCompareExchange(&s_irq_line, 0, 0))
+         return;
+-    if (xbox_IrqlBlocksInterrupts() && ++held_off <= 50)
+-        return;
++    if (xbox_IrqlBlocksInterrupts()) {
++        if (++held_off <= 50)
++            return;
++        force = 1;   /* a raise that never lowers must not silence audio */
++    }
+     held_off = 0;
+     kint = xbox_GetConnectedInterrupt(APU_VECTOR);
+     if (!kint)
+@@ -185,7 +190,15 @@ static void apu_deliver_irq(MCPXAPUState *d)
+         return;
+ 
+     qemu_mutex_unlock(&d->lock);
++    /* The check above can race a guest raising IRQL; the gate cannot (see
++     * xbox_AsyncGateEnter). DirectSound's voice-list counter depends on it. */
++    if (!xbox_AsyncGateEnter(force)) {
++        xbox_worker_stack_free(slot);
++        qemu_mutex_lock(&d->lock);
++        return;
++    }
+     if (!xbox_GuestAudioGuardTryEnter()) {
++        xbox_AsyncGateLeave();
+         xbox_worker_stack_free(slot);
+         qemu_mutex_lock(&d->lock);
+         return;
+@@ -197,6 +210,7 @@ static void apu_deliver_irq(MCPXAPUState *d)
+     g_esp -= 4; *(uint32_t *)(guest_ram + g_esp) = 0xDEADBEEFu;
+     { int _irql = xbox_IrqlEnterInterrupt(16); fn(); xbox_IrqlLeaveInterrupt(_irql); }
+     xbox_GuestAudioGuardLeave();
++    xbox_AsyncGateLeave();
+     xbox_worker_stack_free(slot);
+     qemu_mutex_lock(&d->lock);
+ 
 diff --git a/src/apu/apu_vp.c b/src/apu/apu_vp.c
 index 7c36737..00fb215 100644
 --- a/src/apu/apu_vp.c
@@ -31,8 +87,23 @@ index 7c36737..00fb215 100644
      unsigned int selected_handle, list;
  
      switch (method) {
+diff --git a/src/kernel/kernel.h b/src/kernel/kernel.h
+index 9f71e6b..68c1e70 100644
+--- a/src/kernel/kernel.h
++++ b/src/kernel/kernel.h
+@@ -806,6 +806,10 @@ KIRQL   __stdcall xbox_KeGetCurrentIrql(void);
+  * Device models ask before delivering an interrupt; raising IRQL masks the
+  * line for the whole processor on hardware, not just for one thread. */
+ int     xbox_IrqlBlocksInterrupts(void);
++int     xbox_DpcGateEnter(void);   /* 0: a guest thread is at DISPATCH, try later */
++void    xbox_DpcGateLeave(void);
++int     xbox_AsyncGateEnter(int force);   /* same gate, for an ISR; 0: hold off */
++void    xbox_AsyncGateLeave(void);
+ int     xbox_IrqlRaisedCount(void);
+ int     xbox_IrqlEnterInterrupt(int level);     /* around host-run ISRs and DPCs */
+ void    xbox_IrqlLeaveInterrupt(int saved);
 diff --git a/src/kernel/kernel_bridge.c b/src/kernel/kernel_bridge.c
-index 2f6660a..f92cf85 100644
+index 2f6660a..da2b33c 100644
 --- a/src/kernel/kernel_bridge.c
 +++ b/src/kernel/kernel_bridge.c
 @@ -2372,21 +2372,112 @@ static int kernel_raise_interrupt(uint32_t vector)
@@ -156,7 +227,7 @@ index 2f6660a..f92cf85 100644
  
      if (!xbox_GetConnectedInterrupt(NV2A_VECTOR))
          return;
-@@ -2910,10 +3001,16 @@ static DWORD WINAPI kernel_timer_thread(LPVOID unused)
+@@ -2910,12 +3001,26 @@ static DWORD WINAPI kernel_timer_thread(LPVOID unused)
          long long now;
          int i;
  
@@ -172,7 +243,26 @@ index 2f6660a..f92cf85 100644
 +        (void)kernel_vblank_wait_ms;
          kernel_nv2a_software_tick();  /* D3D software methods, at DISPATCH_LEVEL */
          kernel_vblank_tick();  /* the GPU's frame clock */
++        /* DPCs and timer DPCs only while no guest thread is at DISPATCH_LEVEL
++         * (see xbox_DpcGateEnter); queued DPCs and due timers keep for the
++         * next tick. */
++        if (!xbox_DpcGateEnter())
++            continue;
++        /* And not alongside the audio ISR (which only try-enters this): DirectSound's DPC
++         * and ISR edit the same voice lists, which one CPU never interleaves. */
++        xbox_GuestAudioGuardEnter();
          kernel_drain_dpcs();   /* deferred work, before due timers */
+         now = (long long)GetTickCount64();
+ 
+@@ -2949,6 +3054,8 @@ static DWORD WINAPI kernel_timer_thread(LPVOID unused)
+                 }
+             }
+         }
++        xbox_GuestAudioGuardLeave();
++        xbox_DpcGateLeave();
+     }
+ }
+ 
 diff --git a/src/kernel/kernel_file.c b/src/kernel/kernel_file.c
 index 3446243..a728be6 100644
 --- a/src/kernel/kernel_file.c
@@ -315,6 +405,102 @@ index 3446243..a728be6 100644
                  info->TotalAllocationUnits.QuadPart = 1048576;
                  info->AvailableAllocationUnits.QuadPart = 524288;
              }
+diff --git a/src/kernel/kernel_hal.c b/src/kernel/kernel_hal.c
+index 93dc2ec..200b507 100644
+--- a/src/kernel/kernel_hal.c
++++ b/src/kernel/kernel_hal.c
+@@ -55,6 +55,78 @@ static volatile LONG g_guest_levels[256];
+ static RECOMP_TLS int t_isr_irql = -1;   /* this ISR/DPC thread's level; -1 = not in one */
+ static volatile LONG g_isr_active;       /* host ISRs/DPCs in flight */
+ 
++/* DPCs, the audio ISR and DISPATCH_LEVEL guest code, kept apart.
++ *
++ * On the console's one CPU nothing deferred runs while a thread sits at
++ * DISPATCH_LEVEL, and the XDK relies on it. XPP raises to DPC level around
++ * its transfer lists (KeRaiseIrqlToDpcLevel, 20 sites in Turok Evolution);
++ * DirectSound raises (0x1B1FFE) and then bumps a counter its ISR checks
++ * before unlinking a finished voice. Here DPCs run on the timer thread and
++ * the audio ISR on the APU thread, in parallel with guest threads, so the
++ * USB DPC walked lists the title was relinking (the pad stopped being polled
++ * a few seconds into some runs) and the audio ISR passed the counter check
++ * just before the title bumped it, then both edited one voice list (crash in
++ * sub_001B34BF while sounds were torn down for a level load).
++ *
++ * A handshake with interlocked operations on both sides: deferred work
++ * counts itself running, then backs off if any guest thread is raised; a
++ * thread raising to DISPATCH counts itself raised, then waits out deferred
++ * work already running. One of them always sees the other. On hardware an
++ * ISR could still preempt DISPATCH code; holding it off instead is what the
++ * device models already did (bounded), and what DirectSound's counter
++ * assumes the ISR observes atomically. */
++static volatile LONG g_async_running;
++static RECOMP_TLS int t_async_depth;
++
++int xbox_AsyncGateEnter(int force)
++{
++    InterlockedIncrement(&g_async_running);
++    if (!force && InterlockedCompareExchange(&g_guest_raised, 0, 0) > 0) {
++        InterlockedDecrement(&g_async_running);
++        return 0;
++    }
++    t_async_depth++;
++    return 1;
++}
++
++void xbox_AsyncGateLeave(void)
++{
++    t_async_depth--;
++    InterlockedDecrement(&g_async_running);
++}
++
++int xbox_DpcGateEnter(void)
++{
++    static ULONGLONG blocked_since;
++    static int warned;
++    ULONGLONG now;
++
++    if (xbox_AsyncGateEnter(0)) {
++        blocked_since = 0;
++        return 1;
++    }
++    /* Bounded, like the device models' interrupt hold-off: a guest that
++     * raised and never lowered must not stop deferred work for good. */
++    now = GetTickCount64();
++    if (!blocked_since)
++        blocked_since = now;
++    if (now - blocked_since < 250)
++        return 0;
++    if (!warned) {
++        warned = 1;
++        fprintf(stderr, "  [KERNEL] a guest thread held DISPATCH_LEVEL for 250 ms; "
++                        "running DPCs anyway\n");
++        fflush(stderr);
++    }
++    blocked_since = 0;
++    return xbox_AsyncGateEnter(1);
++}
++
++void xbox_DpcGateLeave(void)
++{
++    xbox_AsyncGateLeave();
++}
++
+ static KIRQL irql_swap(KIRQL v)
+ {
+     if (t_isr_irql >= 0) { KIRQL o = (KIRQL)t_isr_irql; t_isr_irql = v; return o; }
+@@ -62,8 +134,11 @@ static KIRQL irql_swap(KIRQL v)
+     if (old != v) {
+         if (v >= DISPATCH_LEVEL)
+             InterlockedIncrement(&g_guest_levels[v]);
+-        if (old < DISPATCH_LEVEL && v >= DISPATCH_LEVEL)
++        if (old < DISPATCH_LEVEL && v >= DISPATCH_LEVEL) {
+             InterlockedIncrement(&g_guest_raised);
++            while (!t_async_depth && InterlockedCompareExchange(&g_async_running, 0, 0) > 0)
++                SwitchToThread();
++        }
+         t_guest_irql = v;
+         if (old >= DISPATCH_LEVEL)
+             InterlockedDecrement(&g_guest_levels[old]);
 diff --git a/src/kernel/nv2a_gpu.h b/src/kernel/nv2a_gpu.h
 index b8d804a..9c5dd63 100644
 --- a/src/kernel/nv2a_gpu.h
