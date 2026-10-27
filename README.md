@@ -30,9 +30,12 @@ CPU-renderer build (about 9 fps on the title screen).
 - The window shows frames straight from the GPU through a swap chain, so it
   resizes and maximises freely (the frame stays 4:3, letterboxed), opens at
   the largest multiple of 640x480 that fits the screen, and **Alt+Enter**
-  toggles borderless fullscreen. The game still renders at 640x480 inside.
-  `RECOMP_VSYNC=1` presents on the monitor's refresh; `RECOMP_PRESENT=gdi`
-  goes back to the old 640x480 window.
+  toggles borderless fullscreen. `RECOMP_VSYNC=1` presents on the monitor's
+  refresh; `RECOMP_PRESENT=gdi` goes back to the old 640x480 window.
+- The game renders above its 640x480: by default at the whole multiple of
+  480 lines that covers your monitor's height (3x, 1920x1440, on a 1440p
+  screen). `RECOMP_RENDER_SCALE=<n>` sets it (1 to 8, fractions allowed; 1 is
+  the Xbox's resolution). The shadow map keeps its own size.
 - Known issues: the Xbox version runs at 30 fps and this runs at ~60, which
   may speed up anything the game ties to frame rate; environment-map layers
   (water, Tek bow) and cave lighting are not yet compared with the console.
