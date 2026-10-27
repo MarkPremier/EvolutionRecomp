@@ -22,6 +22,7 @@
 #include <stdint.h>
 #include <stddef.h>   /* ptrdiff_t */
 #include <stdlib.h>   /* getenv */
+#include <string.h>
 
 /* ── ICALL trace ring buffer ───────────────────────────────── */
 
@@ -121,6 +122,40 @@ void sub_001B23DD(void)
         return;
     }
     sub_001B23DD_gen();
+}
+
+/* ── Shadow manager defaults (sub_0017D5C0) ────────────────── */
+
+/*
+ * The shadow manager's base constructor sets the shadow map to 512x512
+ * (+0x400/+0x404) and the shadow distance to 16 units (+0x40C): the map
+ * covers a region that far ahead of the camera (sub_0017DAF0 centres the
+ * light camera half that distance along the view direction and sizes it by
+ * the distance), so a creature further away casts nothing. The XBOX
+ * subclass then creates its render target from the size fields.
+ *
+ * RECOMP_SHADOW_DISTANCE (default 48) and RECOMP_SHADOW_MAP (default 2048,
+ * a power of two from 512 to 4096) replace them; at the defaults shadows
+ * reach three times as far and texels are smaller than on the Xbox (2048
+ * over 48 units against 512 over 16). Set 16 and 512 for the original.
+ */
+extern void sub_0017D5C0_gen(void);
+
+void sub_0017D5C0(void)
+{
+    uint32_t self = g_ecx;
+    const char *distance_text = getenv("RECOMP_SHADOW_DISTANCE");
+    const char *map_text = getenv("RECOMP_SHADOW_MAP");
+    float distance = distance_text ? (float)atof(distance_text) : 48.0f;
+    uint32_t map = map_text ? (uint32_t)strtoul(map_text, NULL, 0) : 2048u;
+
+    sub_0017D5C0_gen();
+    if (distance > 0.0f && distance < 10000.0f)
+        memcpy((void *)((uintptr_t)(self + 0x40Cu) + g_xbox_mem_offset), &distance, 4);
+    if (map >= 512u && map <= 4096u && !(map & (map - 1u))) {
+        TUROK_MEM32(self + 0x400u) = map;
+        TUROK_MEM32(self + 0x404u) = map;
+    }
 }
 
 /* ── Manual function overrides ─────────────────────────────── */

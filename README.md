@@ -23,7 +23,10 @@ CPU-renderer build (about 9 fps on the title screen).
   fire, weapon switching and pause.
 - Keyboard and mouse work too, merged onto controller 1 (see Controls).
 - Dinosaurs and Turok cast shadows, with filtered (PCF) edges.
-  `RECOMP_SHADOWS=0` turns them off.
+  `RECOMP_SHADOWS=0` turns them off. They reach further and are sharper
+  than on the Xbox: the shadow map covers 48 units ahead of the camera at
+  2048x2048 (the game's own 16 units at 512x512). `RECOMP_SHADOW_DISTANCE`
+  and `RECOMP_SHADOW_MAP` change them; 16 and 512 give the original.
 - Known issues: the Xbox version runs at 30 fps and this runs at ~58, which
   may speed up anything the game ties to frame rate; environment-map layers
   (water, Tek bow) and cave lighting are not yet compared with the console.
@@ -145,7 +148,7 @@ lower is faster), and `RECOMP_KBM_MAP` rebinds keys, e.g.
 | Path | What it is |
 |------|------------|
 | `src/main.c` | Host entry point: loads the XBE, sets the runtime defaults below, calls the game's entry point |
-| `src/recomp_manual.c` | Hand-written overrides: D3D's GetVisibilityTestResult (sub_00194B40) completes unfinished tests as visible; DirectSound's idle-voice handler (sub_001B23DD) ignores voices nobody owns (the emulated APU could report one, and quitting a level crashed) |
+| `src/recomp_manual.c` | Hand-written overrides: D3D's GetVisibilityTestResult (sub_00194B40) completes unfinished tests as visible; DirectSound's idle-voice handler (sub_001B23DD) ignores voices nobody owns (the emulated APU could report one, and quitting a level crashed); the shadow manager's constructor (sub_0017D5C0) takes its shadow distance and map size from `RECOMP_SHADOW_DISTANCE`/`RECOMP_SHADOW_MAP` |
 | `seeds/manual_seeds.json` | Functions only reached through pointers (XPP init) |
 | `seeds/recomp_extra_seeds.json` | Functions the disassembler misses, found by the upstream recompiler or at runtime (`tools.seed_from_log` on an `[ICALL] Failed to resolve` log). Includes the player-action thunks (`mov eax,[ecx]; mov [ecx+0x3A4],0; jmp [eax+N]`) reached only through runtime-built tables; without them fire, pause and previous weapon did nothing |
 | `patches/xboxrecomp-aknavj-turok.patch` | The toolkit changes as one diff against aknavj 11a8aa1 |
