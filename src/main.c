@@ -41,6 +41,7 @@
 
 /* xboxrecomp runtime headers */
 #include <xbox/xboxrecomp.h>
+#include "video_settings.h"
 
 /*
  * If xboxrecomp.h is not an umbrella header in your setup, include
@@ -403,6 +404,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 
     printf("=== Turok Evolution - Static Recompilation ===\n");
 
+    /* turok_settings.ini (the Video Options page): render scale and VSync,
+     * where they are not set by hand below. */
+    video_settings_load();
+
     /* D3D's fence waits only return if the pushbuffer is really executed:
      * the executor is what writes the GPU semaphore (see the sub_00198650
      * override in recomp_manual.c). Default it on; RECOMP_PB_EXEC=0 still
@@ -560,6 +565,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     /* Step 5: Initialize kernel bridge (thunk table in Xbox memory) */
     printf("Initializing kernel bridge...\n");
     xbox_kernel_bridge_init();
+
+    /* The Video Options page in the Options menu: patch0.tre beside the
+     * supertrees, made from the game's own menus before the title mounts its
+     * archives, and the thread that applies the page's settings. */
+    video_settings_start(YOUR_GAME_DIR);
 
     /* Step 6: Initialize stack */
     g_esp = XBOX_STACK_TOP;

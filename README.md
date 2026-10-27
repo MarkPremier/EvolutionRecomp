@@ -36,6 +36,9 @@ CPU-renderer build (about 9 fps on the title screen).
   480 lines that covers your monitor's height (3x, 1920x1440, on a 1440p
   screen). `RECOMP_RENDER_SCALE=<n>` sets it (1 to 8, fractions allowed; 1 is
   the Xbox's resolution). The shadow map keeps its own size.
+- **Options > Video Options**, in the front end and in the pause menu, sets
+  the resolution (auto, 640x480 to 2560x1920), windowed or fullscreen, and
+  VSync while you play; see [Video Options](#video-options).
 - Known issues: the Xbox version runs at 30 fps and this runs at ~60, which
   may speed up anything the game ties to frame rate; environment-map layers
   (water, Tek bow) and cave lighting are not yet compared with the console.
@@ -152,11 +155,34 @@ up looks up (`RECOMP_KBM_INVERT_Y=0` if you turn the game's option off).
 lower is faster), and `RECOMP_KBM_MAP` rebinds keys, e.g.
 `A=Space|Return,RT=MouseL,X=WheelDown|E`.
 
+## Video Options
+
+A page in the game's own Options menu, in the slot the console version left
+empty below SOUND OPTIONS (the pause menu's Options has it too). Changes take
+effect at once and are kept in `turok_settings.ini` beside the exe:
+
+| Row | Values | Same as |
+|-----|--------|---------|
+| Resolution | auto, 640x480, 1280x960, 1920x1440, 2560x1920 | `RECOMP_RENDER_SCALE` |
+| Display | windowed, fullscreen (borderless) | Alt+Enter |
+| VSync | off, on | `RECOMP_VSYNC` |
+
+An environment variable set by hand still wins at start-up.
+
+The page is game data, built at start-up from your own disc: the game reads
+`patch0.tre` beside its `supertree*.tre` archives if there is one, and its
+files replace the supertrees' copies. `src/video_settings.c` writes that file
+into the game folder, with the Options screens gaining the entry and a
+Video Options page derived from Game Options; nothing from the disc is in
+this repository. `RECOMP_VIDEO_OPTIONS=0` removes it and leaves the menus as
+the disc has them. A `patch0.tre` that something else wrote is left alone.
+
 ## Project files
 
 | Path | What it is |
 |------|------------|
 | `src/main.c` | Host entry point: loads the XBE, sets the runtime defaults below, calls the game's entry point |
+| `src/video_settings.c` | The Video Options page: builds `patch0.tre` from the disc's menus (its `.tre` and screen formats are described there), keeps `turok_settings.ini`, and applies the page's values through the history values the menu writes |
 | `src/recomp_manual.c` | Hand-written overrides: D3D's GetVisibilityTestResult (sub_00194B40) completes unfinished tests as visible; DirectSound's idle-voice handler (sub_001B23DD) ignores voices nobody owns (the emulated APU could report one, and quitting a level crashed); the shadow manager's constructor (sub_0017D5C0) takes its shadow distance and map size from `RECOMP_SHADOW_DISTANCE`/`RECOMP_SHADOW_MAP` |
 | `seeds/manual_seeds.json` | Functions only reached through pointers (XPP init) |
 | `seeds/recomp_extra_seeds.json` | Functions the disassembler misses, found by the upstream recompiler or at runtime (`tools.seed_from_log` on an `[ICALL] Failed to resolve` log). Includes the player-action thunks (`mov eax,[ecx]; mov [ecx+0x3A4],0; jmp [eax+N]`) reached only through runtime-built tables; without them fire, pause and previous weapon did nothing |
