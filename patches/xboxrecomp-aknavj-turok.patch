@@ -359,7 +359,7 @@ index 9f71e6b..68c1e70 100644
  int     xbox_IrqlEnterInterrupt(int level);     /* around host-run ISRs and DPCs */
  void    xbox_IrqlLeaveInterrupt(int saved);
 diff --git a/src/kernel/kernel_bridge.c b/src/kernel/kernel_bridge.c
-index 2f6660a..da2b33c 100644
+index 2f6660a..bdac422 100644
 --- a/src/kernel/kernel_bridge.c
 +++ b/src/kernel/kernel_bridge.c
 @@ -2372,21 +2372,112 @@ static int kernel_raise_interrupt(uint32_t vector)
@@ -519,6 +519,23 @@ index 2f6660a..da2b33c 100644
      }
  }
  
+@@ -9849,10 +9956,15 @@ static void kernel_thunk_dispatch_body(void)
+     }
+ 
+     {
++        /* RECOMP_KERNEL_SUMMARY: every two seconds, from whichever guest
++         * thread is in the kernel at the time. Opt-in: it runs inside a
++         * title's kernel call. */
+         static DWORD last_summary_tick = 0;
++        static int summary = -1;
+         DWORD now = GetTickCount();
++        if (summary < 0) summary = getenv("RECOMP_KERNEL_SUMMARY") != NULL;
+         if (last_summary_tick == 0) last_summary_tick = now;
+-        if (now - last_summary_tick >= 2000 && g_kernel_call_count > 200) {
++        if (summary && now - last_summary_tick >= 2000 && g_kernel_call_count > 200) {
+             fprintf(stderr, "  [KERNEL] summary: %lld total calls, latest ordinal %u (slot %d) esp=0x%08X\n",
+                     g_kernel_call_count, ordinal, slot, g_esp);
+             /* And which ones, ranked. "Latest" names whatever the sample
 diff --git a/src/kernel/kernel_file.c b/src/kernel/kernel_file.c
 index 3446243..a728be6 100644
 --- a/src/kernel/kernel_file.c
@@ -1872,6 +1889,50 @@ index 341bcaa..a8df038 100644
      }
      s_get = put_va;
  }
+diff --git a/src/kernel/xbox_memory_layout.c b/src/kernel/xbox_memory_layout.c
+index 4916a66..8df0059 100644
+--- a/src/kernel/xbox_memory_layout.c
++++ b/src/kernel/xbox_memory_layout.c
+@@ -1032,6 +1032,11 @@ static void event_signals_tick(void)
+ }
+ 
+ static int s_nv2a_trace = 0;
++/* The periodic GPU/pushbuffer report. It publishes every GPU surface to guest
++ * RAM first (nv2a_pb_exec_report -> nv2a_gpu_flush), a ~450 ms stall in
++ * Turok Evolution, so it is a diagnostic to ask for, not a side effect of
++ * running the executor. */
++static int s_nv2a_report = 0;
+ 
+ /* The display framebuffer, as reported by AvSetDisplayMode. Checksummed once a
+  * second so a run can answer the only question that matters before building a
+@@ -1317,7 +1322,7 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+                         report_ms = e ? atol(e) : 10000;
+                         if (report_ms < 100) report_ms = 100;
+                     }
+-                    if (s_nv2a_trace && now_ms - last_report > (uint64_t)report_ms) {
++                    if (s_nv2a_report && now_ms - last_report > (uint64_t)report_ms) {
+                         last_report = now_ms;
+                         nv2a_pb_scan_report();
+                     }
+@@ -2786,10 +2791,15 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
+             PAGE_READWRITE
+         );
+         /* The pushbuffer survey rides on the same poll, so either
+-         * variable arms it. */
++         * variable arms it. The executor (RECOMP_PB_EXEC) runs without
++         * either: its report is opt-in through RECOMP_PB_REPORT_MS, or
++         * RECOMP_FB_DUMP, which writes its frames at report time. */
+         s_nv2a_trace = getenv("RECOMP_NV2A_TRACE") != NULL
+-                    || getenv("RECOMP_PB_SCAN") != NULL
+-                    || getenv("RECOMP_PB_EXEC") != NULL;
++                    || getenv("RECOMP_PB_SCAN") != NULL;
++        s_nv2a_report = s_nv2a_trace
++                     || (getenv("RECOMP_PB_EXEC") != NULL
++                         && (getenv("RECOMP_PB_REPORT_MS") != NULL
++                             || getenv("RECOMP_FB_DUMP") != NULL));
+         if (g_nv2a_memory) {
+             fprintf(stderr, "  NV2A register aperture: %u MB at Xbox VA "
+                     "0x%08X (zeroed, no register semantics)\n",
 diff --git a/src/usb/ohci.c b/src/usb/ohci.c
 index d8dc03b..595586d 100644
 --- a/src/usb/ohci.c
@@ -1989,10 +2050,45 @@ index d1e477d..c43862b 100644
          }
          out[2] |= st->digital;
 diff --git a/src/video/fb_present.c b/src/video/fb_present.c
-index 712b158..976a46a 100644
+index 712b158..eae3aa4 100644
 --- a/src/video/fb_present.c
 +++ b/src/video/fb_present.c
-@@ -91,6 +91,20 @@ void xbox_FramebufferWindowPresent(uint32_t fb_va, uint32_t pitch)
+@@ -74,6 +74,34 @@ void xbox_FramebufferWindowPresent(uint32_t fb_va, uint32_t pitch)
+     if (!s_fb_running || !fb_va || !pitch)
+         return;
+     InterlockedIncrement64(&s_present_frame);
++    {
++        /* RECOMP_HITCH_MS=<n>: log every flip that came more than n ms after
++         * the previous one, stamped with seconds since the first flip, so a
++         * periodic stutter can be lined up against whatever else the log
++         * shows at the same moment. */
++        static double threshold = -1.0, frequency, first;
++        static LARGE_INTEGER last;
++        LARGE_INTEGER now;
++        if (threshold < 0.0) {
++            const char *e = getenv("RECOMP_HITCH_MS");
++            LARGE_INTEGER f;
++            QueryPerformanceFrequency(&f);
++            frequency = (double)f.QuadPart;
++            threshold = e ? atof(e) : 0.0;
++        }
++        if (threshold > 0.0) {
++            QueryPerformanceCounter(&now);
++            if (!first) first = (double)now.QuadPart;
++            if (last.QuadPart) {
++                double ms = (double)(now.QuadPart - last.QuadPart) * 1000.0 / frequency;
++                if (ms > threshold)
++                    fprintf(stderr, "[HITCH] t=%.3f s frame %lld took %.1f ms\n",
++                            ((double)now.QuadPart - first) / frequency,
++                            (long long)s_present_frame, ms);
++            }
++            last = now;
++        }
++    }
+     if (getenv("RECOMP_FB_VA"))
+         return;                       /* pinned: leave the old path alone */
+     next = (s_present_idx == 0) ? 1 : 0;
+@@ -91,6 +119,20 @@ void xbox_FramebufferWindowPresent(uint32_t fb_va, uint32_t pitch)
  
          if (bpp == 4) {
              memcpy(dst, row, (size_t)s_fb_width * 4);
@@ -2013,7 +2109,7 @@ index 712b158..976a46a 100644
          } else if (bpp == 2) {
              const uint16_t *p = (const uint16_t *)row;
              for (x = 0; x < s_fb_width; x++) {
-@@ -104,6 +118,44 @@ void xbox_FramebufferWindowPresent(uint32_t fb_va, uint32_t pitch)
+@@ -104,6 +146,44 @@ void xbox_FramebufferWindowPresent(uint32_t fb_va, uint32_t pitch)
              memset(dst, 0, (size_t)s_fb_width * 4);
          }
      }
@@ -2058,7 +2154,7 @@ index 712b158..976a46a 100644
      /* Published only once it is whole. */
      InterlockedExchange(&s_present_idx, next);
  }
-@@ -144,6 +196,23 @@ int xbox_FramebufferKeyDown(int vk)
+@@ -144,6 +224,23 @@ int xbox_FramebufferKeyDown(int vk)
   * place the keyboard model can be driven without the foreground. The file
   * holds whitespace-separated hex VK codes (e.g. "20 57" = Space + W); path is
   * RECOMP_INPUT_FILE (default C:\recomp-input.txt). */
@@ -2082,7 +2178,7 @@ index 712b158..976a46a 100644
  static void fb_inject_poll(void)
  {
      static int enabled = -1;
-@@ -191,6 +260,8 @@ static void fb_inject_poll(void)
+@@ -191,6 +288,8 @@ static void fb_inject_poll(void)
              continue;
          held[i] = next[i];
          s_key_down[i] = next[i];
@@ -2091,7 +2187,7 @@ index 712b158..976a46a 100644
          if (next[i] && i == VK_F12) {
              const char *cap = getenv("RECOMP_FB_CAPTURE");
              if (!cap || !cap[0])
-@@ -470,6 +541,10 @@ static LRESULT CALLBACK fb_wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
+@@ -470,6 +569,10 @@ static LRESULT CALLBACK fb_wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
      case WM_KEYDOWN:
      case WM_SYSKEYDOWN:
          rec_event("k %x 1", (unsigned)w);
@@ -2102,7 +2198,7 @@ index 712b158..976a46a 100644
          if (w == VK_F12) {
              const char *path = getenv("RECOMP_FB_CAPTURE");
              if (!path || !path[0]) path = "framebuffer.bmp";
-@@ -667,6 +742,20 @@ static void fb_convert(const uint8_t *src, uint32_t bpp)
+@@ -667,6 +770,20 @@ static void fb_convert(const uint8_t *src, uint32_t bpp)
  
          if (bpp == 4) {
              memcpy(dst, row, (size_t)s_fb_width * 4);
