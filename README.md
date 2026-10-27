@@ -40,6 +40,9 @@ CPU-renderer build (about 9 fps on the title screen).
   the resolution, widescreen (up to 21:9), fullscreen, VSync, a frame limit
   (up to 240 or off) and PC button icons while you play; see
   [Video Options](#video-options).
+- The menus take the mouse as the PC release's did (with its arrow, if you
+  name a PC install), and the main menu ends in **Quit**; see
+  [Mouse in menus](#mouse-in-menus).
 - Known issues: environment-map layers
   (water, Tek bow) and cave lighting are not yet compared with the console.
 
@@ -155,6 +158,34 @@ up looks up (`RECOMP_KBM_INVERT_Y=0` if you turn the game's option off).
 lower is faster), and `RECOMP_KBM_MAP` rebinds keys, e.g.
 `A=Space|Return,RT=MouseL,X=WheelDown|E`.
 
+### Mouse in menus
+
+In any menu (the front end and the pause menu) the mouse is let go and works
+as a pointer, as in the PC release:
+
+| Mouse | In a menu |
+|-------|-----------|
+| Move over an entry | focuses it |
+| Left click | chooses it; on an option row, the next value |
+| Right click | on an option row, the previous value; elsewhere Back (resume on the pause menu, as Esc) |
+| Wheel | over an option row, its value; elsewhere up / down |
+
+Leaving the menu for play takes the mouse back for look. The arrow is the PC
+release's `cursor.dds`, read from the PC install named by `pc_game_dir` (see
+Button icons below); without one it is Windows' own.
+
+How it works: the screen loader's `this` (`sub_00054A60`) is the screen; its
+actors are a tree from +0x9C (walked as `sub_0009C1C0` does), each widget's
+rectangle on the 640x480 screen is at +0x2C4, and +0x244 bit 0 says it can
+take the focus. Hovering hands the controller from the old entry to the new
+one and calls the screen's SetFocus (`sub_000544D0`), as the menu's own up
+and down (`sub_000A86A0`) do. Clicks are pad presses. Option rows are the
+screen's SelectionMenuWidgets without an A-button link, read from its `.ati`.
+
+The main menu gains the PC release's **Quit** below Cheats. It asks "are you
+sure?" with the pause menu's own question, and yes leaves the game
+(`XBOX:DASH`, the console's return to the dashboard).
+
 ## Video Options
 
 A page in the game's own Options menu, in the slot the console version left
@@ -217,7 +248,8 @@ The page is game data, built at start-up from your own disc: the game reads
 `patch0.tre` beside its `supertree*.tre` archives if there is one, and its
 files replace the supertrees' copies. `src/video_settings.c` writes that file
 into the game folder, with the Options screens gaining the entry and a
-Video Options page derived from Game Options; nothing from the disc is in
+Video Options page derived from Game Options, the main menu its Quit entry
+(from the pause menu's pieces); nothing from the disc is in
 this repository. `RECOMP_VIDEO_OPTIONS=0` removes it and leaves the menus as
 the disc has them. A `patch0.tre` that something else wrote is left alone.
 

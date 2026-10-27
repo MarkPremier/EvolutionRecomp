@@ -165,7 +165,9 @@ void sub_0017D5C0(void)
  * front end -- its screens, d:\data\levels\u_jcowlishaw\screens\<name>\ --
  * stays 4:3 in widescreen; a level (pod-...) is the game. The pause menu's
  * screens (ingame...) are the game's; its first (ingamepause) is told apart,
- * as Escape resumes from it. Returns 1 for the front end, 2 for that screen. (The PAL release has the loader at
+ * as Escape resumes from it. Returns 1 for the front end, 2 for that screen.
+ * The loader's this is the screen object the menu pointer works on
+ * (video_settings_menu_screen). (The PAL release has the loader at
  * sub_00054A80: found by phobos665's turok-evolution-recomp.) */
 #include "video_settings.h"
 extern void sub_00054A60_gen(void);
@@ -193,6 +195,7 @@ void sub_00054A60(void)
         int kind = is_front_end_screen(text);
         fprintf(stderr, "[TUROK] screen %.96s: %s\n", text, kind == 1 ? "front end" : kind ? "pause menu" : "game");
         video_settings_screen(kind == 1, kind == 2);
+        video_settings_menu_screen(self, text);
     }
     sub_00054A60_gen();
 }

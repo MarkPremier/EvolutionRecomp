@@ -325,8 +325,9 @@ static void tree_build(PatchFile *files, size_t count, Buffer *out)
  *
  * An .ati or .atr is a 4-byte header and a run of tagged elements:
  *   type     low 5 bits the kind (1 a list, 2 a string with children, others
- *            a plain value); 0x40 a 1-byte size, 0x80 a 2-byte size; 0x20 a
- *            u16 child count follows the size
+ *            a plain value); 0x40 a 1-byte size, 0x80 a 2-byte size, both a
+ *            4-byte size (an actor of over 64 KB); 0x20 a u16 child count
+ *            follows the size
  *   level    nesting depth
  *   size     payload bytes, after the name
  *   name     length byte, then the name and a NUL
@@ -410,7 +411,11 @@ static int parse_nodes(const uint8_t *data, size_t pos, size_t end, Node *parent
         node->flags = type & 0xE0;
         node->level = data[pos + 1];
         pos += 2;
-        if (type & 0x80) { size = (size_t)data[pos] | (size_t)data[pos + 1] << 8; pos += 2; }
+        if ((type & 0xC0) == 0xC0) {
+            size = (size_t)data[pos] | (size_t)data[pos + 1] << 8 | (size_t)data[pos + 2] << 16 |
+                   (size_t)data[pos + 3] << 24;
+            pos += 4;
+        } else if (type & 0x80) { size = (size_t)data[pos] | (size_t)data[pos + 1] << 8; pos += 2; }
         else if (type & 0x40) size = data[pos++];
         else { node_free(node); return 0; }
         if (type & 0x20) { node->stored_count = (uint16_t)(data[pos] | data[pos + 1] << 8); pos += 2; }
@@ -437,7 +442,7 @@ static int parse_nodes(const uint8_t *data, size_t pos, size_t end, Node *parent
 static void encode_node(const Node *node, Buffer *out)
 {
     Buffer payload = {0};
-    uint8_t head[8], type;
+    uint8_t head[10], type;
     size_t n = 0, name_size = strlen(node->name);
     uint32_t i;
     if (node->kind == 2) {
@@ -451,11 +456,17 @@ static void encode_node(const Node *node, Buffer *out)
     else
         buffer_put(&payload, node->value, node->value_size);
     type = (uint8_t)(node->kind | (node->flags & 0x20));
-    type |= payload.size < 256 && !(node->flags & 0x80) ? 0x40 : 0x80;
+    if (payload.size < 256 && !(node->flags & 0x80)) type |= 0x40;
+    else if (payload.size > 0xFFFF || (node->flags & 0xC0) == 0xC0) type |= 0xC0;
+    else type |= 0x80;
     head[n++] = type;
     head[n++] = node->level;
     head[n++] = (uint8_t)payload.size;
     if (type & 0x80) head[n++] = (uint8_t)(payload.size >> 8);
+    if ((type & 0xC0) == 0xC0) {
+        head[n++] = (uint8_t)(payload.size >> 16);
+        head[n++] = (uint8_t)(payload.size >> 24);
+    }
     if (type & 0x20) {
         uint16_t count = node->kind == 1 || node->kind == 2 ? (uint16_t)node->count : node->stored_count;
         head[n++] = (uint8_t)count;
@@ -887,6 +898,247 @@ static int any_button_starts(Node *screen, const char *unused)
     return 1;
 }
 
+/* The PC release's main menu ends in QUIT, which asks "are you sure?" and
+ * leaves the game (XBOX:DASH, the console's return to the dashboard, ends the
+ * process here). The pieces are the pause menu's own: its QUIT entry, the
+ * question's title, yes and no, and its "confirm" and "no" links. The menu's
+ * entries are widget group 10 and the question group 20; "Group." switches a
+ * group on (A 1) or off (A 2), and "Focus." makes an entry the focus (A 0),
+ * focusable (A 6) or not (A 7). */
+static const Node *s_pause_screen;      /* ingamepause.ati, while the patch is made */
+
+static const char *const k_main_entries[] = {"newgame", "load game", "multiplayer", "options", "cheats", "quit"};
+#define MAIN_TOP   2.574f     /* NEW GAME, where the console has it */
+#define MAIN_STEP  3.4f       /* closer than the console's 4: QUIT is where the PC has it */
+#define MAIN_GROUP 10
+#define ASK_GROUP  20
+
+static int is_event(const Node *event, const char *type)
+{
+    size_t n = strlen(type);
+    return event->value_size == n && !memcmp(event->value, type, n);
+}
+
+static int main_entry(const char *name)
+{
+    int e;
+    for (e = 0; e < COUNT(k_main_entries); e++)
+        if (!strcmp(name, k_main_entries[e])) return e;
+    return -1;
+}
+
+static int byte_of(const Node *node)
+{
+    return node && node->value_size == 1 ? node->value[0] : -1;
+}
+
+/* The widget's group (A_GN), added from a pause-menu entry's if it has none. */
+static void set_group(Node *actor, int group)
+{
+    Node *vars = child(actor, "ACTOR_VARIABLES"), *gn = child(vars, "A_GN");
+    if (!vars) return;
+    if (!gn) {
+        const Node *pattern = child(child(actor_named(s_pause_screen, "resume", NULL), "ACTOR_VARIABLES"), "A_GN");
+        if (!pattern) return;
+        gn = node_clone(pattern);
+        node_insert(vars, vars->count, gn);
+    }
+    set_byte(gn, group);
+}
+
+/* A copy of `event` aimed at `name`, inserted after it. */
+static Node *event_copy_after(Node *events, uint32_t at, const char *name, int id)
+{
+    Node *copy = node_clone(events->children[at]);
+    retarget(copy, name, id);
+    node_insert(events, at + 1, copy);
+    return copy;
+}
+
+/* For each event of `actor`'s links naming `from`, the same naming each of
+ * `names`. */
+static void name_too(Node *actor, const char *from, const char *const *names, const int *ids, int count)
+{
+    uint32_t i, j;
+    char target[64];
+    int n;
+    for (i = 0; actor && i < actor->count; i++) {
+        Node *events = child(actor->children[i], "EVENTS");
+        for (j = 0; events && j < events->count; j++) {
+            const char *name = target_of(events->children[j], target, sizeof target);
+            if (!name || strcmp(name, from) || !is_event(events->children[j], "Name.")) continue;
+            for (n = count; n-- > 0;) event_copy_after(events, j, names[n], ids[n]);
+            j += (uint32_t)count;
+        }
+    }
+}
+
+/* A pause-menu link of the question, made the main menu's: the question's
+ * widgets by their new ids, the pause menu's entries as the main menu's, and
+ * what the main menu does not have (the B prompt, the controller message) left
+ * out. */
+static void adopt_events(Node *events, int deity_id, const int ask_ids[3], const int entry_ids[])
+{
+    static const char *const asked[] = {"title", "yes", "no"};
+    char target[64];
+    int seen_on = 0, seen_off = 0, e, a;
+    uint32_t i = 0;
+    while (i < events->count) {
+        Node *event = events->children[i];
+        const char *name = target_of(event, target, sizeof target);
+        int ask = -1;
+        if (!name) { i++; continue; }
+        for (e = 0; e < 3; e++) if (!strcmp(name, asked[e])) ask = e;
+        if (!strcmp(name, "DeityNoFade")) {
+            retarget(event, "DeityNoFade", deity_id);
+            /* The pause menu's "optavail" puts its OPTIONS back; the main
+             * menu's "plug" puts MULTIPLAYER back if there are two pads. */
+            if (is_event(event, "Name.") && is_text(child(event, "NAME"), "optavail")) set_text(child(event, "NAME"), "plug");
+            if (is_event(event, "Name.") && is_text(child(event, "NAME"), "quit")) set_text(child(event, "NAME"), "quitgame");
+        } else if (ask >= 0) {
+            retarget(event, asked[ask], ask_ids[ask]);
+        } else if (is_event(event, "Focus.") &&
+                   (!strcmp(name, "resume") || !strcmp(name, "options") || !strcmp(name, "quit"))) {
+            /* The entries: the focus back on QUIT, or every entry switched on
+             * (but MULTIPLAYER, which "plug" decides) or off. */
+            a = byte_of(child(event, "A"));
+            if (a == 0) {
+                retarget(event, "quit", entry_ids[COUNT(k_main_entries) - 1]);
+            } else if ((a == 6 && !seen_on++) || (a == 7 && !seen_off++)) {
+                retarget(event, k_main_entries[0], entry_ids[0]);
+                for (e = COUNT(k_main_entries); e-- > 1;)
+                    if (a == 7 || strcmp(k_main_entries[e], "multiplayer")) {
+                        event_copy_after(events, i, k_main_entries[e], entry_ids[e]);
+                        i++;
+                    }
+            } else {
+                node_remove(events, i);
+                continue;
+            }
+        } else {
+            node_remove(events, i);
+            continue;
+        }
+        i++;
+    }
+}
+
+static int add_quit_entry(Node *screen, const char *unused)
+{
+    static const char *const asked[] = {"title", "yes", "no"};
+    static const float asked_y[] = {4.406f, -5.387f, -1.305f};     /* the PC's */
+    static const char *const pause_links[] = {"confirm", "no"};
+    Node *cheats = actor_named(screen, "cheats", NULL), *deity = actor_named(screen, "DeityNoFade", NULL);
+    Node *stone = actor_named(screen, "stoneWidget", NULL), *quit, *link, *events;
+    const Node *pause_deity = actor_named(s_pause_screen, "DeityNoFade", NULL), *dash_pattern = NULL;
+    const Node *group_pattern = NULL;
+    int entry_ids[COUNT(k_main_entries)], ask_ids[3], id = 0, deity_id = actor_id(deity), e;
+    const char *new_names[4] = {"quit", "title", "yes", "no"};
+    int new_ids[4];
+    uint32_t i, j, at;
+    float position[3];
+    (void)unused;
+
+    if (!cheats || !deity || !stone || !pause_deity || deity_id < 0 || !child(cheats, "LINK")) return 0;
+    for (i = 0; i < screen->count; i++)
+        if (actor_id(screen->children[i]) > id) id = actor_id(screen->children[i]);
+    /* The pause menu's patterns: switching a group, and a plain event. */
+    for (i = 0; i < pause_deity->count; i++) {
+        const Node *pause_events = child(pause_deity->children[i], "EVENTS");
+        for (j = 0; pause_events && j < pause_events->count; j++) {
+            if (!group_pattern && is_event(pause_events->children[j], "Group.")) group_pattern = pause_events->children[j];
+            if (!dash_pattern && is_event(pause_events->children[j], "Turn visible")) dash_pattern = pause_events->children[j];
+        }
+    }
+    if (!group_pattern || !dash_pattern) return 0;
+
+    /* QUIT: CHEATS, saying the pause menu's "Quit" and asking. */
+    quit = node_clone(cheats);
+    new_ids[0] = ++id;
+    set_byte(child(quit, "ID"), id);
+    set_text(child(quit, "NAME"), "quit");
+    set_text(child(child(quit, "ACTOR_VARIABLES"), "W_TMF"), "$\\Data\\Text\\InGamePause.txm");
+    set_byte(child(child(quit, "ACTOR_VARIABLES"), "W_TMN"), 3);
+    link = child(quit, "LINK");
+    events = child(link, "EVENTS");
+    if (!events || !events->count || !is_event(events->children[0], "Name.")) { node_free(quit); return 0; }
+    set_text(link, "quit selected");
+    set_text(child(events->children[0], "NAME"), "confirm");
+    while (events->count > 1) node_remove(events, 1);
+    actor_named(screen, "cheats", &at);
+    node_insert(screen, at + 1, quit);
+
+    /* The entries, evenly down to QUIT, in group 10. */
+    for (e = 0; e < COUNT(k_main_entries); e++) {
+        Node *entry = actor_named(screen, k_main_entries[e], NULL);
+        if (!entry || !get_vector(child(entry, "POS"), position)) return 0;
+        position[1] = MAIN_TOP - e * MAIN_STEP;
+        set_vector(child(entry, "POS"), position);
+        set_group(entry, MAIN_GROUP);
+        entry_ids[e] = actor_id(entry);
+    }
+
+    /* The question: the pause menu's title, yes and no, where the PC has them. */
+    for (e = 0; e < 3; e++) {
+        const Node *pattern = actor_named(s_pause_screen, asked[e], NULL);
+        Node *widget;
+        if (!pattern) return 0;
+        widget = node_clone(pattern);
+        ask_ids[e] = new_ids[e + 1] = ++id;
+        set_byte(child(widget, "ID"), id);
+        if (get_vector(child(widget, "POS"), position)) {
+            position[1] = asked_y[e];
+            set_vector(child(widget, "POS"), position);
+        }
+        for (i = 0; i < widget->count; i++)
+            if (child(widget->children[i], "EVENTS"))
+                adopt_events(child(widget->children[i], "EVENTS"), deity_id, ask_ids, entry_ids);
+        actor_named(screen, "DeityNoFade", &at);
+        node_insert(screen, at, widget);
+    }
+
+    /* Asking and not quitting: the pause menu's links. */
+    for (e = 0; e < COUNT(pause_links); e++) {
+        Node *copy = NULL;
+        for (i = 0; i < pause_deity->count && !copy; i++) {
+            const Node *pattern = pause_deity->children[i];
+            if (!strcmp(pattern->name, "LINK") && pattern->value_size == strlen(pause_links[e]) &&
+                    !memcmp(pattern->value, pause_links[e], pattern->value_size))
+                copy = node_clone(pattern);
+        }
+        if (!copy || !child(copy, "EVENTS")) { node_free(copy); return 0; }
+        adopt_events(child(copy, "EVENTS"), deity_id, ask_ids, entry_ids);
+        node_insert(deity, deity->count, copy);
+        /* Quitting: the dashboard. */
+        if (e == 0) {
+            Node *dash = node_clone(copy), *dash_events = child(dash, "EVENTS"), *event;
+            set_text(dash, "quitgame");
+            set_text(child(child(dash, "CAUSE"), "NAME"), "quitgame");
+            while (dash_events->count) node_remove(dash_events, 0);
+            event = node_clone(dash_pattern);
+            set_text(event, "XBOX:DASH");
+            retarget(event, "DeityNoFade", deity_id);
+            node_insert(dash_events, 0, event);
+            node_insert(deity, deity->count, dash);
+        }
+    }
+
+    /* The question is off until asked. */
+    for (i = 0; i < deity->count; i++) {
+        Node *setup = deity->children[i], *cause = child(setup, "CAUSE"), *group;
+        if (strcmp(setup->name, "LINK") || !cause || !is_event(cause, "Setup") || !child(setup, "EVENTS")) continue;
+        group = node_clone(group_pattern);
+        retarget(group, "DeityNoFade", deity_id);
+        set_byte(child(group, "A"), 2);
+        set_byte(child(group, "G"), ASK_GROUP);
+        node_insert(child(setup, "EVENTS"), child(setup, "EVENTS")->count, group);
+    }
+    /* QUIT appears with CHEATS; it and the question fade with it. */
+    name_too(stone, "cheats", new_names, new_ids, 1);
+    name_too(deity, "cheats", new_names, new_ids, 4);
+    return 1;
+}
+
 static int edit_video_screen(Node *screen, const char *unused)
 {
     (void)unused;
@@ -897,10 +1149,11 @@ static int write_patch(const char *game_dir)
 {
     /* Per menu: its Options screen, the page and the page's .atr; then the
      * strings, the history file, history.txt and the marker. */
-    enum { OPTIONS_TEXT = 3 * MENU_COUNT, VIDEO_HISTORY, HISTORY_LIST, MARKER, PRESS_START, FILE_COUNT };
+    enum { OPTIONS_TEXT = 3 * MENU_COUNT, VIDEO_HISTORY, HISTORY_LIST, MARKER, PRESS_START, MAIN_MENU, FILE_COUNT };
     PatchFile files[FILE_COUNT];
     Trees trees;
-    Buffer tree = {0}, existing = {0};
+    Buffer tree = {0}, existing = {0}, pause = {0};
+    Node *pause_screen = NULL;
     char path[MAX_PATH], from[MAX_PATH], to[MAX_PATH];
     int ok = 0, i, s;
     size_t m;
@@ -937,6 +1190,11 @@ static int write_patch(const char *game_dir)
     }
     snprintf(from, sizeof from, SCREENS "firstinteractivescreen\\firstinteractivescreen.ati");
     if (!patch_screen(&trees, from, from, &files[PRESS_START], any_button_starts, NULL)) goto done;
+    if (!trees_read(&trees, SCREENS "ingamepause\\ingamepause.ati", &pause) || !(pause_screen = screen_load(&pause)))
+        goto done;
+    s_pause_screen = pause_screen;
+    snprintf(from, sizeof from, SCREENS "mainmenu\\mainmenu.ati");
+    if (!patch_screen(&trees, from, from, &files[MAIN_MENU], add_quit_entry, NULL)) goto done;
 
     files[OPTIONS_TEXT].key = tree_key("data\\text\\options.txm");
     files[VIDEO_HISTORY].key = tree_key("data\\history\\video.hst");
@@ -976,6 +1234,9 @@ static int write_patch(const char *game_dir)
         fprintf(stderr, "[VIDEO] %s %s (%zu bytes)\n", ok ? "wrote" : "could not write", path, tree.size);
     }
 done:
+    s_pause_screen = NULL;
+    node_free(pause_screen);
+    free(pause.data);
     for (i = 0; i < FILE_COUNT; i++) free(files[i].data.data);
     free(tree.data);
     free(existing.data);
@@ -1128,29 +1389,44 @@ static uint32_t *dds_decode(const uint8_t *data, size_t size, uint32_t *width, u
     return pixels;
 }
 
+/* The PC install named by pc_game_dir (or RECOMP_PC_GAME_DIR); 0 if none. */
+static int pc_game_dir(char *directory, size_t size)
+{
+    const char *env = getenv("RECOMP_PC_GAME_DIR");
+    if (env && *env) snprintf(directory, size, "%s", env);
+    else GetPrivateProfileStringA("paths", "pc_game_dir", "", directory, (DWORD)size, s_ini_path);
+    return *directory != 0;
+}
+
+/* A DDS of the PC install, `path` under its data\Textures, decoded. */
+static uint32_t *pc_texture(const char *directory, const char *path, uint32_t *width, uint32_t *height)
+{
+    char full[MAX_PATH];
+    uint32_t *pixels = NULL;
+    uint8_t *data;
+    long size;
+    FILE *file;
+    snprintf(full, sizeof full, "%s\\data\\Textures\\%s", directory, path);
+    if (!(file = fopen(full, "rb"))) return NULL;
+    fseek(file, 0, SEEK_END); size = ftell(file); fseek(file, 0, SEEK_SET);
+    data = (uint8_t *)malloc(size > 0 ? (size_t)size : 1);
+    if (size > 0 && fread(data, 1, (size_t)size, file) == (size_t)size)
+        pixels = dds_decode(data, (size_t)size, width, height);
+    fclose(file);
+    free(data);
+    return pixels;
+}
+
 static int load_pc_icons(void)
 {
     char directory[MAX_PATH], path[MAX_PATH];
-    const char *env = getenv("RECOMP_PC_GAME_DIR");
     size_t i;
     int loaded = 0;
-    if (env && *env) snprintf(directory, sizeof directory, "%s", env);
-    else GetPrivateProfileStringA("paths", "pc_game_dir", "", directory, sizeof directory, s_ini_path);
-    if (!*directory) return 0;
+    if (!pc_game_dir(directory, sizeof directory)) return 0;
     for (i = 0; i < sizeof k_pc_icons / sizeof *k_pc_icons; i++) {
-        uint32_t width, height, *pixels = NULL;
-        uint8_t *data;
-        long size;
-        FILE *file;
-        snprintf(path, sizeof path, "%s\\data\\Textures\\OnScreenGraphics\\FrontEnd\\Controls\\%s",
-                 directory, k_pc_icons[i].file);
-        if (!(file = fopen(path, "rb"))) continue;
-        fseek(file, 0, SEEK_END); size = ftell(file); fseek(file, 0, SEEK_SET);
-        data = (uint8_t *)malloc(size > 0 ? (size_t)size : 1);
-        if (size > 0 && fread(data, 1, (size_t)size, file) == (size_t)size)
-            pixels = dds_decode(data, (size_t)size, &width, &height);
-        fclose(file);
-        free(data);
+        uint32_t width, height, *pixels;
+        snprintf(path, sizeof path, "OnScreenGraphics\\FrontEnd\\Controls\\%s", k_pc_icons[i].file);
+        pixels = pc_texture(directory, path, &width, &height);
         if (!pixels) continue;
         nv2a_gpu_replace_texture(k_pc_icons[i].hash, pixels, width, height);
         free(pixels);
@@ -1242,6 +1518,8 @@ static void apply_setting(int setting)
  * movement fell inside it and was lost, so the sum -- the pad's effective
  * value plus the mouse's -- is written as the axis that comes out of the
  * deadzone as that sum. */
+static void menu_pointer(void);
+
 static float through_deadzone(float axis)
 {
     float size = axis < 0 ? -axis : axis;
@@ -1263,6 +1541,7 @@ void video_settings_mouse_look(void)
     float turn[2];
     int dx = 0, dy = 0, step, axis;
     float *axes = (float *)((uintptr_t)0x250BD0u + g_xbox_mem_offset);
+    menu_pointer();
     /* DIAG RECOMP_LOOK_TEST=<x>: a constant effective look x. */
     if (test < 0) test = getenv("RECOMP_LOOK_TEST") ? (float)atof(getenv("RECOMP_LOOK_TEST")) : 0;
     if (s_values[SET_MOUSE_LOOK] != 1 && test <= 0) return;
@@ -1298,6 +1577,360 @@ void video_settings_cinema(int on)
     s_cinema = on;
     fprintf(stderr, "[VIDEO] cutscene %s\n", on ? "begins: 4:3" : "ends");
     apply_aspect();
+}
+
+/* ── Menu pointer ─────────────────────────────────────────────────
+ *
+ * The PC release's menus take the mouse: an arrow over the window, the entry
+ * under it focused, a click choosing it. Here, in any menu (FE Flag not 0):
+ *
+ *   - the toolkit lets the mouse go and shows the PC's cursor.dds
+ *     (xbox_FramebufferSetMenuPointer, xbox_FramebufferSetCursorImage);
+ *   - moving over an entry focuses it as the menu's up and down do: the
+ *     controller handed from the old entry to the new, then the screen's own
+ *     SetFocus (set_focus);
+ *   - a left click chooses it (A); on an option row (a SelectionMenuWidget,
+ *     changed with left and right) it steps the value on (right), a right
+ *     click back (left). A right click elsewhere is Back (B, or Start on the
+ *     pause menu's first screen, as Escape is), and the wheel steps an option
+ *     row's value under the pointer or else moves up and down.
+ *
+ * The screen is the loader's this (sub_00054A60). Its actors are a tree from
+ * +0x9C (next_actor); the focus is at +0x198. An entry is a widget (its
+ * class, the type its vtable's first function returns -- mov eax, type; ret
+ * -- is 0x242778 or derives from it: a type's first word is its parent) that
+ * can take the focus (+0x244 bit 0, which the menu's up and down also ask),
+ * and its rectangle on the 640x480 screen is at +0x2C4 (x, y, width,
+ * height). Option rows are told by the screen's .ati: a SelectionMenuWidget
+ * with no A button link. */
+extern __declspec(thread) uint32_t g_eax, g_ecx, g_edx, g_esp;
+extern void sub_000544D0(void);
+extern void xbox_FramebufferSetMenuPointer(int on);
+extern int xbox_FramebufferPointer(int *x, int *y, int *width, int *height);
+extern void xbox_FramebufferSetCursorImage(const uint32_t *bgra, int width, int height, int hot_x, int hot_y);
+extern float nv2a_gpu_presented_aspect(void);
+extern int xbox_FramebufferMouseButton(int which);
+extern void xbox_KbmPulse(const char *target, int ms);
+extern int xbox_KbmMenuWheel(void);
+
+#define WIDGET_TYPE 0x242778u
+#define PRESS_MS    70        /* a pad button held this long, then as long up */
+
+static char s_game_dir[MAX_PATH];
+static volatile uint32_t s_menu_screen;     /* the screen's object; 0 in a level */
+static char s_option_rows[64][32];          /* its option rows' names */
+static int s_option_row_count;
+
+/* A file of the game's data, patch0.tre's copy first. */
+static int archive_read(const char *path, Buffer *out)
+{
+    static Trees trees;
+    static int opened;
+    char patch[MAX_PATH];
+    uint32_t count, index, record[4], key = tree_key(path);
+    FILE *file;
+    snprintf(patch, sizeof patch, "%s\\patch0.tre", s_game_dir);
+    if ((file = fopen(patch, "rb")) != NULL) {
+        if (fread(&count, 4, 1, file) == 1 && count < 4096)
+            for (index = 0; index < count && fread(record, 16, 1, file) == 1; index++) {
+                if (record[2] != key) continue;
+                out->size = 0;
+                buffer_put(out, "", 0);
+                if (out->capacity < record[1]) {
+                    out->data = (uint8_t *)realloc(out->data, record[1]);
+                    out->capacity = record[1];
+                }
+                if (!fseek(file, (long)record[0], SEEK_SET) && fread(out->data, 1, record[1], file) == record[1]) {
+                    out->size = record[1];
+                    fclose(file);
+                    return 1;
+                }
+                break;
+            }
+        fclose(file);
+    }
+    if (!opened) opened = trees_open(&trees, s_game_dir) ? 1 : -1;
+    return opened > 0 && trees_read(&trees, path, out);
+}
+
+static int has_a_button_link(const Node *actor)
+{
+    uint32_t i;
+    for (i = 0; i < actor->count; i++) {
+        const Node *cause = child(actor->children[i], "CAUSE"), *any = child(cause, "ANY");
+        if (!strcmp(actor->children[i]->name, "LINK") && cause && is_event(cause, "CoBu") &&
+                any && any->value_size && (any->value[0] & 0x40))
+            return 1;
+    }
+    return 0;
+}
+
+/* The screen's option rows, from its .ati (`name` is its .atr). */
+static void find_option_rows(const char *name)
+{
+    static const char kind[] = "selectionmenuwidget.atr";
+    char path[MAX_PATH], *dot;
+    Buffer file = {0};
+    Node *screen;
+    uint32_t i;
+    s_option_row_count = 0;
+    if (!_strnicmp(name, "d:\\", 3)) name += 3;
+    snprintf(path, sizeof path, "%s", name);
+    if (!(dot = strrchr(path, '.')) || _stricmp(dot, ".atr")) return;
+    dot[3] = 'i';
+    if (!archive_read(path, &file) || !(screen = screen_load(&file))) {
+        free(file.data);
+        return;
+    }
+    for (i = 0; i < screen->count && s_option_row_count < COUNT(s_option_rows); i++) {
+        const Node *actor = screen->children[i], *actor_name = child(actor, "NAME");
+        size_t n = actor->value_size, k = sizeof kind - 1;
+        if (!actor_name || !actor_name->value_size || n < k || _strnicmp((const char *)actor->value + n - k, kind, k) ||
+                has_a_button_link(actor))
+            continue;
+        snprintf(s_option_rows[s_option_row_count++], sizeof s_option_rows[0], "%.*s",
+                 (int)actor_name->value_size - 1, (const char *)actor_name->value);
+    }
+    node_free(screen);
+    free(file.data);
+}
+
+void video_settings_menu_screen(uint32_t screen, const char *name)
+{
+    char lower[160];
+    size_t n;
+    for (n = 0; n + 1 < sizeof lower && name[n]; n++) lower[n] = (char)tolower((unsigned char)name[n]);
+    lower[n] = 0;
+    if (!strstr(lower, "\\screens\\")) {
+        s_menu_screen = 0;
+        return;
+    }
+    find_option_rows(name);
+    s_menu_screen = screen;
+    fprintf(stderr, "[MENU] screen %08X, %d option rows\n", screen, s_option_row_count);
+}
+
+static int guest_float(uint32_t va, float *value)
+{
+    uint32_t bits;
+    if (!guest_read(va, &bits)) return 0;
+    memcpy(value, &bits, 4);
+    return 1;
+}
+
+static int is_widget(uint32_t actor)
+{
+    static uint32_t known[32], verdict[32];
+    uint32_t vtable, function, word, type, depth;
+    int slot;
+    if (!guest_read(actor, &vtable)) return 0;
+    for (slot = 0; slot < 32 && known[slot]; slot++)
+        if (known[slot] == vtable) return (int)verdict[slot];
+    /* The class: its first virtual is mov eax, type (B8 imm32); ret (C3). */
+    if (!guest_read(vtable, &function) || !guest_read(function, &word) || (word & 0xFF) != 0xB8 ||
+            !guest_read(function + 4, &type) || ((type >> 8) & 0xFF) != 0xC3) return 0;
+    guest_read(function + 1, &type);
+    for (depth = 0; depth < 16 && type && type != WIDGET_TYPE; depth++)
+        if (!guest_read(type, &type)) type = 0;
+    if (slot < 32) { known[slot] = vtable; verdict[slot] = type == WIDGET_TYPE; }
+    return type == WIDGET_TYPE;
+}
+
+static int is_option_row(uint32_t actor)
+{
+    char name[32];
+    uint32_t text;
+    int i;
+    if (!guest_read(actor + 0x5C, &text)) return 0;
+    __try {
+        snprintf(name, sizeof name, "%s", (const char *)((uintptr_t)text + g_xbox_mem_offset));
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0;
+    }
+    for (i = 0; i < s_option_row_count; i++)
+        if (!strcmp(name, s_option_rows[i])) return 1;
+    return 0;
+}
+
+/* The screen's actors are a tree, walked depth first (sub_0009C1C0): the
+ * first child at +0x6C (while +0x74 says there are children), the next
+ * sibling at +0x14, the parent at +0x64 (or +0x68). */
+static uint32_t next_actor(uint32_t actor)
+{
+    uint32_t next = 0, up = 0;
+    if (guest_read(actor + 0x74, &next) && next && guest_read(actor + 0x6C, &next) && next) return next;
+    if (guest_read(actor + 0x14, &next) && next) return next;
+    if (!guest_read(actor + 0x64, &up) || !up) guest_read(actor + 0x68, &up);
+    while (up) {
+        if (guest_read(up + 0x14, &next) && next) return next;
+        actor = up;
+        if (!guest_read(actor + 0x64, &up) || !up) if (!guest_read(actor + 0x68, &up)) up = 0;
+    }
+    return 0;
+}
+
+/* The entry of `screen` at (x, y) on the 640x480 screen, or 0. */
+static uint32_t entry_at(uint32_t screen, float x, float y)
+{
+    uint32_t actor, owner, flags;
+    int n;
+    float box[4];
+    if (!guest_read(screen + 0x9C, &actor)) return 0;
+    for (n = 0; actor && n < 2048; n++, actor = next_actor(actor)) {
+        if (is_widget(actor) && guest_read(actor + 0x48, &owner) && owner == screen &&
+                guest_read(actor + 0x244, &flags) && (flags & 1) &&
+                guest_float(actor + 0x2C4, &box[0]) && guest_float(actor + 0x2C8, &box[1]) &&
+                guest_float(actor + 0x2CC, &box[2]) && guest_float(actor + 0x2D0, &box[3]) &&
+                box[2] > 0 && box[3] > 0 && box[2] < 2000 && box[3] < 2000 &&
+                x >= box[0] && x < box[0] + box[2] && y >= box[1] && y < box[1] + box[3])
+            return actor;
+    }
+    return 0;
+}
+
+/* A this-call into the game, on its thread between its own calls; its eax. */
+static uint32_t guest_call(void (*function)(void), uint32_t self, int count, const uint32_t *arguments)
+{
+    uint32_t eax = g_eax, ecx = g_ecx, edx = g_edx, esp = g_esp, result;
+    int i;
+    for (i = count; i-- > 0;) {
+        g_esp -= 4;
+        *(volatile uint32_t *)((uintptr_t)g_esp + g_xbox_mem_offset) = arguments[i];
+    }
+    g_esp -= 4;
+    *(volatile uint32_t *)((uintptr_t)g_esp + g_xbox_mem_offset) = 0;      /* return address */
+    g_ecx = self;
+    function();
+    result = g_eax;
+    g_eax = eax; g_ecx = ecx; g_edx = edx; g_esp = esp;
+    return result;
+}
+
+/* Focus `actor` as the menu's up and down do (sub_000A86A0): the controller
+ * goes with the focus -- a button press is the widget's that holds it -- so
+ * the old entry gives it up (sub_0003A1F0) and the new one takes the same
+ * (pad n: sub_00046D60(n); any pad: sub_00045390 or sub_00045450, as the old
+ * one had it), then the screen's SetFocus tells both widgets. */
+extern void sub_00038C50(void), sub_0003AA60(void), sub_0003AA80(void), sub_0003A1F0(void);
+extern void sub_00046D60(void), sub_00045390(void), sub_00045450(void);
+
+static void set_focus(uint32_t screen, uint32_t old, uint32_t actor)
+{
+    uint32_t pad = 0, owner, arguments[2];
+    int handed = 0;
+    if (old && guest_read(old + 0x48, &owner) && owner == screen && is_widget(old)) {
+        uint32_t control = 0;
+        if (guest_read(old + 0x210, &control) && control && guest_call(sub_00038C50, old, 0, NULL)) {
+            if (guest_read(control + 4, &pad)) handed = (int)pad + 1;
+        } else if (guest_call(sub_0003AA60, old, 0, NULL)) {
+            handed = -1;
+        } else if (guest_call(sub_0003AA80, old, 0, NULL)) {
+            handed = -2;
+        }
+        if (handed) guest_call(sub_0003A1F0, old, 0, NULL);
+    }
+    if (handed > 0) {
+        arguments[0] = (uint32_t)handed;
+        guest_call(sub_00046D60, actor, 1, arguments);
+    } else if (handed == -1) {
+        guest_call(sub_00045390, actor, 0, NULL);
+    } else if (handed == -2) {
+        guest_call(sub_00045450, actor, 0, NULL);
+    }
+    arguments[0] = actor;
+    arguments[1] = 1;
+    guest_call(sub_000544D0, screen, 2, arguments);
+}
+
+/* The pointer on the 640x480 menu: the frame is letterboxed in the window at
+ * its own shape, and a menu is drawn 4:3 in the middle of it. */
+static int pointer_on_menu(float *x, float *y)
+{
+    int px, py, width, height;
+    float aspect = nv2a_gpu_presented_aspect(), shown_w, shown_h, menu_w, menu_h;
+    if (!xbox_FramebufferPointer(&px, &py, &width, &height)) return 0;
+    if (aspect <= 0) aspect = 4.0f / 3;
+    shown_h = (float)height;
+    shown_w = shown_h * aspect;
+    if (shown_w > width) { shown_w = (float)width; shown_h = shown_w / aspect; }
+    menu_h = shown_h;
+    menu_w = menu_h * 4 / 3;
+    if (menu_w > shown_w) { menu_w = shown_w; menu_h = menu_w * 3 / 4; }
+    *x = (px - (width - menu_w) / 2) * 640 / menu_w;
+    *y = (py - (height - menu_h) / 2) * 480 / menu_h;
+    return *x >= 0 && *x < 640 && *y >= 0 && *y < 480;
+}
+
+/* Presses made for the pointer, one at a time: held, then let go as long. */
+static const char *s_press_target;
+static int s_press_count;
+static DWORD s_press_next;
+
+static void press(const char *target, int count)
+{
+    if (s_press_count && strcmp(s_press_target, target)) return;     /* one kind at a time */
+    s_press_target = target;
+    s_press_count += count;
+}
+
+static void press_step(void)
+{
+    DWORD now = GetTickCount();
+    if (!s_press_count || (long)(now - s_press_next) < 0) return;
+    xbox_KbmPulse(s_press_target, PRESS_MS);
+    s_press_next = now + 2 * PRESS_MS;
+    s_press_count--;
+}
+
+static void menu_pointer(void)
+{
+    static int pointer_on, last_buttons;
+    static float last_x = -1, last_y = -1;
+    uint32_t screen = s_menu_screen, focus = 0, hovered = 0;
+    int on = s_in_menu && screen, buttons, pressed, wheel, over;
+    float x, y;
+    if (on != pointer_on) {
+        xbox_FramebufferSetMenuPointer(on);
+        pointer_on = on;
+        s_press_count = 0;
+    }
+    if (!on) return;
+    press_step();
+    buttons = xbox_FramebufferMouseButton(0) | xbox_FramebufferMouseButton(1) << 1;
+    pressed = buttons & ~last_buttons;
+    last_buttons = buttons;
+    wheel = xbox_KbmMenuWheel();
+    over = pointer_on_menu(&x, &y);
+    if (over) hovered = entry_at(screen, x, y);
+    guest_read(screen + 0x198, &focus);
+
+    /* Moving onto an entry focuses it; a still pointer leaves the keys be. */
+    if (hovered && hovered != focus && (pressed || x != last_x || y != last_y)) {
+        set_focus(screen, focus, hovered);
+        focus = hovered;
+    }
+    if (over) { last_x = x; last_y = y; }
+    if (pressed & 1) {
+        if (hovered) press(is_option_row(hovered) ? "RIGHT" : "A", 1);
+    } else if (pressed & 2) {
+        if (hovered && is_option_row(hovered)) press("LEFT", 1);
+        else press(s_pause_menu ? "START" : "B", 1);
+    }
+    if (wheel) {
+        int row = hovered ? is_option_row(hovered) : focus && is_option_row(focus);
+        press(row ? (wheel > 0 ? "RIGHT" : "LEFT") : (wheel > 0 ? "UP" : "DOWN"), wheel > 0 ? wheel : -wheel);
+    }
+}
+
+/* The PC release's arrow, its tip the hot spot. */
+static void load_pc_cursor(void)
+{
+    char directory[MAX_PATH];
+    uint32_t width, height, *pixels;
+    if (!pc_game_dir(directory, sizeof directory)) return;
+    if (!(pixels = pc_texture(directory, "cursor.dds", &width, &height))) return;
+    xbox_FramebufferSetCursorImage(pixels, (int)width, (int)height, (int)(34 * width / 256), (int)(6 * height / 256));
+    free(pixels);
 }
 
 static DWORD WINAPI video_watch(LPVOID unused)
@@ -1355,12 +1988,14 @@ void video_settings_start(const char *game_dir)
      * c[187] (their bone palette is at c[96] + a0). */
     static const int projections[] = {187, 96};
     HANDLE thread;
+    snprintf(s_game_dir, sizeof s_game_dir, "%s", game_dir);
     write_patch(game_dir);
     nv2a_gpu_set_projection_registers(projections, 2);
     apply_aspect();
     xbox_FramebufferSetWindowAspect(aspect_ratio());
     apply_frames();
     load_pc_icons();
+    load_pc_cursor();
     apply_setting(SET_ANISOTROPY);
     apply_setting(SET_MSAA);
     apply_setting(SET_ICONS);
