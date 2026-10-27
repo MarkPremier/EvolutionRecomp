@@ -493,6 +493,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
                   "A=Space|Return,B=Back,X=WheelDown|E,Y=WheelUp|Q,LT=MouseR,RT=MouseL,"
                   "WHITE=Control|C,BLACK=None,START=Escape|Tab,BACK=None,LTHUMB=None,"
                   "RTHUMB=MouseM|Z,UP=Up,DOWN=Down,LEFT=Left,RIGHT=Right");
+    /* In menus (the front end and the pause menu) Escape is Back, as in the PC
+     * release, whose button icons show it; in play it pauses. */
+    if (!getenv("RECOMP_KBM_MENU_MAP"))
+        _putenv_s("RECOMP_KBM_MENU_MAP", "B=Back|Escape,START=Tab");
     /* No timeBeginPeriod(1): it slowed the intro movie to a few fps. The
      * toolkit's vblank and flip waits use high-resolution waitable timers. */
     printf("Loading XBE...\n");

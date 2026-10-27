@@ -10,4 +10,11 @@ void video_settings_load(void);
  * archives (xbe_entry_point), after the memory layout. */
 void video_settings_start(const char *game_dir);
 
+/* The title entered a screen: the front end (shown 4:3 and at the console's
+ * frame rate), the pause menu's first screen, or else the game. */
+void video_settings_screen(int front_end, int pause_menu);
+
+/* An in-engine cutscene began (1) or ended (0): shown 4:3, as it was framed. */
+void video_settings_cinema(int on);
+
 #endif

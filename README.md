@@ -37,10 +37,10 @@ CPU-renderer build (about 9 fps on the title screen).
   screen). `RECOMP_RENDER_SCALE=<n>` sets it (1 to 8, fractions allowed; 1 is
   the Xbox's resolution). The shadow map keeps its own size.
 - **Options > Video Options**, in the front end and in the pause menu, sets
-  the resolution (auto, 640x480 to 2560x1920), windowed or fullscreen, and
-  VSync while you play; see [Video Options](#video-options).
-- Known issues: the Xbox version runs at 30 fps and this runs at ~60, which
-  may speed up anything the game ties to frame rate; environment-map layers
+  the resolution, widescreen (up to 21:9), fullscreen, VSync, a frame limit
+  (up to 240 or off) and PC button icons while you play; see
+  [Video Options](#video-options).
+- Known issues: environment-map layers
   (water, Tek bow) and cave lighting are not yet compared with the console.
 
 ## What you need
@@ -163,11 +163,37 @@ effect at once and are kept in `turok_settings.ini` beside the exe:
 
 | Row | Values | Same as |
 |-----|--------|---------|
-| Resolution | auto, 640x480, 1280x960, 1920x1440, 2560x1920 | `RECOMP_RENDER_SCALE` |
+| Resolution | auto, 480p, 960p, 1440p, 1920p (lines; the width follows the aspect) | `RECOMP_RENDER_SCALE` |
+| Aspect ratio | 4:3, 16:10, 16:9, 21:9, auto (the monitor's) | |
 | Display | windowed, fullscreen (borderless) | Alt+Enter |
 | VSync | off, on | `RECOMP_VSYNC` |
+| Frame limit | 30, 60, 120, 144, 240, display (its refresh rate), off | |
+| Button icons | xbox, pc | |
 
 An environment variable set by hand still wins at start-up.
+
+- **Widescreen** widens the view rather than stretching it (Hor+): the game's
+  3D programs project through c96 (rigid) or c187 (skinned), and that row is
+  narrowed for draws to the screen. 2D draws stay at 4:3 in the middle unless
+  they reach the screen's edge (fades, the damage flash), so the HUD keeps its
+  shape. The front end, movies, loading screens and in-engine cutscenes (framed
+  for 4:3, with their own bars; StartCinema/EndCinema, `sub_00164230`/
+  `sub_001642A0`) stay 4:3. The window opens
+  at the chosen shape.
+- **Frame limit**: the game steps by a measured clock (`sub_00028B40`), so it
+  runs at the right speed at any rate. The front end stays at 60, as its
+  movies are paced by the vertical blank.
+- **Button icons, pc**: the menus' A and B prompts become the PC release's
+  Enter and Esc keys. They are read from a PC install, which you name in
+  `turok_settings.ini`: `[paths]` then `pc_game_dir=<folder with data\Textures>`
+  (or `RECOMP_PC_GAME_DIR`). They are swapped in the renderer, by a hash of
+  the Xbox textures. In menus Escape is Back (and resumes from the pause
+  menu); in play it pauses (`RECOMP_KBM_MENU_MAP`).
+
+The widescreen findings (c96/c187, the screen loader at USA `sub_00054A60`,
+the timing at `sub_00028B40`) come from phobos665's
+[turok-evolution-recomp](https://github.com/phobos665/turok-evolution-recomp)
+(PAL), reimplemented here.
 
 The page is game data, built at start-up from your own disc: the game reads
 `patch0.tre` beside its `supertree*.tre` archives if there is one, and its

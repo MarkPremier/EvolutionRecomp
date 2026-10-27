@@ -158,6 +158,66 @@ void sub_0017D5C0(void)
     }
 }
 
+/* ── Which screen the game is on (sub_00054A60) ────────────────
+ *
+ * The screen loader (this-call) builds y:\data\precachelists\autolists\
+ * <name>.pcl from the name at this+0x20 as it enters a screen or a level. The
+ * front end -- its screens, d:\data\levels\u_jcowlishaw\screens\<name>\ --
+ * stays 4:3 in widescreen; a level (pod-...) is the game. The pause menu's
+ * screens (ingame...) are the game's; its first (ingamepause) is told apart,
+ * as Escape resumes from it. Returns 1 for the front end, 2 for that screen. (The PAL release has the loader at
+ * sub_00054A80: found by phobos665's turok-evolution-recomp.) */
+#include "video_settings.h"
+extern void sub_00054A60_gen(void);
+
+static int is_front_end_screen(const char *name)
+{
+    char lower[160];
+    const char *screens;
+    size_t n;
+    for (n = 0; n + 1 < sizeof lower && name[n]; n++)
+        lower[n] = (char)(name[n] >= 'A' && name[n] <= 'Z' ? name[n] + 32 : name[n]);
+    lower[n] = 0;
+    screens = strstr(lower, "\\screens\\");
+    if (!screens) return 0;
+    if (!strncmp(screens + 9, "ingamepause\\", 12)) return 2;
+    return strncmp(screens + 9, "ingame", 6) != 0;
+}
+
+void sub_00054A60(void)
+{
+    uint32_t self = g_ecx;
+    uint32_t name = self ? TUROK_MEM32(self + 0x20u) : 0;
+    if (name) {
+        const char *text = (const char *)((uintptr_t)name + g_xbox_mem_offset);
+        int kind = is_front_end_screen(text);
+        fprintf(stderr, "[TUROK] screen %.96s: %s\n", text, kind == 1 ? "front end" : kind ? "pause menu" : "game");
+        video_settings_screen(kind == 1, kind == 2);
+    }
+    sub_00054A60_gen();
+}
+
+/* ── In-engine cutscenes (StartCinema / EndCinema) ─────────────
+ *
+ * The level events of those names (built by sub_00105xxx's factory,
+ * vtables 0x226AC8 and 0x226AD8) set and clear [[0x257E14]+0x1AC] in their
+ * execute methods. A cutscene is framed for 4:3, with its own letterbox
+ * bars, so widescreen shows it as it was made. */
+extern void sub_00164230_gen(void);
+extern void sub_001642A0_gen(void);
+
+void sub_00164230(void)
+{
+    sub_00164230_gen();
+    video_settings_cinema(1);
+}
+
+void sub_001642A0(void)
+{
+    sub_001642A0_gen();
+    video_settings_cinema(0);
+}
+
 /* ── Manual function overrides ─────────────────────────────── */
 
 /*

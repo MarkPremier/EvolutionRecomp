@@ -44,19 +44,49 @@ extern void nv2a_gpu_set_render_scale(float scale);
 extern void xbox_FramebufferSetFullscreen(int on);
 extern int xbox_FramebufferFullscreen(void);
 extern void xbox_SetPresentInterval(int interval);
+extern void nv2a_gpu_set_wide_factor(float factor);
+extern void nv2a_gpu_set_projection_registers(const int *registers, int count);
+extern void xbox_Nv2aSetVblankRate(double hz);
+extern void xbox_SetFlipUnlimited(int on);
+extern void xbox_FramebufferSetWindowAspect(float aspect);
+extern void nv2a_gpu_replace_texture(uint64_t hash, const uint32_t *bgra, uint32_t width, uint32_t height);
+extern void nv2a_gpu_set_texture_replacements(int on);
 
 /* ── Settings ─────────────────────────────────────────────────── */
 
-#define RESOLUTION_STEPS 5      /* auto, then 1x .. 4x of 640x480 */
+/* The page's rows, in order; row n is Video.hst item n + 1. Each steps
+ * through its values (shown, and written in turok_settings.ini, as their
+ * text). */
+enum { SET_RESOLUTION, SET_ASPECT, SET_DISPLAY, SET_VSYNC, SET_FRAMES, SET_ICONS, SETTING_COUNT };
 
-typedef struct VideoSettings {
-    int resolution;             /* 0 auto (matched to the monitor), n: n x 640x480 */
-    int fullscreen;             /* borderless, on the window's monitor */
-    int vsync;
-} VideoSettings;
+typedef struct VideoSetting {
+    const char *key, *label;
+    const char *const *values;
+    int count, fallback;
+} VideoSetting;
 
-static VideoSettings s_settings;
+static const char *const k_resolutions[] = {"auto", "480p", "960p", "1440p", "1920p"};
+static const char *const k_aspects[] = {"4:3", "16:10", "16:9", "21:9", "auto"};
+static const char *const k_displays[] = {"windowed", "fullscreen"};
+static const char *const k_switches[] = {"off", "on"};
+static const char *const k_frames[] = {"30", "60", "120", "144", "240", "display", "off"};
+static const char *const k_icons[] = {"xbox", "pc"};
+#define COUNT(array) ((int)(sizeof array / sizeof *array))
+
+static const VideoSetting k_settings[SETTING_COUNT] = {
+    {"resolution", "resolution", k_resolutions, COUNT(k_resolutions), 0},
+    {"aspect", "aspect ratio", k_aspects, COUNT(k_aspects), 0},
+    {"display", "display", k_displays, COUNT(k_displays), 0},
+    {"vsync", "vsync", k_switches, COUNT(k_switches), 0},
+    {"frame_limit", "frame limit", k_frames, COUNT(k_frames), 1},
+    {"button_icons", "button icons", k_icons, COUNT(k_icons), 0},
+};
+
+static int s_values[SETTING_COUNT];
 static char s_ini_path[MAX_PATH];
+static volatile int s_front_end = 1;     /* the title is in its 4:3 front end */
+static volatile int s_pause_menu;        /* on the pause menu's first screen */
+static volatile int s_cinema;            /* an in-engine cutscene is playing */
 
 static int clamp(int value, int low, int high)
 {
@@ -65,50 +95,64 @@ static int clamp(int value, int low, int high)
 
 static void settings_save(void)
 {
-    char value[16];
-    if (s_settings.resolution) snprintf(value, sizeof value, "%d", s_settings.resolution);
-    else strcpy(value, "auto");
-    WritePrivateProfileStringA("video", "resolution", value, s_ini_path);
-    WritePrivateProfileStringA("video", "fullscreen", s_settings.fullscreen ? "1" : "0", s_ini_path);
-    WritePrivateProfileStringA("video", "vsync", s_settings.vsync ? "1" : "0", s_ini_path);
+    int s;
+    for (s = 0; s < SETTING_COUNT; s++)
+        WritePrivateProfileStringA("video", k_settings[s].key, k_settings[s].values[s_values[s]], s_ini_path);
 }
 
-static int resolution_from_text(const char *text)
+/* A value's index from its text; -1 if it is none of them. */
+static int value_index(int setting, const char *text)
+{
+    int v;
+    for (v = 0; text && v < k_settings[setting].count; v++)
+        if (!_stricmp(text, k_settings[setting].values[v])) return v;
+    return -1;
+}
+
+/* RECOMP_RENDER_SCALE's value as the resolution row's (a factor; 1 is 480p). */
+static int resolution_from_scale(const char *text)
 {
     if (!text || !*text || !_stricmp(text, "auto")) return 0;
-    return clamp((int)(atof(text) + 0.5), 1, RESOLUTION_STEPS - 1);
+    return clamp((int)(atof(text) + 0.5), 1, COUNT(k_resolutions) - 1);
 }
 
 void video_settings_load(void)
 {
     char text[32], *slash;
     const char *env;
+    int s;
 
     GetModuleFileNameA(NULL, s_ini_path, sizeof s_ini_path);
     slash = strrchr(s_ini_path, '\\');
     snprintf(slash ? slash + 1 : s_ini_path, sizeof s_ini_path - (slash ? (size_t)(slash + 1 - s_ini_path) : 0),
              "turok_settings.ini");
 
-    GetPrivateProfileStringA("video", "resolution", "auto", text, sizeof text, s_ini_path);
-    s_settings.resolution = resolution_from_text(text);
-    s_settings.fullscreen = GetPrivateProfileIntA("video", "fullscreen", 0, s_ini_path) != 0;
-    s_settings.vsync = GetPrivateProfileIntA("video", "vsync", 0, s_ini_path) != 0;
+    for (s = 0; s < SETTING_COUNT; s++) {
+        GetPrivateProfileStringA("video", k_settings[s].key, "", text, sizeof text, s_ini_path);
+        s_values[s] = value_index(s, text);
+        /* Files from before the values were words. */
+        if (s_values[s] < 0 && *text && s == SET_RESOLUTION) s_values[s] = resolution_from_scale(text);
+        if (s_values[s] < 0 && *text && (s == SET_DISPLAY || s == SET_VSYNC)) s_values[s] = atoi(text) != 0;
+        if (s_values[s] < 0) s_values[s] = k_settings[s].fallback;
+    }
 
     /* What the runtime reads at start-up, unless set by hand; set by hand, it
      * is also what the page shows. */
     env = getenv("RECOMP_RENDER_SCALE");
-    if (env && *env) s_settings.resolution = resolution_from_text(env);
+    if (env && *env) s_values[SET_RESOLUTION] = resolution_from_scale(env);
     else {
-        if (s_settings.resolution) snprintf(text, sizeof text, "%d", s_settings.resolution);
+        if (s_values[SET_RESOLUTION]) snprintf(text, sizeof text, "%d", s_values[SET_RESOLUTION]);
         else strcpy(text, "auto");
         _putenv_s("RECOMP_RENDER_SCALE", text);
     }
     env = getenv("RECOMP_VSYNC");
-    if (env && *env) s_settings.vsync = atoi(env) > 0;
-    else _putenv_s("RECOMP_VSYNC", s_settings.vsync ? "1" : "0");
+    if (env && *env) s_values[SET_VSYNC] = atoi(env) > 0;
+    else _putenv_s("RECOMP_VSYNC", s_values[SET_VSYNC] ? "1" : "0");
 
-    fprintf(stderr, "[VIDEO] settings %s: resolution %d, fullscreen %d, vsync %d\n",
-            s_ini_path, s_settings.resolution, s_settings.fullscreen, s_settings.vsync);
+    fprintf(stderr, "[VIDEO] settings %s:", s_ini_path);
+    for (s = 0; s < SETTING_COUNT; s++)
+        fprintf(stderr, " %s %s", k_settings[s].key, k_settings[s].values[s_values[s]]);
+    fprintf(stderr, "\n");
 }
 
 /* ── Archives ─────────────────────────────────────────────────── */
@@ -486,7 +530,6 @@ static const char *target_of(const Node *event, char *name, size_t size)
 }
 
 #define OPTIONS_TXM   "$\\Data\\Text\\Options.txm"
-#define FRONTEND_TXM  "$\\Data\\Text\\FrontEnd.txm"
 #define OPTIONS_HST   "$\\Data\\History\\Options.hst"
 #define VIDEO_HST     "$\\Data\\History\\Video.hst"
 #define SCREENS       "data\\levels\\u_jcowlishaw\\screens\\"
@@ -502,14 +545,17 @@ static const struct VideoMenu {
 };
 #define MENU_COUNT (sizeof k_menus / sizeof *k_menus)
 
-/* Options.txm keys from 5 on: the entry, the page's title, its rows and
- * their values. */
-enum {
-    TEXT_ENTRY = 5, TEXT_TITLE, TEXT_RESOLUTION, TEXT_DISPLAY, TEXT_VSYNC,
-    TEXT_WINDOWED, TEXT_FULLSCREEN, TEXT_SCALES,
-};
-/* FrontEnd.txm's "off" ("on" follows it). */
-#define TEXT_OFF 3
+/* Options.txm keys from 5 on: the entry, the page's title, then each row's
+ * label followed by its values. */
+#define TEXT_ENTRY 5
+#define TEXT_TITLE 6
+
+static int text_label(int setting)
+{
+    int key = TEXT_TITLE + 1, s;
+    for (s = 0; s < setting; s++) key += 1 + k_settings[s].count;
+    return key;
+}
 
 /* An Options screen: a VIDEO OPTIONS entry in the empty slot below SOUND
  * OPTIONS, opening the page `page`. */
@@ -562,139 +608,167 @@ static int add_video_entry(Node *screen, const char *page)
     return 1;
 }
 
-/* Game Options' rows, reused: the row, its value box, their new names, the
- * Video.hst item, its last value, and the text file, first value text and
- * label. */
-static const struct VideoRow {
-    const char *row, *value, *new_row, *new_value;
-    int item, last;
-    const char *text;
-    int first, label;
-} k_rows[] = {
-    {"aim", "autoaimValueWidget", "resolution", "resolutionValueWidget", 1, RESOLUTION_STEPS - 1,
-     OPTIONS_TXM, TEXT_SCALES, TEXT_RESOLUTION},
-    {"hud", "hudValueWidget", "display", "displayValueWidget", 2, 1, OPTIONS_TXM, TEXT_WINDOWED, TEXT_DISPLAY},
-    {"crosshair", "crosshairValueWidget", "vsync", "vsyncValueWidget", 3, 1, FRONTEND_TXM, TEXT_OFF, TEXT_VSYNC},
-};
-static const char *const k_dropped[] = {"violence", "language", "violenceValueWidget", "languageValueWidget"};
+/* Game Options' rows: the first is the pattern for every row of the page. */
+static const char *const k_template_rows[] = {"aim", "hud", "crosshair", "violence", "language"};
+static const char *const k_template_values[] = {"autoaimValueWidget", "hudValueWidget", "crosshairValueWidget",
+                                                "violenceValueWidget", "languageValueWidget"};
 
-/* The rows are wider and their text smaller than Game Options': a value such
- * as 1920x1440 does not fit beside its label at the console's size. */
+/* The rows are wider, closer and their text smaller than Game Options': a
+ * value such as fullscreen does not fit beside its label at the console's
+ * size, and the page has six rows where Game Options has five. */
 #define ROW_WIDTH  31.0f
 #define TEXT_SCALE 0.75f
+#define ROW_STEP   3.4f
 
-static int dropped(const char *name)
+static int is_template(const char *name)
 {
-    size_t i;
-    for (i = 0; i < sizeof k_dropped / sizeof *k_dropped; i++)
-        if (!strcmp(name, k_dropped[i])) return 1;
+    int t;
+    for (t = 0; t < COUNT(k_template_rows); t++)
+        if (!strcmp(name, k_template_rows[t]) || !strcmp(name, k_template_values[t])) return 1;
     return 0;
 }
 
-static const char *renamed(const char *name)
+static int actor_id(const Node *actor)
 {
-    size_t i;
-    for (i = 0; i < sizeof k_rows / sizeof *k_rows; i++) {
-        if (!strcmp(name, k_rows[i].row)) return k_rows[i].new_row;
-        if (!strcmp(name, k_rows[i].value)) return k_rows[i].new_value;
-    }
-    return NULL;
+    const Node *id = child(actor, "ID");
+    return id && id->value_size == 1 ? id->value[0] : -1;
+}
+
+static void retarget(Node *event, const char *name, int id)
+{
+    set_text(child(event, "TARGETNAME"), name);
+    set_byte(child(event, "TARGETID"), id);
 }
 
 static int make_video_screen(Node *screen)
 {
-    Node *title = actor_named(screen, "title", NULL), *bbutton = actor_named(screen, "BButton", NULL), *deity;
-    uint32_t i, j, k;
-    size_t r;
-    char name[64];
+    Node *row = actor_named(screen, k_template_rows[0], NULL), *value = actor_named(screen, k_template_values[0], NULL);
+    Node *title = actor_named(screen, "title", NULL), *bbutton = actor_named(screen, "BButton", NULL);
+    Node *deity = actor_named(screen, "DeityNoFade", NULL), *limit = NULL;
+    float row_position[3], row_scale[3], value_position[3], value_scale[3];
+    char name[64], row_names[SETTING_COUNT][32], value_names[SETTING_COUNT][48];
+    int row_ids[SETTING_COUNT], value_ids[SETTING_COUNT], id = 0, s;
+    uint32_t i, j, at = 0;
 
-    for (r = 0; r < sizeof k_rows / sizeof *k_rows; r++) {
-        const struct VideoRow *row = &k_rows[r];
-        Node *label = actor_named(screen, row->row, NULL), *value = actor_named(screen, row->value, NULL);
-        Node *label_vars = child(label, "ACTOR_VARIABLES"), *value_vars = child(value, "ACTOR_VARIABLES");
-        float label_scale[3], value_position[3], value_scale[3];
-        if (!label_vars || !value_vars || !get_vector(child(label, "SCALE"), label_scale) ||
-                !get_vector(child(value, "POS"), value_position) || !get_vector(child(value, "SCALE"), value_scale))
-            return 0;
-        value_position[0] += (ROW_WIDTH - label_scale[0]) / 2;
-        label_scale[0] = ROW_WIDTH;
-        label_scale[1] *= TEXT_SCALE;
-        value_scale[1] *= TEXT_SCALE;
-        set_vector(child(label, "SCALE"), label_scale);
-        set_vector(child(value, "POS"), value_position);
-        set_vector(child(value, "SCALE"), value_scale);
-        set_text(child(label_vars, "W_TMF"), OPTIONS_TXM);
-        set_byte(child(label_vars, "W_TMN"), row->label);
-        set_text(child(value_vars, "W_TMF"), row->text);
-        set_byte(child(value_vars, "W_TMN"), row->first);
-        set_text(child(value_vars, "W_THF"), VIDEO_HST);
-        set_byte(child(value_vars, "W_THI"), row->item);
-        set_text(child(value_vars, "A_HIF"), VIDEO_HST);
-        set_byte(child(value_vars, "A_HII"), row->item);
-    }
-    if (!title || !bbutton) return 0;
-    set_text(child(child(title, "ACTOR_VARIABLES"), "W_TMF"), OPTIONS_TXM);
-    set_byte(child(child(title, "ACTOR_VARIABLES"), "W_TMN"), TEXT_TITLE);
+    if (!row || !value || !title || !bbutton || !deity || !get_vector(child(row, "POS"), row_position) ||
+            !get_vector(child(row, "SCALE"), row_scale) || !get_vector(child(value, "POS"), value_position) ||
+            !get_vector(child(value, "SCALE"), value_scale) || !child(row, "ACTOR_VARIABLES") ||
+            !child(value, "ACTOR_VARIABLES")) return 0;
+    for (i = 0; i < screen->count; i++)
+        if (actor_id(screen->children[i]) > id) id = actor_id(screen->children[i]);
+    row = node_clone(row);
+    value = node_clone(value);
 
-    /* Violence and language go; so do the back button's moves for languages
-     * with longer words. */
+    /* The template's rows make way for the page's, where they were. */
     for (i = screen->count; i-- > 0;) {
         Node *actor_name = child(screen->children[i], "NAME");
-        if (actor_name && actor_name->value_size &&
-                dropped((const char *)actor_name->value)) node_remove(screen, i);
+        if (actor_name && actor_name->value_size && is_template((const char *)actor_name->value)) {
+            node_remove(screen, i);
+            at = i;
+        }
     }
+    for (s = 0; s < SETTING_COUNT; s++) {
+        Node *label = node_clone(row), *box = node_clone(value);
+        Node *label_vars = child(label, "ACTOR_VARIABLES"), *box_vars = child(box, "ACTOR_VARIABLES");
+        float position[3], scale[3];
+        snprintf(row_names[s], sizeof row_names[s], "%s", k_settings[s].key);
+        snprintf(value_names[s], sizeof value_names[s], "%sValueWidget", k_settings[s].key);
+        row_ids[s] = ++id;
+        value_ids[s] = ++id;
+        set_byte(child(label, "ID"), row_ids[s]);
+        set_text(child(label, "NAME"), row_names[s]);
+        set_byte(child(box, "ID"), value_ids[s]);
+        set_text(child(box, "NAME"), value_names[s]);
+
+        memcpy(position, row_position, sizeof position);
+        position[1] -= s * ROW_STEP;
+        set_vector(child(label, "POS"), position);
+        memcpy(scale, row_scale, sizeof scale);
+        scale[0] = ROW_WIDTH;
+        scale[1] *= TEXT_SCALE;
+        set_vector(child(label, "SCALE"), scale);
+        memcpy(position, value_position, sizeof position);
+        position[0] += (ROW_WIDTH - row_scale[0]) / 2;
+        position[1] -= s * ROW_STEP;
+        set_vector(child(box, "POS"), position);
+        memcpy(scale, value_scale, sizeof scale);
+        scale[1] *= TEXT_SCALE;
+        set_vector(child(box, "SCALE"), scale);
+
+        set_text(child(label_vars, "W_TMF"), OPTIONS_TXM);
+        set_byte(child(label_vars, "W_TMN"), text_label(s));
+        set_text(child(box_vars, "W_TMF"), OPTIONS_TXM);
+        set_byte(child(box_vars, "W_TMN"), text_label(s) + 1);
+        set_text(child(box_vars, "W_THF"), VIDEO_HST);
+        set_byte(child(box_vars, "W_THI"), s + 1);
+        set_text(child(box_vars, "A_HIF"), VIDEO_HST);
+        set_byte(child(box_vars, "A_HII"), s + 1);
+        /* The row's own setup points its value box at it. */
+        for (i = 0; i < label->count; i++) {
+            Node *events = child(label->children[i], "EVENTS");
+            for (j = 0; events && j < events->count; j++) retarget(events->children[j], value_names[s], value_ids[s]);
+        }
+        node_insert(screen, at++, label);
+        node_insert(screen, at++, box);
+    }
+    node_free(row);
+    node_free(value);
+
+    set_text(child(child(title, "ACTOR_VARIABLES"), "W_TMF"), OPTIONS_TXM);
+    set_byte(child(child(title, "ACTOR_VARIABLES"), "W_TMN"), TEXT_TITLE);
+    /* The back button's moves for languages with longer words. */
     for (i = bbutton->count; i-- > 0;)
         if (!strcmp(bbutton->children[i]->name, "LINK")) node_remove(bbutton, i);
 
-    deity = actor_named(screen, "DeityNoFade", NULL);
-    if (!deity) return 0;
     for (i = deity->count; i-- > 0;) {
         Node *link = deity->children[i], *cause = child(link, "CAUSE"), *events = child(link, "EVENTS");
         if (strcmp(link->name, "LINK")) continue;
-        /* "aim > 1" and the like keep a row's value in range. */
+        /* "aim > 1" and the like keep a row's value in range: the first is the
+         * pattern for the page's. */
         if (cause && cause->value_size == 7 && !memcmp(cause->value, "History", 7) &&
                 is_text(child(cause, "HSTF"), OPTIONS_HST)) {
-            Node *item = child(cause, "ITM");
-            const struct VideoRow *row = NULL;
-            char text[48];
-            for (r = 0; item && item->value_size == 1 && r < sizeof k_rows / sizeof *k_rows; r++)
-                if (k_rows[r].item == item->value[0]) row = &k_rows[r];
-            if (!row) { node_remove(deity, i); continue; }
-            snprintf(text, sizeof text, "%s > %d", row->new_row, row->last);
-            set_text(link, text);
-            set_text(child(cause, "HSTF"), VIDEO_HST);
-            set_byte(child(cause, "ITM"), row->item);
-            set_byte(child(cause, "VAL"), row->last);
-            for (j = 0; events && j < events->count; j++)
-                if (events->children[j]->value_size == 4 && !memcmp(events->children[j]->value, "Hist", 4)) {
-                    set_text(child(events->children[j], "HSTF"), VIDEO_HST);
-                    set_byte(child(events->children[j], "ITM"), row->item);
-                    set_byte(child(events->children[j], "VAL"), row->last);
-                }
+            if (!limit) limit = node_clone(link);
+            node_remove(deity, i);
             continue;
         }
         /* The language versions' links hide violence or language. */
         snprintf(name, sizeof name, "%.*s", (int)link->value_size, (const char *)link->value);
         if (strstr(name, "version") || strstr(name, "Violence")) { node_remove(deity, i); continue; }
+        /* Setup and fade name each row ("Name."); setup also puts the focus on
+         * the first ("Focus.", "Controller"). */
         for (j = events ? events->count : 0; j-- > 0;) {
-            const char *target = target_of(events->children[j], name, sizeof name);
-            if (target && dropped(target)) node_remove(events, j);
-        }
-    }
-
-    for (i = 0; i < screen->count; i++) {
-        Node *actor = screen->children[i], *actor_name = child(actor, "NAME");
-        for (j = 0; j < actor->count; j++) {
-            Node *events = child(actor->children[j], "EVENTS");
-            if (strcmp(actor->children[j]->name, "LINK")) continue;
-            for (k = 0; events && k < events->count; k++) {
-                const char *target = target_of(events->children[k], name, sizeof name);
-                if (target && renamed(target)) set_text(child(events->children[k], "TARGETNAME"), renamed(target));
+            Node *event = events->children[j];
+            const char *target = target_of(event, name, sizeof name);
+            if (!target || !is_template(target)) continue;
+            if (strcmp(target, k_template_rows[0])) { node_remove(events, j); continue; }
+            if (event->value_size == 5 && !memcmp(event->value, "Name.", 5)) {
+                for (s = SETTING_COUNT; s-- > 1;) {
+                    Node *copy = node_clone(event);
+                    retarget(copy, row_names[s], row_ids[s]);
+                    node_insert(events, j + 1, copy);
+                }
             }
+            retarget(event, row_names[0], row_ids[0]);
         }
-        if (actor_name && actor_name->value_size && renamed((const char *)actor_name->value))
-            set_text(actor_name, renamed((const char *)actor_name->value));
     }
+    if (!limit) return 0;
+    for (s = 0; s < SETTING_COUNT; s++) {
+        Node *link = node_clone(limit), *cause = child(link, "CAUSE"), *events = child(link, "EVENTS");
+        int last = k_settings[s].count - 1;
+        snprintf(name, sizeof name, "%s > %d", row_names[s], last);
+        set_text(link, name);
+        set_text(child(cause, "HSTF"), VIDEO_HST);
+        set_byte(child(cause, "ITM"), s + 1);
+        set_byte(child(cause, "VAL"), last);
+        for (j = 0; events && j < events->count; j++)
+            if (events->children[j]->value_size == 4 && !memcmp(events->children[j]->value, "Hist", 4)) {
+                set_text(child(events->children[j], "HSTF"), VIDEO_HST);
+                set_byte(child(events->children[j], "ITM"), s + 1);
+                set_byte(child(events->children[j], "VAL"), last);
+            }
+        node_insert(deity, deity->count, link);
+    }
+    node_free(limit);
     return 1;
 }
 
@@ -727,16 +801,15 @@ static void add_text(Buffer *text, int key, const char *value)
 static void make_history(Buffer *out)
 {
     char line[96];
+    int s;
     buffer_text(out, ";------------------------------------------------------------------------------\r\n"
                      ";  Video options (recompilation)\r\n"
                      ";------------------------------------------------------------------------------\r\n\r\n"
                      "*Key   = 0\r\n*Value = \"All\"\r\n\r\n");
-    snprintf(line, sizeof line, "*Key   = 1\r\n*Value = \"Resolution <%d>\"\r\n\r\n", s_settings.resolution);
-    buffer_text(out, line);
-    snprintf(line, sizeof line, "*Key   = 2\r\n*Value = \"Display Mode <%d>\"\r\n\r\n", s_settings.fullscreen);
-    buffer_text(out, line);
-    snprintf(line, sizeof line, "*Key   = 3\r\n*Value = \"VSync <%d>\"\r\n\r\n", s_settings.vsync);
-    buffer_text(out, line);
+    for (s = 0; s < SETTING_COUNT; s++) {
+        snprintf(line, sizeof line, "*Key   = %d\r\n*Value = \"%s <%d>\"\r\n\r\n", s + 1, k_settings[s].key, s_values[s]);
+        buffer_text(out, line);
+    }
 }
 
 #define PATCH_MARKER "data\\recomp\\videooptions.txt"
@@ -785,12 +858,11 @@ static int write_patch(const char *game_dir)
     /* Per menu: its Options screen, the page and the page's .atr; then the
      * strings, the history file, history.txt and the marker. */
     enum { OPTIONS_TEXT = 3 * MENU_COUNT, VIDEO_HISTORY, HISTORY_LIST, MARKER, FILE_COUNT };
-    static const char *const scales[RESOLUTION_STEPS] = {"auto", "640x480", "1280x960", "1920x1440", "2560x1920"};
     PatchFile files[FILE_COUNT];
     Trees trees;
     Buffer tree = {0}, existing = {0};
     char path[MAX_PATH], from[MAX_PATH], to[MAX_PATH];
-    int ok = 0, i;
+    int ok = 0, i, s;
     size_t m;
     FILE *file;
 
@@ -831,12 +903,11 @@ static int write_patch(const char *game_dir)
     if (!trees_read(&trees, "data\\text\\options.txm", &files[OPTIONS_TEXT].data)) goto done;
     add_text(&files[OPTIONS_TEXT].data, TEXT_ENTRY, "VIDEO OPTIONS");
     add_text(&files[OPTIONS_TEXT].data, TEXT_TITLE, "Video Options");
-    add_text(&files[OPTIONS_TEXT].data, TEXT_RESOLUTION, "resolution");
-    add_text(&files[OPTIONS_TEXT].data, TEXT_DISPLAY, "display");
-    add_text(&files[OPTIONS_TEXT].data, TEXT_VSYNC, "vsync");
-    add_text(&files[OPTIONS_TEXT].data, TEXT_WINDOWED, "windowed");
-    add_text(&files[OPTIONS_TEXT].data, TEXT_FULLSCREEN, "fullscreen");
-    for (i = 0; i < RESOLUTION_STEPS; i++) add_text(&files[OPTIONS_TEXT].data, TEXT_SCALES + i, scales[i]);
+    for (s = 0; s < SETTING_COUNT; s++) {
+        add_text(&files[OPTIONS_TEXT].data, text_label(s), k_settings[s].label);
+        for (i = 0; i < k_settings[s].count; i++)
+            add_text(&files[OPTIONS_TEXT].data, text_label(s) + 1 + i, k_settings[s].values[i]);
+    }
 
     if (!trees_read(&trees, "data\\history\\history.txt", &files[HISTORY_LIST].data)) goto done;
     while (files[HISTORY_LIST].data.size &&
@@ -900,11 +971,11 @@ static int guest_name_is(uint32_t va, const char *suffix)
     return n >= s && !_stricmp(name + n - s, suffix);
 }
 
-/* The Video.hst items' values (8 bytes an item, the value first, from key 1:
+/* A history file's item values (8 bytes an item, the value first, from key 1:
  * key 0, "All", is not one), found through the history manager
  * [[0x250A84] + 0x80]: a vector of groups, each with its items at +4..+8 and
  * its file name at +0x14 (sub_00060680). */
-static uint32_t video_items(void)
+static uint32_t history_items(const char *file, uint32_t count)
 {
     uint32_t game, manager, first, last, at;
     if (!guest_read(0x250A84u, &game) || !guest_read(game + 0x80u, &manager) ||
@@ -912,12 +983,138 @@ static uint32_t video_items(void)
             last < first || last - first > 1024u) return 0;
     for (at = first; at < last; at += 4) {
         uint32_t group, name, begin, end;
-        if (!guest_read(at, &group) || !guest_read(group + 0x14u, &name) || !guest_name_is(name, "video.hst"))
+        if (!guest_read(at, &group) || !guest_read(group + 0x14u, &name) || !guest_name_is(name, file))
             continue;
-        if (guest_read(group + 4u, &begin) && guest_read(group + 8u, &end) && end >= begin + 3u * 8u)
+        if (guest_read(group + 4u, &begin) && guest_read(group + 8u, &end) && end >= begin + count * 8u)
             return begin;
     }
     return 0;
+}
+
+/* FrontEnd.hst's "FE Flag" (key 6): 0 in play, otherwise a menu (1 the front
+ * end, 2 the intro, 3 the pause menu). The keyboard's Escape is Back there
+ * and Start in play (RECOMP_KBM_MENU_MAP) -- and on the pause menu's first
+ * screen, where Start resumes and Back does nothing. */
+static void follow_menus(void)
+{
+    extern void xbox_KbmSetMenuMode(int on);
+    uint32_t items = history_items("frontend.hst", 6), flag;
+    if (items && guest_read(items + 5u * 8u, &flag)) xbox_KbmSetMenuMode(flag != 0 && !s_pause_menu);
+}
+
+/* ── PC button icons ──────────────────────────────────────────────
+ *
+ * The PC release draws the menus' A (select) and B (back) prompts as the
+ * keyboard's Enter and Escape. Its icons (data\Textures\OnScreenGraphics\
+ * FrontEnd\Controls\OSG_bf_a.dds and OSG_bf_bbutton.dds, read from a PC
+ * install named by pc_game_dir in turok_settings.ini's [paths], or
+ * RECOMP_PC_GAME_DIR) replace the Xbox ones where the renderer meets them:
+ * by the hash of the Xbox textures' bytes, DXT3 32x32 with two mips. */
+static const struct {
+    uint64_t hash;
+    const char *file;
+} k_pc_icons[] = {
+    {0x89FA67573E0F3F67ull, "OSG_bf_a.dds"},
+    {0x256B2E3DFDD6EA16ull, "OSG_bf_bbutton.dds"},
+};
+
+static uint32_t rgb565(uint16_t c)
+{
+    uint32_t r = (c >> 11) & 31, g = (c >> 5) & 63, b = c & 31;
+    return (r * 255 / 31) << 16 | (g * 255 / 63) << 8 | (b * 255 / 31);
+}
+
+static uint32_t mix(uint32_t a, uint32_t b, int wa, int wb)
+{
+    uint32_t out = 0, shift;
+    for (shift = 0; shift < 24; shift += 8)
+        out |= ((((a >> shift) & 255) * wa + ((b >> shift) & 255) * wb) / (wa + wb)) << shift;
+    return out;
+}
+
+/* A DDS's first image as B8G8R8A8 (DXT1, DXT3 or DXT5); NULL if not one. */
+static uint32_t *dds_decode(const uint8_t *data, size_t size, uint32_t *width, uint32_t *height)
+{
+    uint32_t w, h, fourcc, block, bx, by, i;
+    uint32_t *pixels;
+    size_t pos = 128;
+    if (size < 128 || memcmp(data, "DDS ", 4)) return NULL;
+    memcpy(&h, data + 12, 4); memcpy(&w, data + 16, 4); memcpy(&fourcc, data + 84, 4);
+    if (fourcc != 0x31545844 && fourcc != 0x33545844 && fourcc != 0x35545844) return NULL;
+    block = fourcc == 0x31545844 ? 8 : 16;
+    if (!w || !h || w > 1024 || h > 1024 || size < pos + (size_t)((w + 3) / 4) * ((h + 3) / 4) * block) return NULL;
+    pixels = (uint32_t *)calloc((size_t)w * h, 4);
+    for (by = 0; by < h; by += 4)
+        for (bx = 0; bx < w; bx += 4, pos += block) {
+            const uint8_t *b = data + pos;
+            uint32_t alpha[16], colors[4], indices;
+            uint16_t c0, c1;
+            for (i = 0; i < 16; i++) alpha[i] = 255;
+            if (fourcc == 0x33545844) {
+                for (i = 0; i < 16; i++) alpha[i] = ((b[i / 2] >> (4 * (i & 1))) & 15) * 17;
+                b += 8;
+            } else if (fourcc == 0x35545844) {
+                uint32_t a[8], k;
+                uint64_t bits = 0;
+                a[0] = b[0]; a[1] = b[1];
+                for (k = 2; k < 8; k++)
+                    a[k] = a[0] > a[1] ? (a[0] * (8 - k) + a[1] * (k - 1)) / 7
+                         : k < 6 ? (a[0] * (6 - k) + a[1] * (k - 1)) / 5 : (k == 6 ? 0 : 255);
+                for (k = 0; k < 6; k++) bits |= (uint64_t)b[2 + k] << (8 * k);
+                for (i = 0; i < 16; i++) alpha[i] = a[(bits >> (3 * i)) & 7];
+                b += 8;
+            }
+            c0 = (uint16_t)(b[0] | b[1] << 8); c1 = (uint16_t)(b[2] | b[3] << 8);
+            memcpy(&indices, b + 4, 4);
+            colors[0] = rgb565(c0); colors[1] = rgb565(c1);
+            if (c0 > c1 || block == 16) {
+                colors[2] = mix(colors[0], colors[1], 2, 1);
+                colors[3] = mix(colors[0], colors[1], 1, 2);
+            } else {
+                colors[2] = mix(colors[0], colors[1], 1, 1);
+                colors[3] = 0;
+            }
+            for (i = 0; i < 16; i++) {
+                uint32_t x = bx + i % 4, y = by + i / 4, k = (indices >> (2 * i)) & 3;
+                uint32_t a = block == 8 && c0 <= c1 && k == 3 ? 0 : alpha[i];
+                if (x < w && y < h) pixels[(size_t)y * w + x] = colors[k] | a << 24;
+            }
+        }
+    *width = w; *height = h;
+    return pixels;
+}
+
+static int load_pc_icons(void)
+{
+    char directory[MAX_PATH], path[MAX_PATH];
+    const char *env = getenv("RECOMP_PC_GAME_DIR");
+    size_t i;
+    int loaded = 0;
+    if (env && *env) snprintf(directory, sizeof directory, "%s", env);
+    else GetPrivateProfileStringA("paths", "pc_game_dir", "", directory, sizeof directory, s_ini_path);
+    if (!*directory) return 0;
+    for (i = 0; i < sizeof k_pc_icons / sizeof *k_pc_icons; i++) {
+        uint32_t width, height, *pixels = NULL;
+        uint8_t *data;
+        long size;
+        FILE *file;
+        snprintf(path, sizeof path, "%s\\data\\Textures\\OnScreenGraphics\\FrontEnd\\Controls\\%s",
+                 directory, k_pc_icons[i].file);
+        if (!(file = fopen(path, "rb"))) continue;
+        fseek(file, 0, SEEK_END); size = ftell(file); fseek(file, 0, SEEK_SET);
+        data = (uint8_t *)malloc(size > 0 ? (size_t)size : 1);
+        if (size > 0 && fread(data, 1, (size_t)size, file) == (size_t)size)
+            pixels = dds_decode(data, (size_t)size, &width, &height);
+        fclose(file);
+        free(data);
+        if (!pixels) continue;
+        nv2a_gpu_replace_texture(k_pc_icons[i].hash, pixels, width, height);
+        free(pixels);
+        loaded++;
+    }
+    fprintf(stderr, "[VIDEO] PC button icons: %d of %d from %s\n", loaded,
+            (int)(sizeof k_pc_icons / sizeof *k_pc_icons), directory);
+    return loaded;
 }
 
 static void item_write(uint32_t items, int item, int value)
@@ -928,9 +1125,78 @@ static void item_write(uint32_t items, int item, int value)
     }
 }
 
-static void apply_resolution(void)
+static DEVMODEA monitor_mode(void)
 {
-    nv2a_gpu_set_render_scale((float)s_settings.resolution);
+    DEVMODEA mode = {0};
+    mode.dmSize = sizeof mode;
+    if (!EnumDisplaySettingsA(NULL, ENUM_CURRENT_SETTINGS, &mode)) mode.dmPelsWidth = mode.dmPelsHeight = 0;
+    return mode;
+}
+
+/* Widescreen: the screen's width over 4:3's. The front end stays 4:3 (its
+ * stage is a 3D set built to end just past the 4:3 edges), and so do the
+ * in-engine cutscenes, framed for 4:3 with their own bars. */
+static float aspect_ratio(void)
+{
+    static const float ratios[] = {4.0f / 3, 16.0f / 10, 16.0f / 9, 64.0f / 27, 0};
+    float ratio = ratios[s_values[SET_ASPECT]];
+    if (!ratio) {
+        DEVMODEA mode = monitor_mode();
+        ratio = mode.dmPelsHeight ? (float)mode.dmPelsWidth / (float)mode.dmPelsHeight : 4.0f / 3;
+    }
+    return ratio < 4.0f / 3 ? 4.0f / 3 : ratio;
+}
+
+static void apply_aspect(void)
+{
+    nv2a_gpu_set_wide_factor(s_front_end || s_cinema ? 1.0f : aspect_ratio() * 3 / 4);
+}
+
+/* The frame limit is the emulated vertical blank's rate (each flip waits for
+ * one), or no wait at all. Turok steps its game by a measured clock
+ * (sub_00028B40), so it plays at the same speed at any rate. The front end
+ * keeps the console's 59.94: its movies are paced by the blank. */
+static void apply_frames(void)
+{
+    static const double rates[] = {30, 59.94, 120, 144, 240, 0, 0};
+    int value = s_front_end ? 1 : s_values[SET_FRAMES];
+    double rate = rates[value];
+    if (value == COUNT(k_frames) - 2) {
+        DEVMODEA mode = monitor_mode();
+        rate = mode.dmDisplayFrequency > 1 ? mode.dmDisplayFrequency : 59.94;
+    }
+    xbox_SetFlipUnlimited(value == COUNT(k_frames) - 1);
+    xbox_Nv2aSetVblankRate(rate ? rate : 59.94);
+}
+
+static void apply_setting(int setting)
+{
+    switch (setting) {
+    case SET_RESOLUTION: nv2a_gpu_set_render_scale((float)s_values[SET_RESOLUTION]); break;
+    case SET_ASPECT: apply_aspect(); xbox_FramebufferSetWindowAspect(aspect_ratio()); break;
+    case SET_DISPLAY: xbox_FramebufferSetFullscreen(s_values[SET_DISPLAY]); break;
+    case SET_VSYNC: xbox_SetPresentInterval(s_values[SET_VSYNC]); break;
+    case SET_FRAMES: apply_frames(); break;
+    case SET_ICONS: nv2a_gpu_set_texture_replacements(s_values[SET_ICONS]); break;
+    }
+}
+
+void video_settings_screen(int front_end, int pause_menu)
+{
+    s_pause_menu = pause_menu;
+    if (front_end == s_front_end && !s_cinema) return;
+    s_front_end = front_end;
+    s_cinema = 0;      /* a level or menu left mid-cutscene */
+    apply_aspect();
+    apply_frames();
+}
+
+void video_settings_cinema(int on)
+{
+    if (on == s_cinema) return;
+    s_cinema = on;
+    fprintf(stderr, "[VIDEO] cutscene %s\n", on ? "begins: 4:3" : "ends");
+    apply_aspect();
 }
 
 static DWORD WINAPI video_watch(LPVOID unused)
@@ -939,58 +1205,43 @@ static DWORD WINAPI video_watch(LPVOID unused)
     int window_fullscreen = 0;
     (void)unused;
     for (;;) {
-        uint32_t items, values[4];
-        int item, changed = 0, now_fullscreen;
+        uint32_t items, value;
+        int s, changed = 0, now_fullscreen;
         Sleep(100);
 
         /* Alt+Enter: the page follows the window. */
         now_fullscreen = xbox_FramebufferFullscreen();
         if (now_fullscreen != window_fullscreen) {
             window_fullscreen = now_fullscreen;
-            if (now_fullscreen != s_settings.fullscreen) {
-                s_settings.fullscreen = now_fullscreen;
+            if (now_fullscreen != s_values[SET_DISPLAY]) {
+                s_values[SET_DISPLAY] = now_fullscreen;
                 changed = 1;
-                if (seen) item_write(seen, 2, now_fullscreen);
+                if (seen) item_write(seen, SET_DISPLAY + 1, now_fullscreen);
             }
         }
 
-        items = video_items();
+        items = history_items("video.hst", SETTING_COUNT);
+        follow_menus();
         if (items != seen && items) {
             fprintf(stderr, "[VIDEO] options page values at 0x%08X\n", items);
             /* The history starts at the saved settings; one changed since
              * (Alt+Enter) is put back on the page. */
-            item_write(items, 1, s_settings.resolution);
-            item_write(items, 2, s_settings.fullscreen);
-            item_write(items, 3, s_settings.vsync);
+            for (s = 0; s < SETTING_COUNT; s++) item_write(items, s + 1, s_values[s]);
         }
         seen = items;
-        if (items) {
-            for (item = 1; item <= 3; item++)
-                if (!guest_read(items + 8u * (uint32_t)(item - 1), &values[item])) break;
-            if (item > 3) {
-                int resolution = clamp((int)values[1], 0, RESOLUTION_STEPS - 1);
-                int fullscreen = values[2] != 0, vsync = values[3] != 0;
-                if (resolution != s_settings.resolution) {
-                    s_settings.resolution = resolution;
-                    apply_resolution();
-                    changed = 1;
-                }
-                if (fullscreen != s_settings.fullscreen) {
-                    s_settings.fullscreen = fullscreen;
-                    xbox_FramebufferSetFullscreen(fullscreen);
-                    changed = 1;
-                }
-                if (vsync != s_settings.vsync) {
-                    s_settings.vsync = vsync;
-                    xbox_SetPresentInterval(vsync);
-                    changed = 1;
-                }
-                if ((int)values[1] != resolution) item_write(items, 1, resolution);
-            }
+        for (s = 0; items && s < SETTING_COUNT && guest_read(items + 8u * (uint32_t)s, &value); s++) {
+            int v = clamp((int)value, 0, k_settings[s].count - 1);
+            if ((int)value != v) item_write(items, s + 1, v);
+            if (v == s_values[s]) continue;
+            s_values[s] = v;
+            apply_setting(s);
+            changed = 1;
         }
         if (changed) {
-            fprintf(stderr, "[VIDEO] resolution %d, fullscreen %d, vsync %d\n",
-                    s_settings.resolution, s_settings.fullscreen, s_settings.vsync);
+            fprintf(stderr, "[VIDEO]");
+            for (s = 0; s < SETTING_COUNT; s++)
+                fprintf(stderr, " %s %s", k_settings[s].key, k_settings[s].values[s_values[s]]);
+            fprintf(stderr, "\n");
             settings_save();
         }
     }
@@ -999,9 +1250,18 @@ static DWORD WINAPI video_watch(LPVOID unused)
 
 void video_settings_start(const char *game_dir)
 {
+    /* Turok's rigid programs project through c[96], its skinned ones through
+     * c[187] (their bone palette is at c[96] + a0). */
+    static const int projections[] = {187, 96};
     HANDLE thread;
     write_patch(game_dir);
-    if (s_settings.fullscreen) xbox_FramebufferSetFullscreen(1);
+    nv2a_gpu_set_projection_registers(projections, 2);
+    apply_aspect();
+    xbox_FramebufferSetWindowAspect(aspect_ratio());
+    apply_frames();
+    load_pc_icons();
+    apply_setting(SET_ICONS);
+    if (s_values[SET_DISPLAY]) xbox_FramebufferSetFullscreen(1);
     thread = CreateThread(NULL, 0, video_watch, NULL, 0, NULL);
     if (thread) CloseHandle(thread);
 }
