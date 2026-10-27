@@ -181,5 +181,8 @@ Useful while debugging:
 - **F11** in the game window writes `capture_<n>.txt` (every GPU batch of
   the next frame: textures, combiners, depth/blend/fog state, screen extent)
   and `capture_<n>.bmp` beside the exe
+- `RECOMP_HITCH_MS=20` logs every frame that took longer than 20 ms, with a
+  timestamp, to find periodic stutters. The periodic GPU report
+  (`RECOMP_PB_REPORT_MS`) stalls ~0.5 s each time, so it is off by default
 - `RECOMP_DRAW_ONLY=<first>-<last>`, `RECOMP_BATCH_INFO=<s>:<first>-<last>`
   and `RECOMP_DEPTH_DUMP=<s>` isolate, describe and dump GPU batches
