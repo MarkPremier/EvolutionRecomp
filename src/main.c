@@ -475,6 +475,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
         _putenv_s("RECOMP_KBM_LOOK_DIRECT", "0");
     if (!getenv("RECOMP_KBM_STICK_DEADZONE"))
         _putenv_s("RECOMP_KBM_STICK_DEADZONE", "6554");
+    /* Mouse counts per poll for a full stick deflection; the toolkit's 300
+     * turned far too slowly here. Lower is faster. */
+    if (!getenv("RECOMP_KBM_SENS"))
+        _putenv_s("RECOMP_KBM_SENS", "80");
     if (!getenv("RECOMP_KBM_INVERT_Y"))
         _putenv_s("RECOMP_KBM_INVERT_Y", "1");
     if (!getenv("RECOMP_KBM_WHEEL_MOVE"))

@@ -136,7 +136,7 @@ A pad works as on the console. Keyboard and mouse (on by default,
 
 The game ships with Invert Look on; the mouse is inverted back so moving it
 up looks up (`RECOMP_KBM_INVERT_Y=0` if you turn the game's option off).
-`RECOMP_KBM_SENS` sets the mouse counts for a full turn rate (default 300,
+`RECOMP_KBM_SENS` sets the mouse counts for a full turn rate (default 80,
 lower is faster), and `RECOMP_KBM_MAP` rebinds keys, e.g.
 `A=Space|Return,RT=MouseL,X=WheelDown|E`.
 
