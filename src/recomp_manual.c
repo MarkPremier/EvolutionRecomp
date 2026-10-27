@@ -218,6 +218,19 @@ void sub_001642A0(void)
     video_settings_cinema(0);
 }
 
+/* ── Raw mouse look (sub_0002F580) ─────────────────────────────
+ *
+ * The input mapper fills each player's axes (0x250BC0 + i*0x54, +0x08..+0x14:
+ * move x, move y, look x, look y) from the pads once a frame; the player turns
+ * by the look axes, unclamped (sub_0014E620 reads them). The mouse is added
+ * after it (video_settings_mouse_look). */
+extern void sub_0002F580_gen(void);
+void sub_0002F580(void)
+{
+    sub_0002F580_gen();
+    video_settings_mouse_look();
+}
+
 /* ── Manual function overrides ─────────────────────────────── */
 
 /*

@@ -169,6 +169,8 @@ effect at once and are kept in `turok_settings.ini` beside the exe:
 | VSync | off, on | `RECOMP_VSYNC` |
 | Frame limit | 30, 60, 120, 144, 240, display (its refresh rate), off | |
 | Button icons | xbox, pc | |
+| Mouse look | raw, stick | |
+| Mouse speed | 1 to 10 (5 by default; each step 1.4x) | |
 
 An environment variable set by hand still wins at start-up.
 
@@ -189,6 +191,15 @@ An environment variable set by hand still wins at start-up.
   (or `RECOMP_PC_GAME_DIR`). They are swapped in the renderer, by a hash of
   the Xbox textures. In menus Escape is Back (and resumes from the pause
   menu); in play it pauses (`RECOMP_KBM_MENU_MAP`).
+
+- **Mouse look, raw**: the mouse turns the camera by its counts, at any frame
+  rate, instead of moving the right stick (which turns at a stick's capped,
+  accelerated rate). The counts over the frame's time are added to player 1's
+  look axes after the input mapper (`sub_0002F580`); the game does not clamp
+  them. "stick" is the old behaviour, tuned by `RECOMP_KBM_SENS`. The game's
+  own horiz/vert speed (Control Setup) still scale it.
+- **Press Start** takes any button (the screen's link is given the button mask
+  of its own any-button link).
 
 The widescreen findings (c96/c187, the screen loader at USA `sub_00054A60`,
 the timing at `sub_00028B40`) come from phobos665's

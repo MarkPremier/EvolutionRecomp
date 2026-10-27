@@ -17,4 +17,7 @@ void video_settings_screen(int front_end, int pause_menu);
 /* An in-engine cutscene began (1) or ended (0): shown 4:3, as it was framed. */
 void video_settings_cinema(int on);
 
+/* After the input mapper each frame: raw mouse look, when set. */
+void video_settings_mouse_look(void);
+
 #endif

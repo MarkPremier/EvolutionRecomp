@@ -49,6 +49,8 @@ extern void nv2a_gpu_set_projection_registers(const int *registers, int count);
 extern void xbox_Nv2aSetVblankRate(double hz);
 extern void xbox_SetFlipUnlimited(int on);
 extern void xbox_FramebufferSetWindowAspect(float aspect);
+extern void xbox_KbmSetRawMouse(int on);
+extern int xbox_FramebufferMouseDelta(int *dx, int *dy);
 extern void nv2a_gpu_replace_texture(uint64_t hash, const uint32_t *bgra, uint32_t width, uint32_t height);
 extern void nv2a_gpu_set_texture_replacements(int on);
 
@@ -57,7 +59,8 @@ extern void nv2a_gpu_set_texture_replacements(int on);
 /* The page's rows, in order; row n is Video.hst item n + 1. Each steps
  * through its values (shown, and written in turok_settings.ini, as their
  * text). */
-enum { SET_RESOLUTION, SET_ASPECT, SET_DISPLAY, SET_VSYNC, SET_FRAMES, SET_ICONS, SETTING_COUNT };
+enum { SET_RESOLUTION, SET_ASPECT, SET_DISPLAY, SET_VSYNC, SET_FRAMES, SET_ICONS, SET_MOUSE_LOOK, SET_MOUSE_SPEED,
+       SETTING_COUNT };
 
 typedef struct VideoSetting {
     const char *key, *label;
@@ -71,6 +74,8 @@ static const char *const k_displays[] = {"windowed", "fullscreen"};
 static const char *const k_switches[] = {"off", "on"};
 static const char *const k_frames[] = {"30", "60", "120", "144", "240", "display", "off"};
 static const char *const k_icons[] = {"xbox", "pc"};
+static const char *const k_mouse_looks[] = {"stick", "raw"};
+static const char *const k_speeds[] = {"1", "2", "3", "4", "5", "6", "7", "8", "9", "10"};
 #define COUNT(array) ((int)(sizeof array / sizeof *array))
 
 static const VideoSetting k_settings[SETTING_COUNT] = {
@@ -80,6 +85,8 @@ static const VideoSetting k_settings[SETTING_COUNT] = {
     {"vsync", "vsync", k_switches, COUNT(k_switches), 0},
     {"frame_limit", "frame limit", k_frames, COUNT(k_frames), 1},
     {"button_icons", "button icons", k_icons, COUNT(k_icons), 0},
+    {"mouse_look", "mouse look", k_mouse_looks, COUNT(k_mouse_looks), 1},
+    {"mouse_speed", "mouse speed", k_speeds, COUNT(k_speeds), 4},
 };
 
 static int s_values[SETTING_COUNT];
@@ -87,6 +94,7 @@ static char s_ini_path[MAX_PATH];
 static volatile int s_front_end = 1;     /* the title is in its 4:3 front end */
 static volatile int s_pause_menu;        /* on the pause menu's first screen */
 static volatile int s_cinema;            /* an in-engine cutscene is playing */
+static volatile int s_in_menu = 1;       /* FrontEnd.hst's FE Flag: not in play */
 
 static int clamp(int value, int low, int high)
 {
@@ -615,10 +623,10 @@ static const char *const k_template_values[] = {"autoaimValueWidget", "hudValueW
 
 /* The rows are wider, closer and their text smaller than Game Options': a
  * value such as fullscreen does not fit beside its label at the console's
- * size, and the page has six rows where Game Options has five. */
+ * size, and the page has eight rows where Game Options has five. */
 #define ROW_WIDTH  31.0f
 #define TEXT_SCALE 0.75f
-#define ROW_STEP   3.4f
+#define ROW_STEP   3.0f
 
 static int is_template(const char *name)
 {
@@ -847,6 +855,31 @@ static int patch_screen(Trees *trees, const char *from, const char *to, PatchFil
     return 1;
 }
 
+/* The title's "press start" screen: any button. Its "Start Released" link
+ * takes the button mask of the screen's own "reset timer" link, which any
+ * button fires. */
+static int any_button_starts(Node *screen, const char *unused)
+{
+    Node *widget = actor_named(screen, "PressStartWidget", NULL), *start = NULL, *any = NULL;
+    uint32_t i;
+    (void)unused;
+    for (i = 0; widget && i < widget->count; i++) {
+        Node *link = widget->children[i];
+        if (strcmp(link->name, "LINK")) continue;
+        if (link->value_size == 14 && !memcmp(link->value, "Start Released", 14)) start = child(link, "CAUSE");
+        if (link->value_size == 11 && !memcmp(link->value, "reset timer", 11)) any = child(link, "CAUSE");
+    }
+    if (!start || !any || !child(start, "ANY") || !child(any, "ANY") || !child(start, "APS") || !child(any, "APS"))
+        return 0;
+    for (i = 0; i < start->count; i++)
+        if (!strcmp(start->children[i]->name, "ANY") || !strcmp(start->children[i]->name, "APS")) {
+            Node *pattern = child(any, start->children[i]->name);
+            node_free(start->children[i]);
+            start->children[i] = node_clone(pattern);
+        }
+    return 1;
+}
+
 static int edit_video_screen(Node *screen, const char *unused)
 {
     (void)unused;
@@ -857,7 +890,7 @@ static int write_patch(const char *game_dir)
 {
     /* Per menu: its Options screen, the page and the page's .atr; then the
      * strings, the history file, history.txt and the marker. */
-    enum { OPTIONS_TEXT = 3 * MENU_COUNT, VIDEO_HISTORY, HISTORY_LIST, MARKER, FILE_COUNT };
+    enum { OPTIONS_TEXT = 3 * MENU_COUNT, VIDEO_HISTORY, HISTORY_LIST, MARKER, PRESS_START, FILE_COUNT };
     PatchFile files[FILE_COUNT];
     Trees trees;
     Buffer tree = {0}, existing = {0};
@@ -895,6 +928,8 @@ static int write_patch(const char *game_dir)
         snprintf(to, sizeof to, SCREENS "%s\\%s.atr", menu->page, menu->page);
         if (!patch_screen(&trees, from, to, &out[2], make_video_descriptor, menu->page)) goto done;
     }
+    snprintf(from, sizeof from, SCREENS "firstinteractivescreen\\firstinteractivescreen.ati");
+    if (!patch_screen(&trees, from, from, &files[PRESS_START], any_button_starts, NULL)) goto done;
 
     files[OPTIONS_TEXT].key = tree_key("data\\text\\options.txm");
     files[VIDEO_HISTORY].key = tree_key("data\\history\\video.hst");
@@ -999,7 +1034,9 @@ static void follow_menus(void)
 {
     extern void xbox_KbmSetMenuMode(int on);
     uint32_t items = history_items("frontend.hst", 6), flag;
-    if (items && guest_read(items + 5u * 8u, &flag)) xbox_KbmSetMenuMode(flag != 0 && !s_pause_menu);
+    if (!items || !guest_read(items + 5u * 8u, &flag)) return;
+    s_in_menu = flag != 0;
+    xbox_KbmSetMenuMode(flag != 0 && !s_pause_menu);
 }
 
 /* ── PC button icons ──────────────────────────────────────────────
@@ -1178,7 +1215,39 @@ static void apply_setting(int setting)
     case SET_VSYNC: xbox_SetPresentInterval(s_values[SET_VSYNC]); break;
     case SET_FRAMES: apply_frames(); break;
     case SET_ICONS: nv2a_gpu_set_texture_replacements(s_values[SET_ICONS]); break;
+    case SET_MOUSE_LOOK: xbox_KbmSetRawMouse(s_values[SET_MOUSE_LOOK]); break;
+    case SET_MOUSE_SPEED: break;      /* read each frame */
     }
+}
+
+/* Raw mouse look, after the input mapper has filled the players' axes
+ * (sub_0002F580): the mouse's counts this frame, over the frame's time, are
+ * added to player 1's look axes (0x250BD0 x, 0x250BD4 y, at stick scale).
+ * The game turns by axis x turn rate x frame time and does not clamp the
+ * axes, so a count turns the camera by the same angle at any frame rate and
+ * any speed of hand -- not at a stick's rate, as the mouse did through the
+ * right stick. Mouse speed steps by 1.4x around 5. */
+void video_settings_mouse_look(void)
+{
+    static LARGE_INTEGER frequency, last;
+    LARGE_INTEGER now;
+    double seconds, gain;
+    int dx = 0, dy = 0, step;
+    float *axes;
+    if (s_values[SET_MOUSE_LOOK] != 1) return;
+    if (!frequency.QuadPart) QueryPerformanceFrequency(&frequency);
+    QueryPerformanceCounter(&now);
+    seconds = last.QuadPart ? (double)(now.QuadPart - last.QuadPart) / (double)frequency.QuadPart : 1.0 / 60;
+    last = now;
+    if (seconds < 0.001) seconds = 0.001;
+    if (seconds > 0.1) seconds = 0.1;
+    xbox_FramebufferMouseDelta(&dx, &dy);
+    if (s_in_menu || (!dx && !dy)) return;
+    for (gain = 0.0005, step = 4; step < s_values[SET_MOUSE_SPEED]; step++) gain *= 1.4;
+    for (step = 4; step > s_values[SET_MOUSE_SPEED]; step--) gain /= 1.4;
+    axes = (float *)((uintptr_t)0x250BD0u + g_xbox_mem_offset);
+    axes[0] += (float)(dx * gain / seconds);
+    axes[1] -= (float)(dy * gain / seconds);
 }
 
 void video_settings_screen(int front_end, int pause_menu)
@@ -1261,6 +1330,7 @@ void video_settings_start(const char *game_dir)
     apply_frames();
     load_pc_icons();
     apply_setting(SET_ICONS);
+    apply_setting(SET_MOUSE_LOOK);
     if (s_values[SET_DISPLAY]) xbox_FramebufferSetFullscreen(1);
     thread = CreateThread(NULL, 0, video_watch, NULL, 0, NULL);
     if (thread) CloseHandle(thread);
