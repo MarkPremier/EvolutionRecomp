@@ -168,6 +168,8 @@ effect at once and are kept in `turok_settings.ini` beside the exe:
 | Display | windowed, fullscreen (borderless) | Alt+Enter |
 | VSync | off, on | `RECOMP_VSYNC` |
 | Frame limit | 30, 60, 120, 144, 240, display (its refresh rate), off | |
+| Anisotropy | off, 2x, 4x, 8x, 16x (16x by default) | |
+| MSAA | off, 2x, 4x, 8x | |
 | Button icons | xbox, pc | |
 | Mouse look | raw, stick | |
 | Mouse speed | 1 to 10 (5 by default; each step 1.4x) | |
@@ -196,8 +198,13 @@ An environment variable set by hand still wins at start-up.
   rate, instead of moving the right stick (which turns at a stick's capped,
   accelerated rate). The counts over the frame's time are added to player 1's
   look axes after the input mapper (`sub_0002F580`); the game does not clamp
-  them. "stick" is the old behaviour, tuned by `RECOMP_KBM_SENS`. The game's
+  them. The look axes then pass a 0.3 deadzone ((|a| - 0.3) / 0.7), which
+  swallowed small movements, so the pad's and the mouse's effective values
+  are summed and written as the axis that comes out of it as that sum. "stick" is the old behaviour, tuned by `RECOMP_KBM_SENS`. The game's
   own horiz/vert speed (Control Setup) still scale it.
+- **MSAA** applies to the screen's targets (multisampled copies resolved
+  whenever the game reads them); it combines with the render scale.
+  **Anisotropy** applies to mipmapped textures.
 - **Press Start** takes any button (the screen's link is given the button mask
   of its own any-button link).
 
