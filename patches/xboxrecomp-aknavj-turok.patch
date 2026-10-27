@@ -1147,16 +1147,31 @@ index f031faf..575e85a 100644
          std::fprintf(stderr, "[GPU-D3D11] constant buffer offsetting: %s\n",
                       context1 ? "supported" : "unavailable, using per-draw Map");
 diff --git a/src/kernel/nv2a_gpu_shader.h b/src/kernel/nv2a_gpu_shader.h
-index e27083f..c7de6b1 100644
+index e27083f..5c0828e 100644
 --- a/src/kernel/nv2a_gpu_shader.h
 +++ b/src/kernel/nv2a_gpu_shader.h
-@@ -471,7 +471,37 @@ PixelOutput ps_main(Pixel input,bool frontFacing:SV_IsFrontFace) {
+@@ -93,6 +93,13 @@ float4 guest_multiply(float4 left,float4 right) {
+  return float4(left.x==0||right.x==0?0:left.x*right.x,left.y==0||right.y==0?0:left.y*right.y,
+                left.z==0||right.z==0?0:left.z*right.z,left.w==0||right.w==0?0:left.w*right.w);
+ }
++/* The projective divide as the NV2A does it: s*(1/q), where zero times
++ * anything is zero. Turok's shadow vertex program writes (0,0,0,0) for a
++ * face turned from the light; that is a lookup at the map's corner with a
++ * zero reference, not 0/0. */
++float3 guest_project(float4 coordinate) {
++ return guest_multiply(float4(coordinate.xyz,0),(1/coordinate.w).xxxx).xyz;
++}
+ float guest_clip_w(float value) {
+  if(!isfinite(value))return value;
+  float magnitude=clamp(abs(value),5.421010862427522e-20,1.8446744073709552e19);
+@@ -471,8 +478,36 @@ PixelOutput ps_main(Pixel input,bool frontFacing:SV_IsFrontFace) {
    default:value=cube3.Sample(sampler3,direction);break;
     }
    }
 -  if(mode==2) {
+-   float3 uvw=coordinate.xyz/coordinate.w;
 +  if(mode==2 && (textureFlags&64)) {
-+   float3 uvw=coordinate.xyz/coordinate.w;
++   float3 uvw=guest_project(coordinate);
 +   float2 uv=uvw.xy;
 +   if(textureInfo[stage].z!=0)uv/=textureInfo[stage].xy;
 +   float maxDepth=(textureFlags&128)?16777215.0:65535.0;
@@ -1180,17 +1195,16 @@ index e27083f..c7de6b1 100644
 +              func==4?depth>reference:func==5?depth!=reference:func==6?depth>=reference:func==7)?1:0;
 +   }
 +   float2 blend=frac(uv*size-0.5);   /* gather order: x (0,1) y (1,1) z (1,0) w (0,0) */
-+   /* Outside the light's projection (w <= 0) the coordinate is not finite;
-+    * the compares still give 0 or 1, but NaN weights blackened whole faces. */
-+   if(!all(isfinite(blend)))blend=0;
++   if(!all(isfinite(blend)))blend=0;   /* q == 0 with a nonzero s or t */
 +   value=lerp(lerp(lit.w,lit.z,blend.x),lerp(lit.x,lit.y,blend.x),blend.y);
 +  }
 +  else if(mode==2) {
-    float3 uvw=coordinate.xyz/coordinate.w;
++   float3 uvw=guest_project(coordinate);
     float3 gradientX=ddx(uvw),gradientY=ddy(uvw);
     if(textureFlags&4)uvw.x=saturate(uvw.x);
+    if(textureFlags&8)uvw.y=saturate(uvw.y);
 diff --git a/src/kernel/nv2a_pb_exec.c b/src/kernel/nv2a_pb_exec.c
-index d7c0f20..5fe30e8 100644
+index d7c0f20..ff4e666 100644
 --- a/src/kernel/nv2a_pb_exec.c
 +++ b/src/kernel/nv2a_pb_exec.c
 @@ -437,6 +437,13 @@ static struct {
@@ -1559,7 +1573,7 @@ index d7c0f20..5fe30e8 100644
  static void raster_batch(void)
  {
  #ifndef _WIN32
-@@ -3049,6 +3296,121 @@ static void raster_batch(void)
+@@ -3049,6 +3296,149 @@ static void raster_batch(void)
      }
  
  #ifdef _WIN32
@@ -1669,6 +1683,34 @@ index d7c0f20..5fe30e8 100644
 +                }
 +                fprintf(info_out, "[BINFO]   screen %.0f,%.0f-%.0f,%.0f ofog %.3f..%.3f (%u of %u in front)\n",
 +                        x0, y0, x1, y1, f0, f1, seen, s_gpu.idx_count);
++                {
++                    /* The program (once per capture) and the constants it
++                     * reads, so a vertex program can be disassembled offline. */
++                    static uint32_t dumped[64], dumped_count, dumped_capture;
++                    uint32_t slot, hash = 2166136261u, end = s_gpu.vp_start, i;
++                    uint8_t used[192] = {0};
++                    if (dumped_capture != capture_seq) { dumped_capture = capture_seq; dumped_count = 0; }
++                    for (slot = s_gpu.vp_start; slot < 136; slot++) {
++                        const uint32_t *w = s_gpu.vp_program[slot];
++                        for (i = 0; i < 4; i++) hash = (hash ^ w[i]) * 16777619u;
++                        used[(w[1] >> 13) & 255u] = 1;
++                        end = slot;
++                        if (w[3] & 1u) break;
++                    }
++                    fprintf(info_out, "[BINFO]   vp start %u end %u hash %08X\n", s_gpu.vp_start, end, hash);
++                    for (i = 0; i < dumped_count && dumped[i] != hash; i++) {}
++                    if (i == dumped_count && dumped_count < 64) {
++                        dumped[dumped_count++] = hash;
++                        for (slot = s_gpu.vp_start; slot <= end; slot++)
++                            fprintf(info_out, "[VPROG] %08X %3u %08X %08X %08X %08X\n", hash, slot,
++                                    s_gpu.vp_program[slot][0], s_gpu.vp_program[slot][1],
++                                    s_gpu.vp_program[slot][2], s_gpu.vp_program[slot][3]);
++                    }
++                    for (i = 0; i < 192; i++)
++                        if (used[i])
++                            fprintf(info_out, "[BINFO]   c%u %g,%g,%g,%g\n", i, s_gpu.vp_constants[i][0],
++                                    s_gpu.vp_constants[i][1], s_gpu.vp_constants[i][2], s_gpu.vp_constants[i][3]);
++                }
 +            }
 +        }
 +        if (lo >= 0 && ((int)index < lo || (int)index > hi)) {
@@ -1681,7 +1723,7 @@ index d7c0f20..5fe30e8 100644
      double started = gpu_clock_seconds();
      double prior_submit = s_gpu.gpu_submit_seconds;
      int rendered = gpu_raster_batch();
-@@ -3820,6 +4182,7 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -3820,6 +4210,7 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
      if (method == 0x037C) { s_gpu.shade_mode = param; return; }
      if (method == 0x0300) { s_gpu.alpha_enable = param; return; }
      if (method == 0x033C) { s_gpu.alpha_func = param; return; }
@@ -1689,7 +1731,7 @@ index d7c0f20..5fe30e8 100644
      if (method == 0x0340) { s_gpu.alpha_ref = param & 255u; return; }
      if (method == 0x034C) { s_gpu.blend_constant = param; return; }
      if (method == 0x0350) { s_gpu.blend_equation = param; return; }
-@@ -4253,6 +4616,7 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -4253,6 +4644,7 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
          return;
  
      case NV097_FLIP_STALL:
@@ -1697,7 +1739,7 @@ index d7c0f20..5fe30e8 100644
          s_gpu.flush_flip++;
          cloak_marker_idle();
          /* The stall ends when the buffer being read is the one just finished.
-@@ -4276,25 +4640,50 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -4276,25 +4668,50 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
           * per-frame re-decode of render-to-texture surfaces. */
          if (s_gpu.pitch) {
              extern void xbox_FramebufferWindowPresent(uint32_t, uint32_t);
