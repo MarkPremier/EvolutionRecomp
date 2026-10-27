@@ -457,6 +457,33 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
         _putenv_s("RECOMP_USB_PORT", "2");
     if (!getenv("RECOMP_XINPUT_SLOT"))
         _putenv_s("RECOMP_XINPUT_SLOT", "auto");
+    /* Keyboard and mouse, merged onto controller 1 (a pad keeps working).
+     * WASD moves and the mouse turns through the right stick. The toolkit's
+     * direct camera look writes another game's camera addresses, so it is
+     * off. Turok's stick reading ignores |v| < 0.2 (sub_0001D590), so mouse
+     * motion is pushed past that deadzone to keep slow aim responsive. Turok
+     * ships with Invert Look on, so the mouse is inverted back: moving it up
+     * looks up. The keys follow Turok's default pad layout (Control Setup):
+     *   fire RT = left mouse, weapon mode LT = right mouse, jump A = Space,
+     *   next/prev weapon X/Y = wheel down/up or E/Q, duck White = Ctrl or C,
+     *   zoom (right stick click) = middle mouse or Z, pause Start = Esc or
+     *   Tab, menu back B = Backspace, menu select A = Enter, d-pad = arrows.
+     * RECOMP_KBM=0 turns it off; Alt+Esc releases the mouse. */
+    if (!getenv("RECOMP_KBM"))
+        _putenv_s("RECOMP_KBM", "1");
+    if (!getenv("RECOMP_KBM_LOOK_DIRECT"))
+        _putenv_s("RECOMP_KBM_LOOK_DIRECT", "0");
+    if (!getenv("RECOMP_KBM_STICK_DEADZONE"))
+        _putenv_s("RECOMP_KBM_STICK_DEADZONE", "6554");
+    if (!getenv("RECOMP_KBM_INVERT_Y"))
+        _putenv_s("RECOMP_KBM_INVERT_Y", "1");
+    if (!getenv("RECOMP_KBM_WHEEL_MOVE"))
+        _putenv_s("RECOMP_KBM_WHEEL_MOVE", "0");
+    if (!getenv("RECOMP_KBM_MAP"))
+        _putenv_s("RECOMP_KBM_MAP",
+                  "A=Space|Return,B=Back,X=WheelDown|E,Y=WheelUp|Q,LT=MouseR,RT=MouseL,"
+                  "WHITE=Control|C,BLACK=None,START=Escape|Tab,BACK=None,LTHUMB=None,"
+                  "RTHUMB=MouseM|Z,UP=Up,DOWN=Down,LEFT=Left,RIGHT=Right");
     /* No timeBeginPeriod(1): it slowed the intro movie to a few fps. The
      * toolkit's vblank and flip waits use high-resolution waitable timers. */
     printf("Loading XBE...\n");

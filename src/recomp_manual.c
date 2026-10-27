@@ -97,6 +97,32 @@ void sub_00194B40(void)
     sub_00194B40_gen();
 }
 
+/* ── DirectSound idle-voice notification (sub_001B23DD) ────── */
+
+/*
+ * The APU interrupt handler calls this with the handle of a voice the voice
+ * processor found inactive in its lists (SE2FE_IDLE_VOICE). It looks up the
+ * voice's owner, this->voices[handle] at +0x330, and unlinks it
+ * (sub_001B34BF). The emulated APU walks the lists on its own thread while
+ * the title edits them, so it can report a handle nobody owns -- voice 0 with
+ * a NULL owner -- which hardware never does; the unlink then dereferences
+ * NULL and the process dies (most often when a level is quit and every voice
+ * is released at once). An unowned handle has nothing to unlink: ignore it.
+ */
+extern __declspec(thread) uint32_t g_ecx;
+extern void sub_001B23DD_gen(void);
+
+void sub_001B23DD(void)
+{
+    uint32_t handle = TUROK_MEM32(g_esp + 4);
+
+    if (handle < 0x100u && TUROK_MEM32(g_ecx + 0x330u + handle * 4u) == 0) {
+        g_esp += 8;   /* ret 4 */
+        return;
+    }
+    sub_001B23DD_gen();
+}
+
 /* ── Manual function overrides ─────────────────────────────── */
 
 /*

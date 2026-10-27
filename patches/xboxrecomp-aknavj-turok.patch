@@ -87,6 +87,262 @@ index 7c36737..00fb215 100644
      unsigned int selected_handle, list;
  
      switch (method) {
+diff --git a/src/input/xinput_device.c b/src/input/xinput_device.c
+index 3c7bdd4..9dc09b6 100644
+--- a/src/input/xinput_device.c
++++ b/src/input/xinput_device.c
+@@ -12,6 +12,7 @@
+ 
+ #include "xinput_xbox.h"
+ #include <stdlib.h>
++#include <ctype.h>
+ #include <stdio.h>
+ #include <string.h>
+ #include <math.h>
+@@ -357,70 +358,112 @@ static void kbm_cam_setf(uint32_t camera, uint32_t offset, float v)
+ /* Face/triggers, matching what the build actually does (not what the docs
+  * guess): A is jump, B is use, X is melee, LT is crouch. So jump is on Space,
+  * melee on F, crouch on Control. A pad is expected to be the primary device,
+- * so this is the "there is no pad" scheme. Y is the right mouse button (no
+- * key); left stick click is R; right stick click is the middle mouse button.
+- * Override any key binding with
+- *   RECOMP_KBM_MAP="A=Return,B=E,X=Space,BLACK=Shift,WHITE=G,LT=Control,START=Tab,BACK=Escape,LTHUMB=R" */
+-static int k_a = VK_SPACE, k_b = 'E', k_x = 'F', k_y = 0,
+-           k_black = VK_SHIFT, k_white = 'G', k_lt = VK_CONTROL,
+-           k_start = VK_TAB, k_back = VK_ESCAPE,
+-           k_lthumb = 'R', k_rthumb = 0;
+-
+-struct kbm_bind { const char *name; int *vk; };
+-static struct kbm_bind kbm_binds[] = {
+-    { "A", &k_a }, { "B", &k_b }, { "X", &k_x }, { "Y", &k_y },
+-    { "BLACK", &k_black }, { "WHITE", &k_white }, { "LT", &k_lt },
+-    { "START", &k_start }, { "BACK", &k_back },
+-    { "LTHUMB", &k_lthumb }, { "RTHUMB", &k_rthumb },
++ * so this is the "there is no pad" scheme. Y is the right mouse button; left
++ * stick click is R; right stick click is the middle mouse button; the wheel
++ * steps the d-pad.
++ *
++ * Every pad input takes up to three keys or mouse inputs. Override any of
++ * them with
++ *   RECOMP_KBM_MAP="A=Space|Return,RT=MouseL,Y=WheelUp|Q,BACK=None"
++ * Key names: a letter or digit, Space Return Tab Escape Back Shift Control
++ * Alt Up Down Left Right, MouseL MouseR MouseM WheelUp WheelDown, or None.
++ * A listed target loses its default keys. */
++#define KBM_MOUSE_L    0x101
++#define KBM_MOUSE_R    0x102
++#define KBM_MOUSE_M    0x103
++#define KBM_WHEEL_UP   0x104
++#define KBM_WHEEL_DOWN 0x105
++
++enum { KB_A, KB_B, KB_X, KB_Y, KB_BLACK, KB_WHITE, KB_LT, KB_RT, KB_START, KB_BACK,
++       KB_LTHUMB, KB_RTHUMB, KB_UP, KB_DOWN, KB_LEFT, KB_RIGHT, KB_COUNT };
++
++struct kbm_bind { const char *name; int vk[3]; };
++static struct kbm_bind kbm_binds[KB_COUNT] = {
++    { "A", { VK_SPACE } }, { "B", { 'E' } }, { "X", { 'F' } }, { "Y", { KBM_MOUSE_R } },
++    { "BLACK", { VK_SHIFT } }, { "WHITE", { 'G' } }, { "LT", { VK_CONTROL } },
++    { "RT", { KBM_MOUSE_L } }, { "START", { VK_TAB } }, { "BACK", { VK_ESCAPE, VK_BACK } },
++    { "LTHUMB", { 'R' } }, { "RTHUMB", { KBM_MOUSE_M } },
++    { "UP", { VK_UP, '1', KBM_WHEEL_UP } }, { "DOWN", { VK_DOWN, '2', KBM_WHEEL_DOWN } },
++    { "LEFT", { VK_LEFT, '3' } }, { "RIGHT", { VK_RIGHT, '4' } },
+ };
+ 
+ static int kbm_vk_name(const char *name)
+ {
+-    if (!strcmp(name, "Return"))  return VK_RETURN;
+-    if (!strcmp(name, "Space"))   return VK_SPACE;
+-    if (!strcmp(name, "Tab"))     return VK_TAB;
+-    if (!strcmp(name, "Escape"))  return VK_ESCAPE;
+-    if (!strcmp(name, "Back"))    return VK_BACK;
+-    if (!strcmp(name, "Shift"))   return VK_SHIFT;
+-    if (!strcmp(name, "Control")) return VK_CONTROL;
+-    if (!strcmp(name, "Alt"))     return VK_MENU;
+-    if (name[0] && !name[1])      return (unsigned char)name[0];
++    static const struct { const char *name; int vk; } names[] = {
++        { "Return", VK_RETURN }, { "Enter", VK_RETURN }, { "Space", VK_SPACE },
++        { "Tab", VK_TAB }, { "Escape", VK_ESCAPE }, { "Back", VK_BACK },
++        { "Shift", VK_SHIFT }, { "Control", VK_CONTROL }, { "Alt", VK_MENU },
++        { "Up", VK_UP }, { "Down", VK_DOWN }, { "Left", VK_LEFT }, { "Right", VK_RIGHT },
++        { "MouseL", KBM_MOUSE_L }, { "MouseR", KBM_MOUSE_R }, { "MouseM", KBM_MOUSE_M },
++        { "WheelUp", KBM_WHEEL_UP }, { "WheelDown", KBM_WHEEL_DOWN },
++    };
++    unsigned i;
++    for (i = 0; i < sizeof(names) / sizeof(names[0]); i++)
++        if (!strcmp(name, names[i].name)) return names[i].vk;
++    if (name[0] && !name[1])
++        return (unsigned char)toupper((unsigned char)name[0]);
+     return 0;
+ }
+ 
+ static void kbm_load_map(void)
+ {
+     char *spec = getenv("RECOMP_KBM_MAP");
+-    char *tok;
++    char *tok, *save = NULL;
+     if (!spec || !*spec) return;
+     spec = strdup(spec);
+-    for (tok = strtok(spec, ","); tok; tok = strtok(NULL, ",")) {
+-        char *eq = strchr(tok, '=');
+-        unsigned i;
+-        int vk;
++    for (tok = strtok_s(spec, ",", &save); tok; tok = strtok_s(NULL, ",", &save)) {
++        char *eq = strchr(tok, '='), *key, *save_key = NULL;
++        unsigned i, n = 0;
++        int vk[3] = { 0, 0, 0 };
+         if (!eq) continue;
+         *eq = '\0';
+-        vk = kbm_vk_name(eq + 1);
+-        if (!vk) continue;
+-        for (i = 0; i < sizeof(kbm_binds) / sizeof(kbm_binds[0]); i++)
+-            if (!strcmp(kbm_binds[i].name, tok)) *kbm_binds[i].vk = vk;
++        for (key = strtok_s(eq + 1, "|", &save_key); key && n < 3;
++             key = strtok_s(NULL, "|", &save_key)) {
++            if (!strcmp(key, "None")) continue;
++            if ((vk[n] = kbm_vk_name(key)) != 0) n++;
++            else fprintf(stderr, "[KBM] unknown key \"%s\" for %s\n", key, tok);
++        }
++        for (i = 0; i < KB_COUNT; i++)
++            if (!strcmp(kbm_binds[i].name, tok))
++                memcpy(kbm_binds[i].vk, vk, sizeof vk);
+     }
+     free(spec);
+ }
+ 
++/* A wheel notch is one poll, which the title's per-frame input barely sees,
++ * so each direction reads as held for a beat after it. */
++static DWORD kbm_wheel_up_until, kbm_wheel_down_until;
++
++static BOOL kbm_input_down(int vk)
++{
++    switch (vk) {
++    case 0:              return FALSE;
++    case KBM_MOUSE_L:    return xbox_FramebufferMouseButton(0) != 0;
++    case KBM_MOUSE_R:    return xbox_FramebufferMouseButton(1) != 0;
++    case KBM_MOUSE_M:    return xbox_FramebufferMouseButton(2) != 0;
++    case KBM_WHEEL_UP:   return (long)(GetTickCount() - kbm_wheel_up_until) < 0;
++    case KBM_WHEEL_DOWN: return (long)(GetTickCount() - kbm_wheel_down_until) < 0;
++    default:             return key_down(vk);
++    }
++}
++
++static BOOL kbm_down(int target)
++{
++    const int *vk = kbm_binds[target].vk;
++    return kbm_input_down(vk[0]) || kbm_input_down(vk[1]) || kbm_input_down(vk[2]);
++}
++
+ static void kbm_state(XBOX_INPUT_STATE *pState)
+ {
+     static DWORD packet;
+     static int configured;
+     static unsigned deadzone, invert_y, maxdelta, stick_deadzone, sens, ratio;
+-    static unsigned look_direct, look_trace;
++    static unsigned look_direct, look_trace, wheel_move;
+     static float look_gain, look_gain_y;
+     static float dbg_last_pitch, dbg_last_yaw;
+     static int dbg_have;
+-    /* Scroll -> left-stick alias: a notch is a single poll, which the title's
+-     * per-frame integration barely sees, so hold the deflection for a beat. */
++    /* Scroll -> left-stick alias (RECOMP_KBM_WHEEL_MOVE, default on). */
+     static int wheel_dir;
+-    static DWORD wheel_until;
+     WORD b = 0;
+     int dx, dy, wheel;
+ 
+@@ -449,16 +492,21 @@ static void kbm_state(XBOX_INPUT_STATE *pState)
+         look_trace  = kbm_number("RECOMP_KBM_LOOK_TRACE", 1, 0);
+         look_gain   = (float)kbm_number("RECOMP_KBM_LOOK_GAIN",   1000000, 100) / 1000.0f;
+         look_gain_y = (float)kbm_number("RECOMP_KBM_LOOK_GAIN_Y", 1000000, 100) / 1000.0f;
++        wheel_move  = kbm_number("RECOMP_KBM_WHEEL_MOVE", 1, 1);
+         kbm_load_map();
+         configured = 1;
+         fprintf(stderr, "[KBM] profile: deadzone=%u stick_deadzone=%u invert_y=%u maxdelta=%u "
+-                "sens=%u ratio=%u look_direct=%u look_gain=%.4f look_gain_y=%.4f "
+-                "A=%d B=%d X=%d Y=%d BLACK=%d WHITE=%d LT=%d START=%d BACK=%d "
+-                "LTHUMB=%d RTHUMB=%d\n",
++                "sens=%u ratio=%u look_direct=%u look_gain=%.4f look_gain_y=%.4f wheel_move=%u\n",
+                 deadzone, stick_deadzone, invert_y, maxdelta, sens, ratio,
+-                look_direct, look_gain, look_gain_y,
+-                k_a, k_b, k_x, k_y, k_black, k_white, k_lt, k_start, k_back,
+-                k_lthumb, k_rthumb);
++                look_direct, look_gain, look_gain_y, wheel_move);
++        {
++            unsigned i;
++            fprintf(stderr, "[KBM] keys:");
++            for (i = 0; i < KB_COUNT; i++)
++                fprintf(stderr, " %s=%X/%X/%X", kbm_binds[i].name, kbm_binds[i].vk[0],
++                        kbm_binds[i].vk[1], kbm_binds[i].vk[2]);
++            fprintf(stderr, "\n");
++        }
+     }
+ 
+     memset(pState, 0, sizeof(*pState));
+@@ -655,42 +703,33 @@ static void kbm_state(XBOX_INPUT_STATE *pState)
+         }
+     }
+ 
+-    /* Digital: d-pad on the arrows (and 1-4); Start/Back from the map. */
+-    if (key_down(VK_UP)    || key_down('1')) b |= XBOX_GAMEPAD_DPAD_UP;
+-    if (key_down(VK_DOWN)  || key_down('2')) b |= XBOX_GAMEPAD_DPAD_DOWN;
+-    if (key_down(VK_LEFT)  || key_down('3')) b |= XBOX_GAMEPAD_DPAD_LEFT;
+-    if (key_down(VK_RIGHT) || key_down('4')) b |= XBOX_GAMEPAD_DPAD_RIGHT;
++    /* Wheel notches latch WheelUp/WheelDown; with WHEEL_MOVE they also push
++     * the left stick forward/back for the same beat. */
+     wheel = xbox_FramebufferMouseWheel();
+-    if (wheel > 0) b |= XBOX_GAMEPAD_DPAD_UP;
+-    if (wheel < 0) b |= XBOX_GAMEPAD_DPAD_DOWN;
+-    /* Scroll also aliases the left stick's up/down (forward/back). */
+-    if (wheel > 0)      { wheel_dir =  1; wheel_until = GetTickCount() + 150; }
+-    else if (wheel < 0) { wheel_dir = -1; wheel_until = GetTickCount() + 150; }
+-    if (wheel_dir && (long)(GetTickCount() - wheel_until) < 0)
++    if (wheel > 0)      { wheel_dir =  1; kbm_wheel_up_until = GetTickCount() + 150; }
++    else if (wheel < 0) { wheel_dir = -1; kbm_wheel_down_until = GetTickCount() + 150; }
++    if (wheel_move && wheel_dir &&
++            (long)(GetTickCount() - (wheel_dir > 0 ? kbm_wheel_up_until : kbm_wheel_down_until)) < 0)
+         pState->Gamepad.sThumbLY = wheel_dir > 0 ? 32767 : -32767;
+-    if (key_down(k_start)) b |= XBOX_GAMEPAD_START;
+-    /* BackSpace stays a Back alias regardless of the configured Back key. */
+-    if (key_down(k_back) || key_down(VK_BACK)) b |= XBOX_GAMEPAD_BACK;
+-    /* Stick clicks: left on a key, right on the middle mouse button. */
+-    if (key_down(k_lthumb)) b |= XBOX_GAMEPAD_LEFT_THUMB;
+-    if (key_down(k_rthumb) || xbox_FramebufferMouseButton(2))
+-        b |= XBOX_GAMEPAD_RIGHT_THUMB;
++
++    if (kbm_down(KB_UP))     b |= XBOX_GAMEPAD_DPAD_UP;
++    if (kbm_down(KB_DOWN))   b |= XBOX_GAMEPAD_DPAD_DOWN;
++    if (kbm_down(KB_LEFT))   b |= XBOX_GAMEPAD_DPAD_LEFT;
++    if (kbm_down(KB_RIGHT))  b |= XBOX_GAMEPAD_DPAD_RIGHT;
++    if (kbm_down(KB_START))  b |= XBOX_GAMEPAD_START;
++    if (kbm_down(KB_BACK))   b |= XBOX_GAMEPAD_BACK;
++    if (kbm_down(KB_LTHUMB)) b |= XBOX_GAMEPAD_LEFT_THUMB;
++    if (kbm_down(KB_RTHUMB)) b |= XBOX_GAMEPAD_RIGHT_THUMB;
+     pState->Gamepad.wButtons = b;
+ 
+-    /* Analog face buttons and triggers. Y is the right mouse button; White
+-     * (the old right-mouse action) is on G; crouch lives on the LT button,
+-     * which the map puts on Control. */
+-    pState->Gamepad.bAnalogButtons[XBOX_BUTTON_A]     = key_down(k_a) ? 255 : 0;
+-    pState->Gamepad.bAnalogButtons[XBOX_BUTTON_B]     = key_down(k_b) ? 255 : 0;
+-    pState->Gamepad.bAnalogButtons[XBOX_BUTTON_X]     = key_down(k_x) ? 255 : 0;
+-    pState->Gamepad.bAnalogButtons[XBOX_BUTTON_Y] =
+-        (key_down(k_y) || xbox_FramebufferMouseButton(1)) ? 255 : 0;
+-    pState->Gamepad.bAnalogButtons[XBOX_BUTTON_BLACK] = key_down(k_black) ? 255 : 0;
+-    pState->Gamepad.bAnalogButtons[XBOX_BUTTON_WHITE] = key_down(k_white) ? 255 : 0;
+-    pState->Gamepad.bAnalogButtons[XBOX_BUTTON_LTRIGGER] =
+-        key_down(k_lt) ? 255 : 0;
+-    pState->Gamepad.bAnalogButtons[XBOX_BUTTON_RTRIGGER] =
+-        xbox_FramebufferMouseButton(0) ? 255 : 0;
++    pState->Gamepad.bAnalogButtons[XBOX_BUTTON_A]        = kbm_down(KB_A) ? 255 : 0;
++    pState->Gamepad.bAnalogButtons[XBOX_BUTTON_B]        = kbm_down(KB_B) ? 255 : 0;
++    pState->Gamepad.bAnalogButtons[XBOX_BUTTON_X]        = kbm_down(KB_X) ? 255 : 0;
++    pState->Gamepad.bAnalogButtons[XBOX_BUTTON_Y]        = kbm_down(KB_Y) ? 255 : 0;
++    pState->Gamepad.bAnalogButtons[XBOX_BUTTON_BLACK]    = kbm_down(KB_BLACK) ? 255 : 0;
++    pState->Gamepad.bAnalogButtons[XBOX_BUTTON_WHITE]    = kbm_down(KB_WHITE) ? 255 : 0;
++    pState->Gamepad.bAnalogButtons[XBOX_BUTTON_LTRIGGER] = kbm_down(KB_LT) ? 255 : 0;
++    pState->Gamepad.bAnalogButtons[XBOX_BUTTON_RTRIGGER] = kbm_down(KB_RT) ? 255 : 0;
+ 
+     pState->dwPacketNumber = ++packet;
+ }
 diff --git a/src/kernel/kernel.h b/src/kernel/kernel.h
 index 9f71e6b..68c1e70 100644
 --- a/src/kernel/kernel.h
@@ -526,7 +782,7 @@ index b8d804a..8a8d8cd 100644
  
  int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices, uint32_t count);
 diff --git a/src/kernel/nv2a_gpu_d3d11.cpp b/src/kernel/nv2a_gpu_d3d11.cpp
-index f031faf..2752c9a 100644
+index f031faf..575e85a 100644
 --- a/src/kernel/nv2a_gpu_d3d11.cpp
 +++ b/src/kernel/nv2a_gpu_d3d11.cpp
 @@ -368,6 +368,7 @@ struct DepthSurface {
@@ -811,20 +1067,22 @@ index f031faf..2752c9a 100644
          constants.texture_info[stage][0] = (float)binding.width; constants.texture_info[stage][1] = (float)binding.height; constants.texture_info[stage][2] = (float)binding.linear;
          constants.texture_key[stage][0] = binding.color_key;
          constants.texture_key[stage][1] = binding.format == 0x03 || binding.format == 0x07 ||
-@@ -3102,7 +3195,11 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -3102,7 +3195,13 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
          constants.texture_info[stage][3] = (float)((binding.format == 0x1E ? 1u : 0u) | (binding.cube ? 2u : 0u) |
              (binding.address_u == 5 ? 4u : 0u) | (binding.address_v == 5 ? 8u : 0u) |
              (binding.control0_valid && (binding.control0 & 4u) ? 16u : 0u) |
 -            (binding.address_w == 5 ? 32u : 0u));
 +            (binding.address_w == 5 ? 32u : 0u) |
-+            /* shadow compare: 64, 128 for a 24-bit depth, function in 8..10 */
++            /* shadow compare: 64, 128 for a 24-bit depth, function in 8..10,
++             * 2048 for a linear magnification filter (four-tap PCF) */
 +            (binding.shadow ? 64u | ((shadow_func & 7u) << 8) |
 +                (binding.format == 0x2A || binding.format == 0x2B || binding.format == 0x2E ||
-+                 binding.format == 0x2F ? 128u : 0u) : 0u));
++                 binding.format == 0x2F ? 128u : 0u) |
++                (((binding.filter >> 24) & 15u) == 2u ? 2048u : 0u) : 0u));
          if (sign_mask) signed_texture_stages++;
          switch (binding.format) {
          case 0x01: case 0x16: case 0x17: case 0x1A: case 0x1B: case 0x20: case 0x28: case 0x29:
-@@ -3116,8 +3213,8 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -3116,8 +3215,8 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
      UINT vertex_bytes = count * vertex_stride;
      UINT index_bytes = state->indices ? state->index_count * sizeof(uint32_t) : 0;
      UINT vertex_offset;
@@ -835,7 +1093,7 @@ index f031faf..2752c9a 100644
      if (!map_stream(vertex_stream, vertex_bytes + index_bytes,
                      D3D11_BIND_VERTEX_BUFFER | D3D11_BIND_INDEX_BUFFER, "geometry", vertex_offset))
          return 0;
-@@ -3130,13 +3227,15 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -3130,13 +3229,15 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
          index_offset = vertex_offset + vertex_bytes;
          std::memcpy((uint8_t *)vertex_stream.mapped.pData + index_offset, state->indices, index_bytes);
      }
@@ -852,7 +1110,7 @@ index f031faf..2752c9a 100644
                  !std::memcmp(&uploaded_constants, &constants, sizeof constants)) {
              /* Same constants as the last upload this frame: rebind its offset. */
              gpu_timing.constant_reuses++;
-@@ -3146,6 +3245,8 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -3146,6 +3247,8 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
              if (!map_stream(constant_stream, kConstantSlot, D3D11_BIND_CONSTANT_BUFFER, "constants", constants_offset))
                  return 0;
              std::memcpy((uint8_t *)constant_stream.mapped.pData + constants_offset, &constants, sizeof constants);
@@ -861,7 +1119,7 @@ index f031faf..2752c9a 100644
              constant_upload_offset = constants_offset;
              uploaded_constants = constants;
              uploaded_constants_valid = true;
-@@ -3176,7 +3277,7 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -3176,7 +3279,7 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
      UINT stride = vertex_stride, offset = vertex_offset;
      ID3D11Buffer *buffers[] = {vertex_stream.buffer.Get()}, *constants_buffer[] = {constant_buffer.Get()};
      ID3D11Buffer *constant_ring_buffer = constant_stream.buffer.Get();
@@ -870,7 +1128,7 @@ index f031faf..2752c9a 100644
      ID3D11ShaderResourceView *resources[12] = {}; ID3D11SamplerState *sampler_states[4];
      for (uint32_t stage = 0; stage < 4; stage++) {
          resources[state->textures[stage].depth ? stage + 8 : state->textures[stage].cube ? stage + 4 : stage] = views[stage].Get();
-@@ -3245,7 +3346,7 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -3245,7 +3348,7 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
          if (texture_matrix_used) gpu_timing.texture_matrix_draws++;
      }
      pending_draws = true;
@@ -879,7 +1137,7 @@ index f031faf..2752c9a 100644
      else gpu_timing.color_masked_draws++;
      bool stencil_writes = state->stencil_enable && (state->stencil_write_mask & 255u) &&
          (state->stencil_fail != 0x1E00 || state->stencil_depth_fail != 0x1E00 || state->stencil_pass != 0x1E00);
-@@ -3314,6 +3415,8 @@ extern "C" int nv2a_gpu_available(void)
+@@ -3314,6 +3417,8 @@ extern "C" int nv2a_gpu_available(void)
              if (FAILED(device->CheckFeatureSupport(D3D11_FEATURE_D3D11_OPTIONS, &options, sizeof options)) ||
                  !options.ConstantBufferOffsetting)
                  context1.Reset();
@@ -889,10 +1147,10 @@ index f031faf..2752c9a 100644
          std::fprintf(stderr, "[GPU-D3D11] constant buffer offsetting: %s\n",
                       context1 ? "supported" : "unavailable, using per-draw Map");
 diff --git a/src/kernel/nv2a_gpu_shader.h b/src/kernel/nv2a_gpu_shader.h
-index e27083f..5fcc220 100644
+index e27083f..fb90f16 100644
 --- a/src/kernel/nv2a_gpu_shader.h
 +++ b/src/kernel/nv2a_gpu_shader.h
-@@ -471,7 +471,26 @@ PixelOutput ps_main(Pixel input,bool frontFacing:SV_IsFrontFace) {
+@@ -471,7 +471,34 @@ PixelOutput ps_main(Pixel input,bool frontFacing:SV_IsFrontFace) {
    default:value=cube3.Sample(sampler3,direction);break;
     }
    }
@@ -901,27 +1159,35 @@ index e27083f..5fcc220 100644
 +   float3 uvw=coordinate.xyz/coordinate.w;
 +   float2 uv=uvw.xy;
 +   if(textureInfo[stage].z!=0)uv/=textureInfo[stage].xy;
-+   float stored;
-+   switch(stage) {
-+   case 0:stored=image0.SampleLevel(sampler0,uv,0).r;break;
-+   case 1:stored=image1.SampleLevel(sampler1,uv,0).r;break;
-+   case 2:stored=image2.SampleLevel(sampler2,uv,0).r;break;
-+   default:stored=image3.SampleLevel(sampler3,uv,0).r;break;
-+   }
 +   float maxDepth=(textureFlags&128)?16777215.0:65535.0;
-+   stored*=maxDepth;
 +   float reference=clamp(uvw.z,0,maxDepth);   /* stored OP reference, as xemu does */
 +   uint func=(textureFlags>>8)&7;
-+   bool lit=func==1?stored<reference:func==2?stored==reference:func==3?stored<=reference:
-+            func==4?stored>reference:func==5?stored!=reference:func==6?stored>=reference:func==7;
-+   value=lit?1:0;
++   /* A linear filter compares the four texels of the bilinear footprint and
++    * blends the results (percentage-closer filtering), as the NV2A does;
++    * point sampling compares one texel. */
++   float4 stored; float2 size;
++   switch(stage) {
++   case 0:image0.GetDimensions(size.x,size.y);stored=(textureFlags&2048)?image0.GatherRed(sampler0,uv):image0.SampleLevel(sampler0,uv,0).rrrr;break;
++   case 1:image1.GetDimensions(size.x,size.y);stored=(textureFlags&2048)?image1.GatherRed(sampler1,uv):image1.SampleLevel(sampler1,uv,0).rrrr;break;
++   case 2:image2.GetDimensions(size.x,size.y);stored=(textureFlags&2048)?image2.GatherRed(sampler2,uv):image2.SampleLevel(sampler2,uv,0).rrrr;break;
++   default:image3.GetDimensions(size.x,size.y);stored=(textureFlags&2048)?image3.GatherRed(sampler3,uv):image3.SampleLevel(sampler3,uv,0).rrrr;break;
++   }
++   stored*=maxDepth;
++   float4 lit;
++   [unroll]for(uint tap=0;tap<4;tap++) {
++    float depth=stored[tap];
++    lit[tap]=(func==1?depth<reference:func==2?depth==reference:func==3?depth<=reference:
++              func==4?depth>reference:func==5?depth!=reference:func==6?depth>=reference:func==7)?1:0;
++   }
++   float2 blend=frac(uv*size-0.5);   /* gather order: x (0,1) y (1,1) z (1,0) w (0,0) */
++   value=lerp(lerp(lit.w,lit.z,blend.x),lerp(lit.x,lit.y,blend.x),blend.y);
 +  }
 +  else if(mode==2) {
     float3 uvw=coordinate.xyz/coordinate.w;
     float3 gradientX=ddx(uvw),gradientY=ddy(uvw);
     if(textureFlags&4)uvw.x=saturate(uvw.x);
 diff --git a/src/kernel/nv2a_pb_exec.c b/src/kernel/nv2a_pb_exec.c
-index d7c0f20..5208000 100644
+index d7c0f20..5fe30e8 100644
 --- a/src/kernel/nv2a_pb_exec.c
 +++ b/src/kernel/nv2a_pb_exec.c
 @@ -437,6 +437,13 @@ static struct {
@@ -1272,7 +1538,7 @@ index d7c0f20..5208000 100644
          if ((mode == 2) != (binding->depth != 0) || (binding->depth && (texture->raw_format & 4u)))
              return gpu_batch_rejected("projective volume texture dimensionality");
          binding->source = memory + texture->offset; binding->width = texture->width; binding->height = texture->height;
-@@ -3008,7 +3251,7 @@ static int gpu_submit_chunk(Nv2aGpuDraw *state, uint32_t *count)
+@@ -3008,12 +3251,16 @@ static int gpu_submit_chunk(Nv2aGpuDraw *state, uint32_t *count)
      }
      s_gpu.gpu_batches++;
      if (state->topology == NV2A_GPU_TOPOLOGY_TRIANGLES) s_gpu.tris_drawn += gpu_index_count / 3;
@@ -1281,7 +1547,16 @@ index d7c0f20..5208000 100644
      *count = 0;
      return 1;
  }
-@@ -3049,6 +3292,72 @@ static void raster_batch(void)
+ #endif
+ 
++/* Set by the window (F11) to write the next whole frame's batch state to
++ * capture_<n>.txt beside the exe. */
++volatile LONG g_nv2a_capture_request;
++
+ static void raster_batch(void)
+ {
+ #ifndef _WIN32
+@@ -3049,6 +3296,121 @@ static void raster_batch(void)
      }
  
  #ifdef _WIN32
@@ -1297,6 +1572,9 @@ index d7c0f20..5208000 100644
 +        }
 +        static int info_sec = -2, info_lo, info_hi, info_state;   /* 0 wait, 1 this frame, 2 done */
 +        static ULONGLONG info_start;
++        static FILE *info_out;
++        static unsigned capture_seq;
++        if (!info_out) info_out = stderr;
 +        if (info_sec == -2) {
 +            const char *e = getenv("RECOMP_BATCH_INFO");   /* <sec>:<first>-<last> */
 +            info_sec = -1;
@@ -1309,40 +1587,86 @@ index d7c0f20..5208000 100644
 +        }
 +        if (frame_flips != s_gpu.flips) {
 +            frame_flips = s_gpu.flips; index = 0;
-+            if (info_state == 1) info_state = 2;
++            if (info_state == 1) {
++                info_state = 2;
++                if (info_out != stderr) {
++                    fclose(info_out);
++                    info_out = stderr;
++                    fprintf(stderr, "[BINFO] capture %u written\n", capture_seq);
++                }
++            }
 +            if (info_sec >= 0 && info_state == 0 &&
 +                    GetTickCount64() - info_start >= (ULONGLONG)info_sec * 1000u) info_state = 1;
++            /* F11 in the window: the whole next frame, to a file beside the exe. */
++            if (info_state != 1 && InterlockedExchange(&g_nv2a_capture_request, 0)) {
++                char path[MAX_PATH];
++                DWORD n = GetModuleFileNameA(NULL, path, MAX_PATH);
++                while (n && path[n - 1] != '\\' && path[n - 1] != '/') n--;
++                snprintf(path + n, sizeof path - n, "capture_%u.txt", ++capture_seq);
++                FILE *f = fopen(path, "w");
++                if (f) {
++                    info_out = f;
++                    info_lo = 1; info_hi = 0x7FFFFFFF; info_state = 1;
++                    fprintf(stderr, "[BINFO] capture %u -> %s\n", capture_seq, path);
++                }
++            }
 +        }
 +        index++;
 +        if (info_state == 1 && (int)index >= info_lo && (int)index <= info_hi) {
 +            uint32_t st, n = s_gpu.combiners.control & 255u;
 +            float in[4] = {0};
 +            if (s_gpu.idx_count) fetch_attr(&s_gpu.attr[0], s_gpu.idx[0], in);
-+            fprintf(stderr, "[BINFO] b%u prim %u n %u surf %06X stages %X tm %X in %.3f,%.3f,%.3f,%.3f\n",
++            fprintf(info_out, "[BINFO] b%u prim %u n %u surf %06X stages %X tm %X in %.3f,%.3f,%.3f,%.3f\n",
 +                    index, s_gpu.prim, s_gpu.idx_count, s_gpu.color_offset & 0x0FFFFFFFu,
 +                    s_gpu.shader_stage_program, s_gpu.transform_execution_mode, in[0], in[1], in[2], in[3]);
 +            for (st = 0; st < 4; st++) {
 +                const Texture *t = st ? &s_gpu.extra_tex[st - 1] : &s_gpu.tex;
-+                fprintf(stderr, "[BINFO]   tex%u valid %d off %08X raw %08X %ux%u ctl0 %08X filt %08X addr %u/%u/%u\n",
++                fprintf(info_out, "[BINFO]   tex%u valid %d off %08X raw %08X %ux%u ctl0 %08X filt %08X addr %u/%u/%u\n",
 +                        st, t->valid, t->offset, t->raw_format, t->width, t->height, t->control0,
 +                        t->filter, t->addr_u, t->addr_v, t->addr_w);
 +            }
-+            fprintf(stderr, "[BINFO]   combiner control %08X final %08X %08X\n", s_gpu.combiners.control,
++            fprintf(info_out, "[BINFO]   combiner control %08X final %08X %08X\n", s_gpu.combiners.control,
 +                    s_gpu.combiners.final_input[0], s_gpu.combiners.final_input[1]);
 +            for (st = 0; st < n && st < 8; st++)
-+                fprintf(stderr, "[BINFO]   cs%u rgb in %08X out %08X alpha in %08X out %08X f0 %.2f,%.2f,%.2f,%.2f f1 %.2f,%.2f,%.2f,%.2f\n",
++                fprintf(info_out, "[BINFO]   cs%u rgb in %08X out %08X alpha in %08X out %08X f0 %.2f,%.2f,%.2f,%.2f f1 %.2f,%.2f,%.2f,%.2f\n",
 +                        st, s_gpu.combiners.rgb_input[st], s_gpu.combiners.rgb_output[st],
 +                        s_gpu.combiners.alpha_input[st], s_gpu.combiners.alpha_output[st],
 +                        s_gpu.combiners.factors[st][0][0], s_gpu.combiners.factors[st][0][1],
 +                        s_gpu.combiners.factors[st][0][2], s_gpu.combiners.factors[st][0][3],
 +                        s_gpu.combiners.factors[st][1][0], s_gpu.combiners.factors[st][1][1],
 +                        s_gpu.combiners.factors[st][1][2], s_gpu.combiners.factors[st][1][3]);
-+            fprintf(stderr, "[BINFO]   depth %u/%X/%u blend %u/%X/%X alpha %u/%X/%X fog %u/%X %.2f,%.2f,%.2f cull %u/%X\n",
++            fprintf(info_out, "[BINFO]   depth %u/%X/%u blend %u/%X/%X alpha %u/%X/%X fog %u/%X/%u %g,%g,%g col %.2f,%.2f,%.2f cull %u/%X\n",
 +                    s_gpu.depth_enable, s_gpu.depth_func, s_gpu.depth_mask, s_gpu.blend_enable,
 +                    s_gpu.blend_sfactor, s_gpu.blend_dfactor, s_gpu.alpha_enable, s_gpu.alpha_func,
-+                    s_gpu.alpha_ref, s_gpu.fog_enable, s_gpu.fog_mode, s_gpu.combiners.fog_color[0],
++                    s_gpu.alpha_ref, s_gpu.fog_enable, s_gpu.fog_mode, s_gpu.fog_gen_mode,
++                    s_gpu.fog_parameters[0], s_gpu.fog_parameters[1], s_gpu.fog_parameters[2], s_gpu.combiners.fog_color[0],
 +                    s_gpu.combiners.fog_color[1], s_gpu.combiners.fog_color[2], s_gpu.cull_enable,
 +                    s_gpu.cull_face);
++            fprintf(info_out, "[BINFO]   stencil %u/%X ref %X mask %X/%X ops %X/%X/%X offset %X %g,%g cmask %08X zeta %06X\n",
++                    s_gpu.stencil_enable, s_gpu.stencil_func,
++                    s_gpu.stencil_ref, s_gpu.stencil_read_mask, s_gpu.stencil_write_mask,
++                    s_gpu.stencil_fail, s_gpu.stencil_depth_fail, s_gpu.stencil_pass,
++                    s_gpu.polygon_offset_enable, s_gpu.polygon_offset_scale, s_gpu.polygon_offset_bias,
++                    s_gpu.color_mask, s_gpu.depth_offset & 0x0FFFFFFFu);
++            if ((s_gpu.transform_execution_mode & 3u) == 2u) {
++                /* Where the batch lands (logical pixels) and the oFog its
++                 * vertex program wrote, from the CPU interpreter. */
++                float x0 = 1e30f, y0 = 1e30f, x1 = -1e30f, y1 = -1e30f, f0 = 1e30f, f1 = -1e30f;
++                uint32_t v, seen = 0;
++                for (v = 0; v < s_gpu.idx_count && v < 65536u; v++) {
++                    Nv2aCpuVertex cv;
++                    if (!fetch_shader_vertex(s_gpu.idx[v], &cv) || !(cv.output[0][3] > 0)) continue;
++                    seen++;
++                    if (cv.output[0][0] < x0) x0 = cv.output[0][0];
++                    if (cv.output[0][0] > x1) x1 = cv.output[0][0];
++                    if (cv.output[0][1] < y0) y0 = cv.output[0][1];
++                    if (cv.output[0][1] > y1) y1 = cv.output[0][1];
++                    if (cv.output[5][0] < f0) f0 = cv.output[5][0];
++                    if (cv.output[5][0] > f1) f1 = cv.output[5][0];
++                }
++                fprintf(info_out, "[BINFO]   screen %.0f,%.0f-%.0f,%.0f ofog %.3f..%.3f (%u of %u in front)\n",
++                        x0, y0, x1, y1, f0, f1, seen, s_gpu.idx_count);
++            }
 +        }
 +        if (lo >= 0 && ((int)index < lo || (int)index > hi)) {
 +            uint32_t scan_pitch = 0;
@@ -1354,7 +1678,7 @@ index d7c0f20..5208000 100644
      double started = gpu_clock_seconds();
      double prior_submit = s_gpu.gpu_submit_seconds;
      int rendered = gpu_raster_batch();
-@@ -3820,6 +4129,7 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -3820,6 +4182,7 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
      if (method == 0x037C) { s_gpu.shade_mode = param; return; }
      if (method == 0x0300) { s_gpu.alpha_enable = param; return; }
      if (method == 0x033C) { s_gpu.alpha_func = param; return; }
@@ -1362,7 +1686,7 @@ index d7c0f20..5208000 100644
      if (method == 0x0340) { s_gpu.alpha_ref = param & 255u; return; }
      if (method == 0x034C) { s_gpu.blend_constant = param; return; }
      if (method == 0x0350) { s_gpu.blend_equation = param; return; }
-@@ -4253,6 +4563,7 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -4253,6 +4616,7 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
          return;
  
      case NV097_FLIP_STALL:
@@ -1370,7 +1694,7 @@ index d7c0f20..5208000 100644
          s_gpu.flush_flip++;
          cloak_marker_idle();
          /* The stall ends when the buffer being read is the one just finished.
-@@ -4276,25 +4587,50 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -4276,25 +4640,50 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
           * per-frame re-decode of render-to-texture surfaces. */
          if (s_gpu.pitch) {
              extern void xbox_FramebufferWindowPresent(uint32_t, uint32_t);
@@ -1616,7 +1940,7 @@ index d1e477d..c43862b 100644
          }
          out[2] |= st->digital;
 diff --git a/src/video/fb_present.c b/src/video/fb_present.c
-index 712b158..6ea3464 100644
+index 712b158..976a46a 100644
 --- a/src/video/fb_present.c
 +++ b/src/video/fb_present.c
 @@ -91,6 +91,20 @@ void xbox_FramebufferWindowPresent(uint32_t fb_va, uint32_t pitch)
@@ -1685,7 +2009,51 @@ index 712b158..6ea3464 100644
      /* Published only once it is whole. */
      InterlockedExchange(&s_present_idx, next);
  }
-@@ -667,6 +719,20 @@ static void fb_convert(const uint8_t *src, uint32_t bpp)
+@@ -144,6 +196,23 @@ int xbox_FramebufferKeyDown(int vk)
+  * place the keyboard model can be driven without the foreground. The file
+  * holds whitespace-separated hex VK codes (e.g. "20 57" = Space + W); path is
+  * RECOMP_INPUT_FILE (default C:\recomp-input.txt). */
++static void fb_inject_poll(void);
++
++/* F11: the GPU executor writes the next whole frame's batch state to
++ * capture_<n>.txt beside the exe; the frame on screen goes to capture_<n>.bmp. */
++static void fb_request_gpu_capture(void)
++{
++    extern volatile LONG g_nv2a_capture_request;
++    static unsigned seq;
++    char path[MAX_PATH];
++    DWORD n = GetModuleFileNameA(NULL, path, MAX_PATH);
++    while (n && path[n - 1] != '\\' && path[n - 1] != '/') n--;
++    snprintf(path + n, sizeof path - n, "capture_%u.bmp", ++seq);
++    if (xbox_FramebufferDumpBmp(path) != 0)
++        fprintf(stderr, "[FBWIN] failed to capture framebuffer to %s\n", path);
++    InterlockedExchange(&g_nv2a_capture_request, 1);
++}
++
+ static void fb_inject_poll(void)
+ {
+     static int enabled = -1;
+@@ -191,6 +260,8 @@ static void fb_inject_poll(void)
+             continue;
+         held[i] = next[i];
+         s_key_down[i] = next[i];
++        if (next[i] && i == VK_F11)
++            fb_request_gpu_capture();
+         if (next[i] && i == VK_F12) {
+             const char *cap = getenv("RECOMP_FB_CAPTURE");
+             if (!cap || !cap[0])
+@@ -470,6 +541,10 @@ static LRESULT CALLBACK fb_wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
+     case WM_KEYDOWN:
+     case WM_SYSKEYDOWN:
+         rec_event("k %x 1", (unsigned)w);
++        if (w == VK_F11) {
++            fb_request_gpu_capture();
++            return 0;
++        }
+         if (w == VK_F12) {
+             const char *path = getenv("RECOMP_FB_CAPTURE");
+             if (!path || !path[0]) path = "framebuffer.bmp";
+@@ -667,6 +742,20 @@ static void fb_convert(const uint8_t *src, uint32_t bpp)
  
          if (bpp == 4) {
              memcpy(dst, row, (size_t)s_fb_width * 4);

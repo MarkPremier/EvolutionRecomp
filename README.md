@@ -21,8 +21,9 @@ CPU-renderer build (about 9 fps on the title screen).
   58 fps, without flicker.
 - Controller works (any XInput pad), as controller 1: move, look, jump,
   fire, weapon switching and pause.
-- Shadow maps render (the terrain receives them); not yet checked on screen
-  next to a caster. `RECOMP_SHADOWS=0` turns them off.
+- Keyboard and mouse work too, merged onto controller 1 (see Controls).
+- Dinosaurs and Turok cast shadows, with filtered (PCF) edges.
+  `RECOMP_SHADOWS=0` turns them off.
 - Known issues: the Xbox version runs at 30 fps and this runs at ~58, which
   may speed up anything the game ties to frame rate; environment-map layers
   (water, Tek bow) and cave lighting are not yet compared with the console.
@@ -114,12 +115,37 @@ Recomp/
    build\Release\turok_evolution.exe 2> stderr.txt
    ```
 
+## Controls
+
+A pad works as on the console. Keyboard and mouse (on by default,
+`RECOMP_KBM=0` turns them off; Alt+Esc releases the mouse):
+
+| Action | Keys |
+|--------|------|
+| Move / strafe | W A S D |
+| Look | Mouse |
+| Fire | Left mouse |
+| Weapon mode | Right mouse |
+| Jump / menu select | Space / Enter |
+| Next / previous weapon | Wheel down / up, or E / Q |
+| Duck | Ctrl or C |
+| Zoom | Middle mouse or Z |
+| Pause | Esc or Tab |
+| Menu back | Backspace |
+| D-pad | Arrow keys |
+
+The game ships with Invert Look on; the mouse is inverted back so moving it
+up looks up (`RECOMP_KBM_INVERT_Y=0` if you turn the game's option off).
+`RECOMP_KBM_SENS` sets the mouse counts for a full turn rate (default 300,
+lower is faster), and `RECOMP_KBM_MAP` rebinds keys, e.g.
+`A=Space|Return,RT=MouseL,X=WheelDown|E`.
+
 ## Project files
 
 | Path | What it is |
 |------|------------|
 | `src/main.c` | Host entry point: loads the XBE, sets the runtime defaults below, calls the game's entry point |
-| `src/recomp_manual.c` | Hand-written override: D3D's GetVisibilityTestResult (sub_00194B40) completes unfinished tests as visible |
+| `src/recomp_manual.c` | Hand-written overrides: D3D's GetVisibilityTestResult (sub_00194B40) completes unfinished tests as visible; DirectSound's idle-voice handler (sub_001B23DD) ignores voices nobody owns (the emulated APU could report one, and quitting a level crashed) |
 | `seeds/manual_seeds.json` | Functions only reached through pointers (XPP init) |
 | `seeds/recomp_extra_seeds.json` | Functions the disassembler misses, found by the upstream recompiler or at runtime (`tools.seed_from_log` on an `[ICALL] Failed to resolve` log). Includes the player-action thunks (`mov eax,[ecx]; mov [ecx+0x3A4],0; jmp [eax+N]`) reached only through runtime-built tables; without them fire, pause and previous weapon did nothing |
 | `patches/xboxrecomp-aknavj-turok.patch` | The toolkit changes as one diff against aknavj 11a8aa1 |
@@ -149,5 +175,8 @@ Useful while debugging:
 - `RECOMP_HWWATCH=<guest address>` with `RECOMP_HWWATCH_SEC=<s>` sets a
   hardware watchpoint on one guest byte after that many seconds and prints
   each instruction that touches it (symbolize the RIPs as above)
+- **F11** in the game window writes `capture_<n>.txt` (every GPU batch of
+  the next frame: textures, combiners, depth/blend/fog state, screen extent)
+  and `capture_<n>.bmp` beside the exe
 - `RECOMP_DRAW_ONLY=<first>-<last>`, `RECOMP_BATCH_INFO=<s>:<first>-<last>`
   and `RECOMP_DEPTH_DUMP=<s>` isolate, describe and dump GPU batches
