@@ -775,10 +775,25 @@ index 93dc2ec..200b507 100644
          if (old >= DISPATCH_LEVEL)
              InterlockedDecrement(&g_guest_levels[old]);
 diff --git a/src/kernel/nv2a_gpu.h b/src/kernel/nv2a_gpu.h
-index b8d804a..8a8d8cd 100644
+index b8d804a..f94ce70 100644
 --- a/src/kernel/nv2a_gpu.h
 +++ b/src/kernel/nv2a_gpu.h
-@@ -42,6 +42,8 @@ typedef struct Nv2aGpuTexture {
+@@ -14,6 +14,14 @@ void nv2a_gpu_sync(void);
+ void nv2a_gpu_wait(void);
+ void nv2a_gpu_flush(void);
+ uint32_t nv2a_gpu_flip(const void *presented, size_t bytes, uint32_t va, uint32_t pitch);
++/* Show a flip in a window through a swap chain: the surface at `presented`
++ * straight from its texture (no publish), or CPU pixels (0x00RRGGBB rows).
++ * Both letterbox to aspect_w:aspect_h and return 0 when they could not, so the
++ * caller falls back to the guest-RAM route. */
++int nv2a_gpu_present_surface(void *window, const void *presented, uint32_t pitch, uint32_t rows,
++                             uint32_t aspect_w, uint32_t aspect_h, int interval);
++int nv2a_gpu_present_pixels(void *window, const uint32_t *pixels, uint32_t width, uint32_t height,
++                            int interval);
+ void nv2a_gpu_surface_modified(const void *addr, size_t bytes);
+ void nv2a_gpu_surface_publish(const void *addr, size_t bytes);
+ void nv2a_gpu_invalidate(void);
+@@ -42,6 +50,8 @@ typedef struct Nv2aGpuTexture {
  	uint32_t color_key;
  	uint32_t mip_levels;
  	uint32_t disabled; /* sampled by the stage program but the texture unit is off */
@@ -787,7 +802,7 @@ index b8d804a..8a8d8cd 100644
  	float bump_matrix[4], bump_scale, bump_offset;
  	void *decode_context;
  	int (*decode)(void *, uint32_t, uint32_t, uint32_t *);
-@@ -111,6 +113,10 @@ typedef struct Nv2aGpuDraw {
+@@ -111,6 +121,10 @@ typedef struct Nv2aGpuDraw {
  	float light_infinite_direction[8][4];
  	float light_infinite_half_vector[8][4];
  	float light_spot_direction[8][4];    /* xyz = direction, w = spot cone parameter */
@@ -799,10 +814,18 @@ index b8d804a..8a8d8cd 100644
  
  int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices, uint32_t count);
 diff --git a/src/kernel/nv2a_gpu_d3d11.cpp b/src/kernel/nv2a_gpu_d3d11.cpp
-index f031faf..575e85a 100644
+index f031faf..49f8199 100644
 --- a/src/kernel/nv2a_gpu_d3d11.cpp
 +++ b/src/kernel/nv2a_gpu_d3d11.cpp
-@@ -368,6 +368,7 @@ struct DepthSurface {
+@@ -1,6 +1,7 @@
+ #include "nv2a_gpu.h"
+ #include <d3d11.h>
+ #include <d3d11_1.h>
++#include <dxgi1_2.h>
+ #include <wrl/client.h>
+ #include <cstdio>
+ #include <cstdlib>
+@@ -368,6 +369,7 @@ struct DepthSurface {
      std::vector<uint8_t> source_snapshot;
      ComPtr<ID3D11Texture2D> texture, staging;
      ComPtr<ID3D11DepthStencilView> view;
@@ -810,7 +833,7 @@ index f031faf..575e85a 100644
  };
  
  struct Constants {
-@@ -429,8 +430,14 @@ struct DynamicStream {
+@@ -429,8 +431,14 @@ struct DynamicStream {
      ComPtr<ID3D11Buffer> buffer;
      UINT capacity = 0, used = 0;
      D3D11_MAPPED_SUBRESOURCE mapped = {};
@@ -826,7 +849,7 @@ index f031faf..575e85a 100644
  static std::array<DynamicStream,2> vertex_streams;
  static DynamicStream constant_stream;
  static DynamicStream index_stream;
-@@ -1077,14 +1084,18 @@ static DepthSurface *get_depth(const Nv2aGpuDraw &state, bool preserve = true, T
+@@ -1077,14 +1085,18 @@ static DepthSurface *get_depth(const Nv2aGpuDraw &state, bool preserve = true, T
      description.Width = extent.width; description.Height = extent.height;
      description.MipLevels = description.ArraySize = 1; description.SampleDesc.Count = 1;
      description.Format = bytes == 2 ? DXGI_FORMAT_R16_TYPELESS : DXGI_FORMAT_R24G8_TYPELESS;
@@ -847,7 +870,25 @@ index f031faf..575e85a 100644
      description.Usage = D3D11_USAGE_STAGING; description.BindFlags = 0; description.CPUAccessFlags = D3D11_CPU_ACCESS_READ | D3D11_CPU_ACCESS_WRITE;
      if (!target_operation_succeeded("depth", "create staging", device->CreateTexture2D(&description, nullptr, &surface.staging))) return nullptr;
      // Creation-data uploads can round D24 values; use the bit-preserving refresh path.
-@@ -1689,6 +1700,36 @@ static bool stage_flip(const void *presented, size_t bytes, uint32_t va, uint32_
+@@ -1684,11 +1696,54 @@ static bool stage_flip(const void *presented, size_t bytes, uint32_t va, uint32_
+     return true;
+ }
+ 
++/* What a flip does to the caches, whether the frame was published or not. */
++static void flip_bookkeeping()
++{
++    /* Draws unmap their own streams; this only guards against a stray Map. */
++    for (auto &stream : vertex_streams) release_stream(stream);
++    release_stream(constant_stream);
++    s_texture_validate_serial++;
++    for (auto &surface : surfaces)
++        if (!surface.dirty) surface.needs_refresh = true;
++    for (auto &surface : depth_surfaces)
++        if (!surface.dirty) surface.needs_refresh = true;
++}
++
+ /* Returns the guest VA the caller should display this flip. In the default
+  * (synchronous) path that is the buffer just published; with RECOMP_ASYNC_FLIP
   * it is the previous frame's buffer, resolved without a GPU wait. */
  extern "C" uint32_t nv2a_gpu_flip(const void *presented, size_t bytes, uint32_t va, uint32_t pitch)
  {
@@ -884,16 +925,257 @@ index f031faf..575e85a 100644
      if (!presented) { nv2a_gpu_flush(); return va; }
      uint32_t show = va;
      if (async_flip_enabled()) {
-@@ -1708,7 +1749,7 @@ extern "C" uint32_t nv2a_gpu_flip(const void *presented, size_t bytes, uint32_t
+@@ -1708,17 +1763,241 @@ extern "C" uint32_t nv2a_gpu_flip(const void *presented, size_t bytes, uint32_t
      } else {
          gpu_sync_impl(true, presented, bytes);
      }
 -    /* Frame boundary: the GPU has consumed the stream; release the held Map. */
-+    /* Draws unmap their own streams; this only guards against a stray Map. */
-     for (auto &stream : vertex_streams) release_stream(stream);
-     release_stream(constant_stream);
-     s_texture_validate_serial++;
-@@ -1897,7 +1938,10 @@ extern "C" int nv2a_gpu_clear(const Nv2aGpuDraw *state, uint32_t flags, uint32_t
+-    for (auto &stream : vertex_streams) release_stream(stream);
+-    release_stream(constant_stream);
+-    s_texture_validate_serial++;
+-    for (auto &surface : surfaces)
+-        if (!surface.dirty) surface.needs_refresh = true;
+-    for (auto &surface : depth_surfaces)
+-        if (!surface.dirty) surface.needs_refresh = true;
++    flip_bookkeeping();
+     return show;
+ }
+ 
++/* ── Window presentation ──────────────────────────────────────────────────
++ *
++ * A flip reaches the window through a flip-model swap chain on the window
++ * fb_present opened: drawn from the presented surface's own texture, scaled
++ * into the window at the frame's shape. The other route -- publish the surface
++ * to guest RAM, convert it on the CPU, StretchDIBits it -- waits for the GPU
++ * and reads the frame back every flip, and pins the window to 640x480. It
++ * stays for frames whose pixels have to be in guest RAM (the movie overlay,
++ * captures), which come here as CPU pixels instead. */
++struct Presenter {
++    HWND window = nullptr;
++    ComPtr<IDXGISwapChain1> chain;
++    ComPtr<ID3D11RenderTargetView> target;
++    UINT width = 0, height = 0;
++    ComPtr<ID3D11VertexShader> vertex;
++    ComPtr<ID3D11PixelShader> pixel;
++    ComPtr<ID3D11SamplerState> sampler;
++    ComPtr<ID3D11RasterizerState> raster;
++    ComPtr<ID3D11BlendState> blend;
++    ComPtr<ID3D11DepthStencilState> depth;
++    ComPtr<ID3D11Buffer> constants;
++    ComPtr<ID3D11Texture2D> pixels;
++    ComPtr<ID3D11ShaderResourceView> pixels_view;
++    UINT pixels_width = 0, pixels_height = 0;
++    bool failed = false;
++};
++static Presenter presenter;
++
++static bool presenter_failed(const char *what, HRESULT result)
++{
++    std::fprintf(stderr, "[GPU-D3D11] window presentation unavailable: %s 0x%08X\n", what, (unsigned)result);
++    presenter = Presenter{};
++    presenter.failed = true;
++    return false;
++}
++
++static bool presenter_target()
++{
++    ComPtr<ID3D11Texture2D> buffer;
++    HRESULT result = presenter.chain->GetBuffer(0, IID_PPV_ARGS(&buffer));
++    if (SUCCEEDED(result)) result = device->CreateRenderTargetView(buffer.Get(), nullptr, &presenter.target);
++    return SUCCEEDED(result) || presenter_failed("back buffer", result);
++}
++
++static bool presenter_ready(HWND window)
++{
++    if (presenter.failed || !device || !context) return false;
++    if (presenter.chain && presenter.window == window) {
++        RECT client = {};
++        GetClientRect(window, &client);
++        UINT width = (UINT)std::max<LONG>(client.right - client.left, 0);
++        UINT height = (UINT)std::max<LONG>(client.bottom - client.top, 0);
++        if (!width || !height) return false;   /* minimised: nothing to show */
++        if (width != presenter.width || height != presenter.height) {
++            presenter.target.Reset();   /* unbound after every present */
++            HRESULT result = presenter.chain->ResizeBuffers(0, width, height, DXGI_FORMAT_UNKNOWN, 0);
++            if (FAILED(result)) return presenter_failed("resize", result);
++            presenter.width = width; presenter.height = height;
++            if (!presenter_target()) return false;
++        }
++        return true;
++    }
++    RECT client = {};
++    GetClientRect(window, &client);
++    presenter.width = (UINT)std::max<LONG>(client.right - client.left, 1);
++    presenter.height = (UINT)std::max<LONG>(client.bottom - client.top, 1);
++    ComPtr<IDXGIDevice1> dxgi_device;
++    ComPtr<IDXGIAdapter> adapter;
++    ComPtr<IDXGIFactory2> factory;
++    HRESULT result = device.As(&dxgi_device);
++    if (SUCCEEDED(result)) result = dxgi_device->GetAdapter(&adapter);
++    if (SUCCEEDED(result)) result = adapter->GetParent(IID_PPV_ARGS(&factory));
++    if (FAILED(result)) return presenter_failed("DXGI factory", result);
++    dxgi_device->SetMaximumFrameLatency(1);
++    DXGI_SWAP_CHAIN_DESC1 description = {};
++    description.Width = presenter.width; description.Height = presenter.height;
++    description.Format = DXGI_FORMAT_B8G8R8A8_UNORM; description.SampleDesc.Count = 1;
++    description.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT; description.BufferCount = 2;
++    description.Scaling = DXGI_SCALING_STRETCH; description.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
++    description.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
++    result = factory->CreateSwapChainForHwnd(device.Get(), window, &description, nullptr, nullptr, &presenter.chain);
++    if (FAILED(result)) return presenter_failed("swap chain", result);
++    /* The window toggles its own borderless fullscreen (fb_present, Alt+Enter);
++     * DXGI's exclusive-mode switch would fight it. */
++    factory->MakeWindowAssociation(window, DXGI_MWA_NO_ALT_ENTER | DXGI_MWA_NO_WINDOW_CHANGES);
++
++    static const char source[] =
++        "cbuffer PresentConstants:register(b0){float4 extent;};"
++        "Texture2D<float4> image:register(t0);SamplerState smooth:register(s0);"
++        "struct V{float4 position:SV_Position;float2 uv:TEXCOORD0;};"
++        "V vs(uint id:SV_VertexID){V v;float2 t=float2((id<<1)&2,id&2);"
++        "v.position=float4(t*float2(2,-2)+float2(-1,1),0,1);v.uv=t*extent.xy;return v;}"
++        "float4 ps(V v):SV_Target{return float4(image.SampleLevel(smooth,v.uv,0).rgb,1);}";
++    ComPtr<ID3DBlob> vertex, pixel, errors;
++    result = D3DCompile(source, sizeof source - 1, "NV2A present", nullptr, nullptr, "vs", "vs_5_0",
++                        D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &vertex, &errors);
++    if (SUCCEEDED(result))
++        result = D3DCompile(source, sizeof source - 1, "NV2A present", nullptr, nullptr, "ps", "ps_5_0",
++                            D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &pixel, &errors);
++    if (FAILED(result)) {
++        std::fprintf(stderr, "[GPU-D3D11] present shader compile: %s\n",
++                     errors ? (const char *)errors->GetBufferPointer() : "");
++        return presenter_failed("shader compile", result);
++    }
++    result = device->CreateVertexShader(vertex->GetBufferPointer(), vertex->GetBufferSize(), nullptr, &presenter.vertex);
++    if (SUCCEEDED(result))
++        result = device->CreatePixelShader(pixel->GetBufferPointer(), pixel->GetBufferSize(), nullptr, &presenter.pixel);
++    D3D11_SAMPLER_DESC sampler = {};
++    sampler.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
++    sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
++    sampler.MaxLOD = D3D11_FLOAT32_MAX;
++    if (SUCCEEDED(result)) result = device->CreateSamplerState(&sampler, &presenter.sampler);
++    D3D11_RASTERIZER_DESC raster = {};
++    raster.FillMode = D3D11_FILL_SOLID; raster.CullMode = D3D11_CULL_NONE;
++    if (SUCCEEDED(result)) result = device->CreateRasterizerState(&raster, &presenter.raster);
++    D3D11_BLEND_DESC blend = {};
++    blend.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
++    if (SUCCEEDED(result)) result = device->CreateBlendState(&blend, &presenter.blend);
++    D3D11_DEPTH_STENCIL_DESC depth = {};
++    if (SUCCEEDED(result)) result = device->CreateDepthStencilState(&depth, &presenter.depth);
++    D3D11_BUFFER_DESC constants = {};
++    constants.ByteWidth = 16; constants.Usage = D3D11_USAGE_DEFAULT; constants.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
++    if (SUCCEEDED(result)) result = device->CreateBuffer(&constants, nullptr, &presenter.constants);
++    if (FAILED(result)) return presenter_failed("pipeline", result);
++    presenter.window = window;
++    if (!presenter_target()) return false;
++    std::fprintf(stderr, "[GPU-D3D11] window presentation: swap chain %ux%u\n", presenter.width, presenter.height);
++    return true;
++}
++
++/* Draw `view` (its top-left u x v of the texture) letterboxed at `aspect`,
++ * then present. */
++static bool present_view(ID3D11ShaderResourceView *view, float u, float v, float aspect, int interval)
++{
++    ID3D11RenderTargetView *target = presenter.target.Get();
++    const float black[4] = {0, 0, 0, 1};
++    context->ClearRenderTargetView(target, black);
++    float width = (float)presenter.width, height = (float)presenter.height;
++    float shown_width = width, shown_height = width / aspect;
++    if (shown_height > height) { shown_height = height; shown_width = height * aspect; }
++    D3D11_VIEWPORT viewport = {(width - shown_width) * 0.5f, (height - shown_height) * 0.5f,
++                               shown_width, shown_height, 0.0f, 1.0f};
++    const float extent[4] = {u, v, 0, 0};
++    context->UpdateSubresource(presenter.constants.Get(), 0, nullptr, extent, 0, 0);
++    context->OMSetRenderTargets(1, &target, nullptr);
++    context->OMSetBlendState(presenter.blend.Get(), nullptr, UINT_MAX);
++    context->OMSetDepthStencilState(presenter.depth.Get(), 0);
++    context->IASetInputLayout(nullptr);
++    context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
++    context->VSSetShader(presenter.vertex.Get(), nullptr, 0);
++    context->GSSetShader(nullptr, nullptr, 0);
++    context->PSSetShader(presenter.pixel.Get(), nullptr, 0);
++    ID3D11Buffer *buffer = presenter.constants.Get();
++    context->VSSetConstantBuffers(0, 1, &buffer);
++    context->PSSetShaderResources(0, 1, &view);
++    ID3D11SamplerState *sampler = presenter.sampler.Get();
++    context->PSSetSamplers(0, 1, &sampler);
++    context->RSSetState(presenter.raster.Get());
++    context->RSSetViewports(1, &viewport);
++    context->Draw(3, 0);
++    /* The next draw binds its own state; the surface just sampled may be its
++     * render target. */
++    ID3D11ShaderResourceView *no_view = nullptr;
++    ID3D11RenderTargetView *no_target = nullptr;
++    context->PSSetShaderResources(0, 1, &no_view);
++    context->OMSetRenderTargets(1, &no_target, nullptr);
++    HRESULT result = presenter.chain->Present(interval > 0 ? (UINT)interval : 0, 0);
++    if (result == DXGI_ERROR_DEVICE_REMOVED || result == DXGI_ERROR_DEVICE_RESET)
++        return presenter_failed("present", result);
++    return true;
++}
++
++extern "C" int nv2a_gpu_present_surface(void *window, const void *presented, uint32_t pitch, uint32_t rows,
++                                        uint32_t aspect_w, uint32_t aspect_h, int interval)
++{
++    if (!window || !presented || !aspect_w || !aspect_h) return 0;
++    Surface *shown = nullptr;
++    for (auto &surface : surfaces)
++        if (surface.memory == presented && surface.pitch == pitch && surface.view &&
++                (!shown || surface.last_used > shown->last_used))
++            shown = &surface;
++    if (!shown) {
++        static unsigned misses;
++        if (misses++ < 4) {
++            std::fprintf(stderr, "[GPU-D3D11] present: no surface at %p pitch %u; surfaces:", presented, pitch);
++            for (auto &surface : surfaces)
++                std::fprintf(stderr, " %p/%u/%ux%u", (void *)surface.memory, surface.pitch, surface.width, surface.height);
++            std::fprintf(stderr, "\n");
++        }
++        return 0;
++    }
++    if (!presenter_ready((HWND)window)) return 0;
++    /* Written by the CPU since the GPU last drew it (a loading screen): take
++     * guest RAM's copy first, as a texture use would. */
++    refresh_surface(*shown);
++    uint32_t height = rows && rows < shown->height ? rows : shown->height;
++    if (!present_view(shown->view.Get(), 1.0f, (float)height / (float)shown->height,
++                      (float)aspect_w / (float)aspect_h, interval))
++        return 0;
++    /* RECOMP_ASYNC_FLIP staged an earlier frame for the guest-RAM route;
++     * resolving it now would show that old frame on the next such flip. */
++    s_pending_flip.valid = false;
++    flip_bookkeeping();
++    return 1;
++}
++
++extern "C" int nv2a_gpu_present_pixels(void *window, const uint32_t *pixels, uint32_t width, uint32_t height,
++                                       int interval)
++{
++    if (!window || !pixels || !width || !height || !presenter_ready((HWND)window)) return 0;
++    if (!presenter.pixels || presenter.pixels_width != width || presenter.pixels_height != height) {
++        presenter.pixels.Reset(); presenter.pixels_view.Reset();
++        D3D11_TEXTURE2D_DESC description = {};
++        description.Width = width; description.Height = height;
++        description.MipLevels = description.ArraySize = 1;
++        description.Format = DXGI_FORMAT_B8G8R8A8_UNORM; description.SampleDesc.Count = 1;
++        description.Usage = D3D11_USAGE_DYNAMIC; description.BindFlags = D3D11_BIND_SHADER_RESOURCE;
++        description.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
++        HRESULT result = device->CreateTexture2D(&description, nullptr, &presenter.pixels);
++        if (SUCCEEDED(result)) result = device->CreateShaderResourceView(presenter.pixels.Get(), nullptr, &presenter.pixels_view);
++        if (FAILED(result)) return presenter_failed("frame texture", result);
++        presenter.pixels_width = width; presenter.pixels_height = height;
++    }
++    D3D11_MAPPED_SUBRESOURCE mapped = {};
++    if (FAILED(context->Map(presenter.pixels.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) return 0;
++    for (uint32_t y = 0; y < height; y++)
++        std::memcpy((uint8_t *)mapped.pData + (size_t)y * mapped.RowPitch, pixels + (size_t)y * width, (size_t)width * 4);
++    context->Unmap(presenter.pixels.Get(), 0);
++    return present_view(presenter.pixels_view.Get(), 1.0f, 1.0f, (float)width / (float)height, interval) ? 1 : 0;
++}
++
+ /* A GPU-engine blit wrote guest RAM a cached surface mirrors. Refresh only the
+  * surfaces that overlap those bytes from guest RAM; never bump the global
+  * texture-validation serial, which would re-upload GPU-only textures (UI). */
+@@ -1897,7 +2176,10 @@ extern "C" int nv2a_gpu_clear(const Nv2aGpuDraw *state, uint32_t flags, uint32_t
      }
      if (depth && !partial) {
          UINT clear_flags = (clear_depth ? D3D11_CLEAR_DEPTH : 0u) | (clear_stencil ? D3D11_CLEAR_STENCIL : 0u);
@@ -905,7 +1187,7 @@ index f031faf..575e85a 100644
              (float)(depth_value >> 8) / 16777215.0f;
          context->ClearDepthStencilView(depth->view.Get(), clear_flags, normalized, (UINT8)depth_value);
      }
-@@ -1908,7 +1952,7 @@ extern "C" int nv2a_gpu_clear(const Nv2aGpuDraw *state, uint32_t flags, uint32_t
+@@ -1908,7 +2190,7 @@ extern "C" int nv2a_gpu_clear(const Nv2aGpuDraw *state, uint32_t flags, uint32_t
      if (depth) {
          bool known = known_clears && !partial && (depth->format == 1 ? clear_depth :
              (clear_depth && clear_stencil) || depth->clear_value_valid);
@@ -914,7 +1196,7 @@ index f031faf..575e85a 100644
              (clear_depth ? depth_value & 0xFFFFFF00u : depth->clear_value & 0xFFFFFF00u) |
              (clear_stencil ? depth_value & 255u : depth->clear_value & 255u);
          mark_written_region(*depth, region);
-@@ -1928,10 +1972,16 @@ static void release_stream(DynamicStream &stream)
+@@ -1928,10 +2210,16 @@ static void release_stream(DynamicStream &stream)
      }
  }
  
@@ -935,7 +1217,7 @@ index f031faf..575e85a 100644
  static bool map_stream(DynamicStream &stream, UINT bytes, UINT bind, const char *kind, UINT &offset)
  {
      if (!stream.buffer || bytes > stream.capacity) {
-@@ -1953,18 +2003,18 @@ static bool map_stream(DynamicStream &stream, UINT bytes, UINT bind, const char
+@@ -1953,18 +2241,18 @@ static bool map_stream(DynamicStream &stream, UINT bytes, UINT bind, const char
          stream.capacity = capacity;
          stream.used = 0;
      }
@@ -965,7 +1247,7 @@ index f031faf..575e85a 100644
          gpu_timing.stream_discards++;
      } else {
          gpu_timing.stream_appends++;
-@@ -2056,6 +2106,19 @@ static ID3D11ShaderResourceView *get_texture(const Nv2aGpuTexture &binding, cons
+@@ -2056,6 +2344,19 @@ static ID3D11ShaderResourceView *get_texture(const Nv2aGpuTexture &binding, cons
      gpu_timing.texture_calls++;
      gpu_timing.surface_count = surfaces.size();
      gpu_timing.depth_surface_count = depth_surfaces.size();
@@ -985,7 +1267,7 @@ index f031faf..575e85a 100644
      static const bool mirror_aliases = []() {
          const char *setting = std::getenv("RECOMP_NV2A_GPU_ALIAS_COPIES");
          return !setting || std::strcmp(setting, "0") != 0;
-@@ -2520,6 +2583,14 @@ static bool make_sampler(const Nv2aGpuTexture &binding, ComPtr<ID3D11SamplerStat
+@@ -2520,6 +2821,14 @@ static bool make_sampler(const Nv2aGpuTexture &binding, ComPtr<ID3D11SamplerStat
      uint32_t minimum = (binding.filter >> 16) & 255u, maximum = (binding.filter >> 24) & 15u;
      if (!minimum) minimum = 1;
      if (!maximum) maximum = 1;
@@ -1000,7 +1282,7 @@ index f031faf..575e85a 100644
      if (minimum > 6 || maximum > 2) return false;
      D3D11_SAMPLER_DESC description = {};
      description.AddressU = texture_address(binding.address_u);
-@@ -2725,7 +2796,7 @@ static bool clear_target_rectangle(const Nv2aGpuDraw &state, Surface *surface, D
+@@ -2725,7 +3034,7 @@ static bool clear_target_rectangle(const Nv2aGpuDraw &state, Surface *surface, D
      const float constants[8] = {
          (float)((color >> 16) & 255u) / 255.0f, (float)((color >> 8) & 255u) / 255.0f,
          (float)(color & 255u) / 255.0f, (float)(color >> 24) / 255.0f,
@@ -1009,7 +1291,7 @@ index f031faf..575e85a 100644
              (float)(depth_value >> 8) / 16777215.0f, 0, 0, 0
      };
      D3D11_MAPPED_SUBRESOURCE mapped = {};
-@@ -2764,9 +2835,14 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -2764,9 +3073,14 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
          std::fprintf(stderr, "[GPU-D3D11] rejected: %s\n", reason);
          return 0;
      };
@@ -1026,7 +1308,7 @@ index f031faf..575e85a 100644
      if (state->topology > NV2A_GPU_TOPOLOGY_POINTS) return reject("primitive topology");
      uint32_t primitive_width = state->topology == NV2A_GPU_TOPOLOGY_TRIANGLES ? 3u :
                                 state->topology == NV2A_GPU_TOPOLOGY_LINES ? 2u : 1u;
-@@ -2858,8 +2934,9 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -2858,8 +3172,9 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
              !nv_cpu_finite(vertices[vertex].position[2]) || !nv_cpu_finite(vertices[vertex].position[3])) return 0;
      TargetExtent extent = reusable_target_extent(*state);
      prepare_target_cache(*state, extent);
@@ -1038,7 +1320,7 @@ index f031faf..575e85a 100644
      DepthSurface *depth = state->depth_enable || state->stencil_enable ? get_depth(*state, true, extent) : nullptr;
      if ((state->depth_enable || state->stencil_enable) && !depth) return reject("depth/stencil surface");
      D3D11_DEPTH_STENCIL_DESC depth_description = {};
-@@ -2971,7 +3048,10 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -2971,7 +3286,10 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
              }
          }
      }
@@ -1050,7 +1332,7 @@ index f031faf..575e85a 100644
      constants.viewport[2] = state->depth_format == 1 ? 65535.0f : 16777215.0f;
      constants.depth_range[0] = depth_clip_min; constants.depth_range[1] = depth_clip_max;
      constants.depth_range[2] = (float)depth_clamp;
-@@ -3052,7 +3132,8 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -3052,7 +3370,8 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
              constants.texture_info[stage][3] = 0.0f;
              continue;
          }
@@ -1060,7 +1342,7 @@ index f031faf..575e85a 100644
              return reject("projective volume texture dimensionality");
          uint32_t sign_mask = binding.filter >> 28;
          uint32_t key_mode = binding.control0_valid ? binding.control0 & 3u : 0;
-@@ -3090,9 +3171,21 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -3090,9 +3409,21 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
              if ((mode == 1 || mode == 2) && vertices[vertex].texture[stage][3] == 0) return reject("zero projective texture coordinate");
          }
          if (!binding.source_bytes) return reject("missing texture data");
@@ -1084,7 +1366,7 @@ index f031faf..575e85a 100644
          constants.texture_info[stage][0] = (float)binding.width; constants.texture_info[stage][1] = (float)binding.height; constants.texture_info[stage][2] = (float)binding.linear;
          constants.texture_key[stage][0] = binding.color_key;
          constants.texture_key[stage][1] = binding.format == 0x03 || binding.format == 0x07 ||
-@@ -3102,7 +3195,13 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -3102,7 +3433,13 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
          constants.texture_info[stage][3] = (float)((binding.format == 0x1E ? 1u : 0u) | (binding.cube ? 2u : 0u) |
              (binding.address_u == 5 ? 4u : 0u) | (binding.address_v == 5 ? 8u : 0u) |
              (binding.control0_valid && (binding.control0 & 4u) ? 16u : 0u) |
@@ -1099,7 +1381,7 @@ index f031faf..575e85a 100644
          if (sign_mask) signed_texture_stages++;
          switch (binding.format) {
          case 0x01: case 0x16: case 0x17: case 0x1A: case 0x1B: case 0x20: case 0x28: case 0x29:
-@@ -3116,8 +3215,8 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -3116,8 +3453,8 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
      UINT vertex_bytes = count * vertex_stride;
      UINT index_bytes = state->indices ? state->index_count * sizeof(uint32_t) : 0;
      UINT vertex_offset;
@@ -1110,7 +1392,7 @@ index f031faf..575e85a 100644
      if (!map_stream(vertex_stream, vertex_bytes + index_bytes,
                      D3D11_BIND_VERTEX_BUFFER | D3D11_BIND_INDEX_BUFFER, "geometry", vertex_offset))
          return 0;
-@@ -3130,13 +3229,15 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -3130,13 +3467,15 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
          index_offset = vertex_offset + vertex_bytes;
          std::memcpy((uint8_t *)vertex_stream.mapped.pData + index_offset, state->indices, index_bytes);
      }
@@ -1127,7 +1409,7 @@ index f031faf..575e85a 100644
                  !std::memcmp(&uploaded_constants, &constants, sizeof constants)) {
              /* Same constants as the last upload this frame: rebind its offset. */
              gpu_timing.constant_reuses++;
-@@ -3146,6 +3247,8 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -3146,6 +3485,8 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
              if (!map_stream(constant_stream, kConstantSlot, D3D11_BIND_CONSTANT_BUFFER, "constants", constants_offset))
                  return 0;
              std::memcpy((uint8_t *)constant_stream.mapped.pData + constants_offset, &constants, sizeof constants);
@@ -1136,7 +1418,7 @@ index f031faf..575e85a 100644
              constant_upload_offset = constants_offset;
              uploaded_constants = constants;
              uploaded_constants_valid = true;
-@@ -3176,7 +3279,7 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -3176,7 +3517,7 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
      UINT stride = vertex_stride, offset = vertex_offset;
      ID3D11Buffer *buffers[] = {vertex_stream.buffer.Get()}, *constants_buffer[] = {constant_buffer.Get()};
      ID3D11Buffer *constant_ring_buffer = constant_stream.buffer.Get();
@@ -1145,7 +1427,7 @@ index f031faf..575e85a 100644
      ID3D11ShaderResourceView *resources[12] = {}; ID3D11SamplerState *sampler_states[4];
      for (uint32_t stage = 0; stage < 4; stage++) {
          resources[state->textures[stage].depth ? stage + 8 : state->textures[stage].cube ? stage + 4 : stage] = views[stage].Get();
-@@ -3245,7 +3348,7 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -3245,7 +3586,7 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
          if (texture_matrix_used) gpu_timing.texture_matrix_draws++;
      }
      pending_draws = true;
@@ -1154,7 +1436,7 @@ index f031faf..575e85a 100644
      else gpu_timing.color_masked_draws++;
      bool stencil_writes = state->stencil_enable && (state->stencil_write_mask & 255u) &&
          (state->stencil_fail != 0x1E00 || state->stencil_depth_fail != 0x1E00 || state->stencil_pass != 0x1E00);
-@@ -3314,6 +3417,8 @@ extern "C" int nv2a_gpu_available(void)
+@@ -3314,6 +3655,8 @@ extern "C" int nv2a_gpu_available(void)
              if (FAILED(device->CheckFeatureSupport(D3D11_FEATURE_D3D11_OPTIONS, &options, sizeof options)) ||
                  !options.ConstantBufferOffsetting)
                  context1.Reset();
@@ -1221,10 +1503,48 @@ index e27083f..5c0828e 100644
     if(textureFlags&4)uvw.x=saturate(uvw.x);
     if(textureFlags&8)uvw.y=saturate(uvw.y);
 diff --git a/src/kernel/nv2a_pb_exec.c b/src/kernel/nv2a_pb_exec.c
-index d7c0f20..a35d1cf 100644
+index d7c0f20..fb9edb5 100644
 --- a/src/kernel/nv2a_pb_exec.c
 +++ b/src/kernel/nv2a_pb_exec.c
-@@ -437,6 +437,13 @@ static struct {
+@@ -117,6 +117,37 @@ static int pb_surf_trace(void)
+ extern ptrdiff_t xbox_GetMemoryOffset(void);
+ extern void xbox_FramebufferWindowSet(uint32_t fb_va, uint32_t pitch);
+ extern void xbox_FramebufferWindowStart(void);
++extern void *xbox_FramebufferWindowHandle(void);
++extern void xbox_FramebufferSize(uint32_t *width, uint32_t *height);
++extern const uint32_t *xbox_FramebufferPixels(uint32_t *width, uint32_t *height);
++extern int xbox_FramebufferWantsPixels(void);
++extern void xbox_FramebufferSetDirectPresent(void);
++extern void xbox_FramebufferFrameShown(void);
++
++/* The window's swap chain shows each flip (nv2a_gpu_present_*);
++ * RECOMP_PRESENT=gdi keeps the old route: publish to guest RAM, StretchDIBits. */
++static void *present_window(void)
++{
++    static int enabled = -1;
++    if (enabled < 0) {
++        const char *e = getenv("RECOMP_PRESENT");
++        enabled = !(e && !_stricmp(e, "gdi"));
++    }
++    return enabled ? xbox_FramebufferWindowHandle() : NULL;
++}
++
++/* RECOMP_VSYNC=<n>: present on every nth monitor refresh; 0 (the default)
++ * presents at once and leaves the pacing to the emulated vblank. */
++static int present_interval(void)
++{
++    static int interval = -1;
++    if (interval < 0) {
++        const char *e = getenv("RECOMP_VSYNC");
++        interval = e ? atoi(e) : 0;
++        if (interval < 0 || interval > 4) interval = 0;
++    }
++    return interval;
++}
+ extern uint32_t g_xbox_image_lo, g_xbox_image_hi;
+ 
+ /* Would writing this surface land on the title's own image?
+@@ -437,6 +468,13 @@ static struct {
       * that has not been drawn yet -- which is how a correctly rendered
       * sequence came out as 12 black BMPs. */
      uint32_t drawn_offset;
@@ -1238,7 +1558,7 @@ index d7c0f20..a35d1cf 100644
      uint64_t pixels;
      uint32_t pixel_max;   /* brightest value any pixel write carried */
      uint32_t clip_x, clip_w, clip_y, clip_h;
-@@ -480,6 +487,7 @@ static struct {
+@@ -480,6 +518,7 @@ static struct {
      uint32_t vp_load, vp_start, constant_load, vp_words, constant_words;
      Nv2aCpuCombiners combiners;
      uint32_t shade_mode, alpha_enable, alpha_func, alpha_ref;
@@ -1246,7 +1566,7 @@ index d7c0f20..a35d1cf 100644
      uint32_t depth_offset, depth_pitch, depth_clear, depth_enable, depth_func, depth_mask, control0;
      uint32_t zmin_max_control, depth_range_valid;
      float depth_clip_min, depth_clip_max;
-@@ -1046,8 +1054,7 @@ static int benign_state_method(uint32_t method)
+@@ -1046,8 +1085,7 @@ static int benign_state_method(uint32_t method)
      case 0x17C4:  /* SET_LIGHT_MODEL_TWO_SIDE_ENABLE  */
      case 0x1D80:  /* UNK1D80                          */
      case 0x1E68:  /* SET_SHADOW_ZSLOPE_THRESHOLD      */
@@ -1256,7 +1576,7 @@ index d7c0f20..a35d1cf 100644
      default:
          return 0;
      }
-@@ -1252,6 +1259,162 @@ static void raster_triangle(const float a[2], const float b[2],
+@@ -1252,6 +1290,162 @@ static void raster_triangle(const float a[2], const float b[2],
                              const float uv[3][2], const Nv2aCpuVertex varying[3]);
  
  #ifdef _WIN32
@@ -1419,7 +1739,7 @@ index d7c0f20..a35d1cf 100644
  static int gpu_clear_surface(uint32_t param)
  {
      static int enabled = -1;
-@@ -1264,13 +1427,36 @@ static int gpu_clear_surface(uint32_t param)
+@@ -1264,13 +1458,36 @@ static int gpu_clear_surface(uint32_t param)
      }
      if (!enabled || s_gpu.clip_x || s_gpu.clip_y || !s_gpu.clip_w || !s_gpu.clip_h)
          return 0;
@@ -1458,7 +1778,7 @@ index d7c0f20..a35d1cf 100644
      if (param & NV097_CLEAR_COLOR_MASK) {
          uint32_t base = dma_resolve(s_gpu.color_offset);
          if (!s_gpu.color_offset || !state.pitch || !state.bytes_per_pixel ||
-@@ -1307,7 +1493,12 @@ static void clear_surface(uint32_t param)
+@@ -1307,7 +1524,12 @@ static void clear_surface(uint32_t param)
  #ifdef _WIN32
      native_clear = gpu_clear_surface(param);
  #endif
@@ -1472,7 +1792,7 @@ index d7c0f20..a35d1cf 100644
  
      if (!native_clear && (param & 3u) && s_gpu.depth_offset && s_gpu.depth_pitch) {
          uint32_t format = (s_gpu.format >> 4) & 15u;
-@@ -1320,7 +1511,7 @@ static void clear_surface(uint32_t param)
+@@ -1320,7 +1542,7 @@ static void clear_surface(uint32_t param)
                  uint8_t *row = mem + base + (size_t)y * s_gpu.depth_pitch;
                  for (x = s_gpu.clip_x; x < s_gpu.clip_x + s_gpu.clip_w; x++) {
                      if (depth_bpp == 2) {
@@ -1481,7 +1801,26 @@ index d7c0f20..a35d1cf 100644
                      } else {
                          uint32_t previous = ((uint32_t *)row)[x];
                          uint32_t mask = ((param & 1u) ? 0xFFFFFF00u : 0u) | ((param & 2u) ? 255u : 0u);
-@@ -2211,7 +2402,7 @@ static void raster_triangle(const float a[2], const float b[2],
+@@ -1867,6 +2089,18 @@ static void put_pixel(uint8_t *mem, uint32_t bpp, int x, int y, uint32_t argb)
+     }
+ }
+ 
++/* Whether the overlay is on: present_pvideo_overlay then paints the movie
++ * into the guest-RAM frame, so that frame has to take the CPU route. */
++static int pvideo_overlay_active(void)
++{
++    const uint8_t *mem = (const uint8_t *)xbox_GetMemoryOffset();
++    const volatile uint32_t *regs = (const volatile uint32_t *)(mem + 0xFD008000u);
++    uint32_t buffer = regs[0x700 / 4];
++    uint32_t slot = (buffer & 0x10u) ? 1u : 0u;
++    return (buffer & 0x11u) && !(regs[0x704 / 4] & 1u)
++        && ((regs[0x958 / 4 + slot] >> 16) & 3u) == 1u;
++}
++
+ static void present_pvideo_overlay(uint32_t destination)
+ {
+     const uint8_t *mem = (const uint8_t *)xbox_GetMemoryOffset();
+@@ -2211,7 +2445,7 @@ static void raster_triangle(const float a[2], const float b[2],
          }
      }
      s_gpu.tris_drawn++;
@@ -1490,7 +1829,7 @@ index d7c0f20..a35d1cf 100644
  }
  
  /* Attribute 3 is diffuse colour in every NV2A layout that sets one. Absent it,
-@@ -2770,15 +2961,28 @@ static int gpu_raster_batch(void)
+@@ -2770,15 +3004,28 @@ static int gpu_raster_batch(void)
      }
      gpu_begin_chunk();
      if (!s_gpu.combiners_configured) return gpu_batch_rejected("unconfigured combiners");
@@ -1526,7 +1865,7 @@ index d7c0f20..a35d1cf 100644
      state.stage_program = s_gpu.shader_stage_program; state.combiners = s_gpu.combiners;
      state.shader_clip_mode = s_gpu.shader_clip_mode;
      state.shader_other_stage_input = s_gpu.shader_other_stage_input;
-@@ -2869,6 +3073,45 @@ static int gpu_raster_batch(void)
+@@ -2869,6 +3116,45 @@ static int gpu_raster_batch(void)
          if (!texture->valid) return gpu_batch_rejected("invalid texture binding");
          if (((texture->raw_format >> 4) & 15u) == 3u)
              binding->depth = 1u << (texture->raw_format >> 28);
@@ -1572,7 +1911,7 @@ index d7c0f20..a35d1cf 100644
          if ((mode == 2) != (binding->depth != 0) || (binding->depth && (texture->raw_format & 4u)))
              return gpu_batch_rejected("projective volume texture dimensionality");
          binding->source = memory + texture->offset; binding->width = texture->width; binding->height = texture->height;
-@@ -3008,12 +3251,16 @@ static int gpu_submit_chunk(Nv2aGpuDraw *state, uint32_t *count)
+@@ -3008,12 +3294,16 @@ static int gpu_submit_chunk(Nv2aGpuDraw *state, uint32_t *count)
      }
      s_gpu.gpu_batches++;
      if (state->topology == NV2A_GPU_TOPOLOGY_TRIANGLES) s_gpu.tris_drawn += gpu_index_count / 3;
@@ -1590,7 +1929,7 @@ index d7c0f20..a35d1cf 100644
  static void raster_batch(void)
  {
  #ifndef _WIN32
-@@ -3049,6 +3296,153 @@ static void raster_batch(void)
+@@ -3049,6 +3339,153 @@ static void raster_batch(void)
      }
  
  #ifdef _WIN32
@@ -1744,7 +2083,7 @@ index d7c0f20..a35d1cf 100644
      double started = gpu_clock_seconds();
      double prior_submit = s_gpu.gpu_submit_seconds;
      int rendered = gpu_raster_batch();
-@@ -3820,6 +4214,7 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -3820,6 +4257,7 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
      if (method == 0x037C) { s_gpu.shade_mode = param; return; }
      if (method == 0x0300) { s_gpu.alpha_enable = param; return; }
      if (method == 0x033C) { s_gpu.alpha_func = param; return; }
@@ -1752,7 +2091,7 @@ index d7c0f20..a35d1cf 100644
      if (method == 0x0340) { s_gpu.alpha_ref = param & 255u; return; }
      if (method == 0x034C) { s_gpu.blend_constant = param; return; }
      if (method == 0x0350) { s_gpu.blend_equation = param; return; }
-@@ -4253,6 +4648,7 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -4253,6 +4691,7 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
          return;
  
      case NV097_FLIP_STALL:
@@ -1760,12 +2099,13 @@ index d7c0f20..a35d1cf 100644
          s_gpu.flush_flip++;
          cloak_marker_idle();
          /* The stall ends when the buffer being read is the one just finished.
-@@ -4276,25 +4672,50 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -4276,25 +4715,88 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
           * per-frame re-decode of render-to-texture surfaces. */
          if (s_gpu.pitch) {
              extern void xbox_FramebufferWindowPresent(uint32_t, uint32_t);
 -            uint32_t done = s_gpu.drawn_offset ? s_gpu.drawn_offset
 -                                               : s_gpu.color_offset;
+-            if (done) {
 +            int drawn = s_gpu.drawn_offset != 0;
 +            uint32_t done = drawn ? s_gpu.drawn_offset : s_gpu.color_offset;
 +            uint32_t pitch = drawn && s_gpu.drawn_pitch ? s_gpu.drawn_pitch : s_gpu.pitch;
@@ -1793,7 +2133,31 @@ index d7c0f20..a35d1cf 100644
 +                    pitch = scan_pitch;
 +                }
 +            }
-             if (done) {
++            void *window = present_window();
++            int shown_direct = 0;
++            /* Straight from the GPU surface into the window's swap chain:
++             * no publish, no GPU wait, no CPU conversion. Not for a frame
++             * the movie overlay paints into guest RAM, or one a capture or
++             * dump wants converted on the CPU. */
++            if (done && window && !xbox_FramebufferWantsPixels() && !pvideo_overlay_active()) {
++                uint32_t h = present_h ? present_h : s_gpu.clip_y + s_gpu.clip_h;
++                uint32_t frame_w, frame_h;
++                xbox_FramebufferSize(&frame_w, &frame_h);
++                if (nv2a_gpu_present_surface(window, (uint8_t *)xbox_GetMemoryOffset() + dma_resolve(done),
++                                             pitch, h, frame_w, frame_h, present_interval())) {
++                    static int announced;
++                    if (!announced++)
++                        fprintf(stderr, "[GPU] flip %u: shown from the GPU surface (0x%08X pitch %u)\n",
++                                s_gpu.flips, done, pitch);
++                    xbox_FramebufferSetDirectPresent();
++                    xbox_FramebufferWindowSet(dma_resolve(done), pitch);
++                    xbox_FramebufferFrameShown();
++                    shown_direct = 1;
++                }
++            }
++            if (shown_direct) {
++                /* shown above */
++            } else if (done) {
                  uint32_t show = done;
                  if (lazy_flip()) {
                      uint8_t *base = (uint8_t *)xbox_GetMemoryOffset() + dma_resolve(done);
@@ -1815,6 +2179,20 @@ index d7c0f20..a35d1cf 100644
 -                xbox_FramebufferWindowPresent(dma_resolve(show), s_gpu.pitch);
 +                xbox_FramebufferWindowSet(dma_resolve(show), pitch);
 +                xbox_FramebufferWindowPresent(dma_resolve(show), pitch);
++                if (window) {
++                    /* Converted on the CPU; the swap chain still shows it. */
++                    uint32_t frame_w, frame_h;
++                    const uint32_t *pixels = xbox_FramebufferPixels(&frame_w, &frame_h);
++                    static unsigned cpu_frames;
++                    if (pixels && nv2a_gpu_present_pixels(window, pixels, frame_w, frame_h, present_interval())) {
++                        xbox_FramebufferSetDirectPresent();
++                        /* 1, 10, 100...: a steady stream here is a surface
++                         * the direct route never finds. */
++                        if (++cpu_frames == 1 || cpu_frames == 10 || cpu_frames == 100 || cpu_frames % 1000 == 0)
++                            fprintf(stderr, "[GPU] flip %u: shown from CPU pixels (%u so far; overlay %d)\n",
++                                    s_gpu.flips, cpu_frames, pvideo_overlay_active());
++                    }
++                }
              } else {
                  nv2a_pb_exec_flush();
              }
@@ -2050,13 +2428,27 @@ index d1e477d..c43862b 100644
          }
          out[2] |= st->digital;
 diff --git a/src/video/fb_present.c b/src/video/fb_present.c
-index 712b158..eae3aa4 100644
+index 712b158..969d865 100644
 --- a/src/video/fb_present.c
 +++ b/src/video/fb_present.c
-@@ -74,6 +74,34 @@ void xbox_FramebufferWindowPresent(uint32_t fb_va, uint32_t pitch)
-     if (!s_fb_running || !fb_va || !pitch)
-         return;
-     InterlockedIncrement64(&s_present_frame);
+@@ -51,6 +51,101 @@ static uint32_t     *s_present[2];
+ static volatile LONG s_present_idx = -1;   /* -1 until the first flip */
+ static DECLSPEC_ALIGN(8) volatile LONG64 s_present_frame;
+ 
++/* Set once the GPU backend has shown a frame through its swap chain
++ * (nv2a_gpu_present_*): from then on the window is the swap chain's, so it
++ * paints nothing itself and may be resized, maximised and made fullscreen. */
++static volatile LONG s_direct_present;
++/* F11/F12 while the swap chain shows frames: the frame on screen was never
++ * converted on the CPU, so the next flip takes the CPU route and the capture
++ * is written from it (xbox_FramebufferWindowPresent). */
++static volatile LONG s_capture_pending;
++static char          s_capture_path[MAX_PATH];
++static void fb_frame_shown(void);
++
++static void fb_frame_shown(void)
++{
++    InterlockedIncrement64(&s_present_frame);
 +    {
 +        /* RECOMP_HITCH_MS=<n>: log every flip that came more than n ms after
 +         * the previous one, stamped with seconds since the first flip, so a
@@ -2085,10 +2477,72 @@ index 712b158..eae3aa4 100644
 +            last = now;
 +        }
 +    }
++}
++
++/* A flip the GPU backend showed straight from its surface. */
++void xbox_FramebufferFrameShown(void)
++{
++    if (s_fb_running)
++        fb_frame_shown();
++}
++
++void xbox_FramebufferSetDirectPresent(void)
++{
++    InterlockedExchange(&s_direct_present, 1);
++}
++
++void *xbox_FramebufferWindowHandle(void);
++
++void xbox_FramebufferSize(uint32_t *width, uint32_t *height)
++{
++    *width = s_fb_width;
++    *height = s_fb_height;
++}
++
++/* The last frame converted on the CPU, for the swap chain to show. */
++const uint32_t *xbox_FramebufferPixels(uint32_t *width, uint32_t *height)
++{
++    LONG idx = s_present_idx;
++    *width = s_fb_width;
++    *height = s_fb_height;
++    return idx >= 0 ? s_present[idx] : NULL;
++}
++
++/* Whether the next flip must be converted on the CPU: a capture is waiting,
++ * or a diagnostic reads the converted frames. */
++int xbox_FramebufferWantsPixels(void)
++{
++    static int always = -1;
++    if (always < 0)
++        always = getenv("RECOMP_FLIP_DUMP_DIR") != NULL || getenv("RECOMP_FB_VA") != NULL;
++    return always || s_capture_pending;
++}
++
++/* F12/F11: write `path` from the frame on screen. Through the swap chain that
++ * frame exists only on the GPU, so it is deferred to the next flip. */
++static void fb_capture(const char *path)
++{
++    if (s_direct_present) {
++        snprintf(s_capture_path, sizeof s_capture_path, "%s", path);
++        InterlockedExchange(&s_capture_pending, 1);
++    } else if (xbox_FramebufferDumpBmp(path) != 0) {
++        fprintf(stderr, "[FBWIN] failed to capture framebuffer to %s\n", path);
++    }
++}
++
+ void xbox_FramebufferWindowSet(uint32_t fb_va, uint32_t pitch)
+ {
+     /* RECOMP_FB_VA pins the window to one guest address instead of following
+@@ -73,7 +168,7 @@ void xbox_FramebufferWindowPresent(uint32_t fb_va, uint32_t pitch)
+ 
+     if (!s_fb_running || !fb_va || !pitch)
+         return;
+-    InterlockedIncrement64(&s_present_frame);
++    fb_frame_shown();
      if (getenv("RECOMP_FB_VA"))
          return;                       /* pinned: leave the old path alone */
      next = (s_present_idx == 0) ? 1 : 0;
-@@ -91,6 +119,20 @@ void xbox_FramebufferWindowPresent(uint32_t fb_va, uint32_t pitch)
+@@ -91,6 +186,20 @@ void xbox_FramebufferWindowPresent(uint32_t fb_va, uint32_t pitch)
  
          if (bpp == 4) {
              memcpy(dst, row, (size_t)s_fb_width * 4);
@@ -2109,7 +2563,7 @@ index 712b158..eae3aa4 100644
          } else if (bpp == 2) {
              const uint16_t *p = (const uint16_t *)row;
              for (x = 0; x < s_fb_width; x++) {
-@@ -104,6 +146,44 @@ void xbox_FramebufferWindowPresent(uint32_t fb_va, uint32_t pitch)
+@@ -104,8 +213,52 @@ void xbox_FramebufferWindowPresent(uint32_t fb_va, uint32_t pitch)
              memset(dst, 0, (size_t)s_fb_width * 4);
          }
      }
@@ -2153,8 +2607,16 @@ index 712b158..eae3aa4 100644
 +    }
      /* Published only once it is whole. */
      InterlockedExchange(&s_present_idx, next);
++    if (s_capture_pending && s_rgb) {
++        memcpy(s_rgb, s_present[next], (size_t)s_fb_width * s_fb_height * 4);
++        if (xbox_FramebufferDumpBmp(s_capture_path) != 0)
++            fprintf(stderr, "[FBWIN] failed to capture framebuffer to %s\n", s_capture_path);
++        InterlockedExchange(&s_capture_pending, 0);
++    }
  }
-@@ -144,6 +224,23 @@ int xbox_FramebufferKeyDown(int vk)
+ 
+ /* Which keys are down, for the pad stand-in in src/input.
+@@ -144,6 +297,22 @@ int xbox_FramebufferKeyDown(int vk)
   * place the keyboard model can be driven without the foreground. The file
   * holds whitespace-separated hex VK codes (e.g. "20 57" = Space + W); path is
   * RECOMP_INPUT_FILE (default C:\recomp-input.txt). */
@@ -2170,15 +2632,14 @@ index 712b158..eae3aa4 100644
 +    DWORD n = GetModuleFileNameA(NULL, path, MAX_PATH);
 +    while (n && path[n - 1] != '\\' && path[n - 1] != '/') n--;
 +    snprintf(path + n, sizeof path - n, "capture_%u.bmp", ++seq);
-+    if (xbox_FramebufferDumpBmp(path) != 0)
-+        fprintf(stderr, "[FBWIN] failed to capture framebuffer to %s\n", path);
++    fb_capture(path);
 +    InterlockedExchange(&g_nv2a_capture_request, 1);
 +}
 +
  static void fb_inject_poll(void)
  {
      static int enabled = -1;
-@@ -191,6 +288,8 @@ static void fb_inject_poll(void)
+@@ -191,12 +360,13 @@ static void fb_inject_poll(void)
              continue;
          held[i] = next[i];
          s_key_down[i] = next[i];
@@ -2187,7 +2648,87 @@ index 712b158..eae3aa4 100644
          if (next[i] && i == VK_F12) {
              const char *cap = getenv("RECOMP_FB_CAPTURE");
              if (!cap || !cap[0])
-@@ -470,6 +569,10 @@ static LRESULT CALLBACK fb_wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
+                 cap = "framebuffer.bmp";
+-            if (xbox_FramebufferDumpBmp(cap) != 0)
+-                fprintf(stderr, "[FBWIN] failed to capture framebuffer to %s\n", cap);
++            fb_capture(cap);
+         }
+         if (getenv("RECOMP_KEY_TRACE"))
+             fprintf(stderr, "  [KEY] inject %s vk=0x%02X\n",
+@@ -223,6 +393,72 @@ static int s_mouse_capture, s_cursor_hidden;
+ static int s_mouse_raw;      /* WM_INPUT deltas are authoritative when set */
+ static HWND s_fb_hwnd;
+ 
++void *xbox_FramebufferWindowHandle(void)
++{
++    return s_fb_hwnd;
++}
++
++/* Alt+Enter, once the swap chain shows the frames: borderless fullscreen on
++ * the window's monitor, and back to the window as it was. */
++static WINDOWPLACEMENT s_windowed_placement;
++static LONG s_windowed_style;
++static int s_fullscreen;
++
++static void fb_toggle_fullscreen(HWND h)
++{
++    if (!s_fullscreen) {
++        MONITORINFO mi;
++        mi.cbSize = sizeof mi;
++        s_windowed_placement.length = sizeof s_windowed_placement;
++        if (!GetWindowPlacement(h, &s_windowed_placement) ||
++                !GetMonitorInfoA(MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST), &mi))
++            return;
++        s_windowed_style = GetWindowLongA(h, GWL_STYLE);
++        SetWindowLongA(h, GWL_STYLE, (s_windowed_style & ~WS_OVERLAPPEDWINDOW) | WS_POPUP);
++        SetWindowPos(h, HWND_TOP, mi.rcMonitor.left, mi.rcMonitor.top,
++                     mi.rcMonitor.right - mi.rcMonitor.left, mi.rcMonitor.bottom - mi.rcMonitor.top,
++                     SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
++        s_fullscreen = 1;
++    } else {
++        SetWindowLongA(h, GWL_STYLE, s_windowed_style);
++        SetWindowPlacement(h, &s_windowed_placement);
++        SetWindowPos(h, NULL, 0, 0, 0, 0,
++                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
++        s_fullscreen = 0;
++    }
++}
++
++/* The swap chain scales, so the window need not be the frame's size: give it
++ * a maximise box and the largest whole multiple of the frame that fits the
++ * monitor's work area, centred there. */
++static void fb_window_direct(HWND h)
++{
++    MONITORINFO mi;
++    RECT r;
++    LONG work_w, work_h, scale = 1;
++    mi.cbSize = sizeof mi;
++    SetWindowLongA(h, GWL_STYLE, GetWindowLongA(h, GWL_STYLE) | WS_MAXIMIZEBOX);
++    if (!GetMonitorInfoA(MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST), &mi))
++        return;
++    work_w = mi.rcWork.right - mi.rcWork.left;
++    work_h = mi.rcWork.bottom - mi.rcWork.top;
++    for (;;) {
++        r.left = 0; r.top = 0;
++        r.right = (LONG)s_fb_width * (scale + 1); r.bottom = (LONG)s_fb_height * (scale + 1);
++        AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
++        if (r.right - r.left > work_w || r.bottom - r.top > work_h)
++            break;
++        scale++;
++    }
++    r.left = 0; r.top = 0;
++    r.right = (LONG)s_fb_width * scale; r.bottom = (LONG)s_fb_height * scale;
++    AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
++    SetWindowPos(h, NULL, mi.rcWork.left + (work_w - (r.right - r.left)) / 2,
++                 mi.rcWork.top + (work_h - (r.bottom - r.top)) / 2,
++                 r.right - r.left, r.bottom - r.top,
++                 SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
++}
++
+ int xbox_FramebufferMouseDelta(int *dx, int *dy)
+ {
+     int x = (int)InterlockedExchange(&s_mouse_dx, 0);
+@@ -470,11 +706,19 @@ static LRESULT CALLBACK fb_wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
      case WM_KEYDOWN:
      case WM_SYSKEYDOWN:
          rec_event("k %x 1", (unsigned)w);
@@ -2195,10 +2736,45 @@ index 712b158..eae3aa4 100644
 +            fb_request_gpu_capture();
 +            return 0;
 +        }
++        if (w == VK_RETURN && (l & (1 << 29)) && s_direct_present) {
++            if (!(l & (1 << 30)))      /* not the auto-repeat */
++                fb_toggle_fullscreen(h);
++            return 0;
++        }
          if (w == VK_F12) {
              const char *path = getenv("RECOMP_FB_CAPTURE");
              if (!path || !path[0]) path = "framebuffer.bmp";
-@@ -667,6 +770,20 @@ static void fb_convert(const uint8_t *src, uint32_t bpp)
+-            if (xbox_FramebufferDumpBmp(path) != 0)
+-                fprintf(stderr, "[FBWIN] failed to capture framebuffer to %s\n", path);
++            fb_capture(path);
+             return 0;
+         }
+         /* Alt+Esc releases the mouse so the window can be moved or the desktop
+@@ -633,6 +877,8 @@ static LRESULT CALLBACK fb_wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
+     case WM_GETMINMAXINFO: {
+         MINMAXINFO *mmi = (MINMAXINFO *)l;
+         RECT r;
++        if (s_direct_present)
++            break;                  /* the swap chain scales: any size */
+         r.left = 0; r.top = 0;
+         r.right = (LONG)s_fb_width; r.bottom = (LONG)s_fb_height;
+         AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW & ~WS_MAXIMIZEBOX, FALSE);
+@@ -642,12 +888,12 @@ static LRESULT CALLBACK fb_wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
+     }
+ 
+     case WM_SIZE:
+-        if (IsZoomed(h))
++        if (IsZoomed(h) && !s_direct_present)
+             ShowWindow(h, SW_RESTORE);
+         return 0;
+ 
+     case WM_SYSCOMMAND:
+-        if ((w & 0xFFF0) == SC_MAXIMIZE)
++        if ((w & 0xFFF0) == SC_MAXIMIZE && !s_direct_present)
+             return 0;
+         break;
+     }
+@@ -667,6 +913,20 @@ static void fb_convert(const uint8_t *src, uint32_t bpp)
  
          if (bpp == 4) {
              memcpy(dst, row, (size_t)s_fb_width * 4);
@@ -2219,11 +2795,45 @@ index 712b158..eae3aa4 100644
          } else if (bpp == 2) {
              const uint16_t *p = (const uint16_t *)row;
              for (x = 0; x < s_fb_width; x++) {
+@@ -929,6 +1189,7 @@ static DWORD WINAPI fb_thread(LPVOID unused)
+             s_fb_width, s_fb_height);
+ 
+     long last_drawn = -2;
++    int direct_seen = 0;
+     while (InterlockedCompareExchange(&s_fb_running, 1, 1)) {
+         MSG msg;
+         while (PeekMessageA(&msg, NULL, 0, 0, PM_REMOVE)) {
+@@ -959,7 +1220,13 @@ static DWORD WINAPI fb_thread(LPVOID unused)
+                 title_frame = frame;
+             }
+         }
+-        if (s_present_idx >= 0 && s_rgb) {
++        if (s_direct_present) {
++            /* The swap chain shows the frames; GDI would only fight it. */
++            if (!direct_seen) {
++                direct_seen = 1;
++                fb_window_direct(hwnd);
++            }
++        } else if (s_present_idx >= 0 && s_rgb) {
+             /* A finished frame, published by the flip. Copied into s_rgb so
+              * the dump path and GDI see one consistent image even if the
+              * next flip lands mid-blit. */
+@@ -1031,4 +1298,10 @@ int xbox_FramebufferMouseDelta(int *dx, int *dy) { if (dx) *dx = 0; if (dy) *dy
+ int xbox_FramebufferMouseButton(int which) { (void)which; return 0; }
+ int xbox_FramebufferMouseWheel(void) { return 0; }
+ void xbox_FramebufferMouseCapture(int on) { (void)on; }
++void *xbox_FramebufferWindowHandle(void) { return NULL; }
++void xbox_FramebufferSize(uint32_t *width, uint32_t *height) { *width = 640; *height = 480; }
++const uint32_t *xbox_FramebufferPixels(uint32_t *width, uint32_t *height) { *width = *height = 0; return NULL; }
++int xbox_FramebufferWantsPixels(void) { return 0; }
++void xbox_FramebufferSetDirectPresent(void) {}
++void xbox_FramebufferFrameShown(void) {}
+ #endif
 diff --git a/tests/d3d8_smoke/test_nv2a_shader.c b/tests/d3d8_smoke/test_nv2a_shader.c
-index 0650472..bb17462 100644
+index 0650472..1fb1119 100644
 --- a/tests/d3d8_smoke/test_nv2a_shader.c
 +++ b/tests/d3d8_smoke/test_nv2a_shader.c
-@@ -73,6 +73,10 @@ int xbox_Nv2aSoftwareMethodDeferred(uint32_t parameter, uint32_t depth_clear,
+@@ -73,9 +73,19 @@ int xbox_Nv2aSoftwareMethodDeferred(uint32_t parameter, uint32_t depth_clear,
  int xbox_Nv2aSoftwareMethodPending(void) { return 0; }
  void xbox_Nv2aAcknowledgeHandshakes(void) {}
  void xbox_Nv2aFlipPacingReport(void) {}
@@ -2234,3 +2844,12 @@ index 0650472..bb17462 100644
  void xbox_FramebufferWindowSet(uint32_t address, uint32_t pitch) { (void)address; (void)pitch; }
  void xbox_FramebufferWindowStart(void) {}
  void xbox_FramebufferWindowPresent(uint32_t address, uint32_t pitch) { (void)address; (void)pitch; }
++void *xbox_FramebufferWindowHandle(void) { return NULL; }
++void xbox_FramebufferSize(uint32_t *width, uint32_t *height) { *width = 640; *height = 480; }
++const uint32_t *xbox_FramebufferPixels(uint32_t *width, uint32_t *height) { *width = *height = 0; return NULL; }
++int xbox_FramebufferWantsPixels(void) { return 0; }
++void xbox_FramebufferSetDirectPresent(void) {}
++void xbox_FramebufferFrameShown(void) {}
+ void xbox_Nv2aFrameCounterFlip(void) {}
+ 
+ typedef struct TestVertex {

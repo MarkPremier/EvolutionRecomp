@@ -27,7 +27,13 @@ CPU-renderer build (about 9 fps on the title screen).
   than on the Xbox: the shadow map covers 48 units ahead of the camera at
   2048x2048 (the game's own 16 units at 512x512). `RECOMP_SHADOW_DISTANCE`
   and `RECOMP_SHADOW_MAP` change them; 16 and 512 give the original.
-- Known issues: the Xbox version runs at 30 fps and this runs at ~58, which
+- The window shows frames straight from the GPU through a swap chain, so it
+  resizes and maximises freely (the frame stays 4:3, letterboxed), opens at
+  the largest multiple of 640x480 that fits the screen, and **Alt+Enter**
+  toggles borderless fullscreen. The game still renders at 640x480 inside.
+  `RECOMP_VSYNC=1` presents on the monitor's refresh; `RECOMP_PRESENT=gdi`
+  goes back to the old 640x480 window.
+- Known issues: the Xbox version runs at 30 fps and this runs at ~60, which
   may speed up anything the game ties to frame rate; environment-map layers
   (water, Tek bow) and cave lighting are not yet compared with the console.
 
