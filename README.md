@@ -63,6 +63,16 @@ game's `default.xbe` is checked to be the USA release's (SHA-1
 executable's, so other releases are refused. `RECOMP_GAME_DIR` names the
 folder by hand. Saves go in that folder's `udata`.
 
+The game's shaders are translated to HLSL and compiled as each one first
+appears. Compiled shaders are kept in `%LOCALAPPDATA%\xboxrecomp\shadercache`,
+so each one is compiled once per machine, and new ones compile in the
+background rather than in the frame that needs them: until a pixel shader is
+ready its draws use a slower generic shader, and a draw whose vertex shader is
+still compiling is skipped for those few frames. The first time a scene is
+ever seen may show that briefly; after that it plays without compiling at all.
+`RECOMP_SHADER_CACHE=<folder>` moves the cache (`0` turns it off) and
+`RECOMP_SHADER_ASYNC=0` compiles in the frame instead, as before.
+
 ## What you need to build it
 
 - An original Xbox disc image of Turok: Evolution (USA), XISO format
@@ -325,7 +335,11 @@ Useful while debugging:
   the next frame: textures, combiners, depth/blend/fog state, screen extent)
   and `capture_<n>.bmp` beside the exe
 - `RECOMP_HITCH_MS=20` logs every frame that took longer than 20 ms, with a
-  timestamp, to find periodic stutters. The periodic GPU report
+  timestamp and what the frame spent its time on: draw phases, shader
+  compiles (count/ms), texture creation and uploads, GPU sync waits, new
+  render targets, generic-shader and skipped draws, and the guest's file
+  reads. `RECOMP_SHADER_GENERIC=1` draws everything with the generic pixel
+  shader, to check it against the compiled ones. The periodic GPU report
   (`RECOMP_PB_REPORT_MS`) stalls ~0.5 s each time, so it is off by default
 - `RECOMP_DRAW_ONLY=<first>-<last>`, `RECOMP_BATCH_INFO=<s>:<first>-<last>`
   and `RECOMP_DEPTH_DUMP=<s>` isolate, describe and dump GPU batches
