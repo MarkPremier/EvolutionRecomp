@@ -466,9 +466,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
      * WASD moves and the mouse turns through the right stick. The toolkit's
      * direct camera look writes another game's camera addresses, so it is
      * off. Turok's stick reading ignores |v| < 0.2 (sub_0001D590), so mouse
-     * motion is pushed past that deadzone to keep slow aim responsive. Turok
-     * ships with Invert Look on, so the mouse is inverted back: moving it up
-     * looks up. The keys follow Turok's default pad layout (Control Setup):
+     * motion is pushed past that deadzone to keep slow aim responsive. The
+     * mouse moves the stick as a pad's would (up is up), so the game's Invert
+     * Look (off in the patched ControlSetup.hst) turns both. The keys follow Turok's default pad layout (Control Setup):
      *   fire RT = left mouse, weapon mode LT = right mouse, jump A = Space,
      *   next/prev weapon X/Y = wheel down/up or E/Q, duck White = Ctrl or C,
      *   zoom (right stick click) = middle mouse or Z, pause Start = Esc or
@@ -485,7 +485,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     if (!getenv("RECOMP_KBM_SENS"))
         _putenv_s("RECOMP_KBM_SENS", "80");
     if (!getenv("RECOMP_KBM_INVERT_Y"))
-        _putenv_s("RECOMP_KBM_INVERT_Y", "1");
+        _putenv_s("RECOMP_KBM_INVERT_Y", "0");
     if (!getenv("RECOMP_KBM_WHEEL_MOVE"))
         _putenv_s("RECOMP_KBM_WHEEL_MOVE", "0");
     if (!getenv("RECOMP_KBM_MAP"))

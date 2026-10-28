@@ -62,10 +62,10 @@ extern void nv2a_gpu_set_msaa(int samples);
 /* The page's rows, in order; row n is Video.hst item n + 1. Each steps
  * through its values (shown, and written in turok_settings.ini, as their
  * text). */
-enum { SET_RESOLUTION, SET_ASPECT, SET_DISPLAY, SET_VSYNC, SET_FRAMES, SET_ANISOTROPY, SET_MSAA, SET_ICONS,
-       SET_MOUSE_LOOK, SET_MOUSE_SPEED, SET_INVERT_MOUSE, SETTING_COUNT };
-/* The rows of the Video Options page; invert mouse is Control Setup's. */
-#define VIDEO_ROWS SET_INVERT_MOUSE
+enum { SET_RESOLUTION, SET_ASPECT, SET_DISPLAY, SET_VSYNC, SET_FRAMES, SET_ANISOTROPY, SET_MSAA, SET_DRAW_DISTANCE,
+       SET_ICONS,
+       SET_MOUSE_LOOK, SET_MOUSE_SPEED, SETTING_COUNT };
+#define VIDEO_ROWS SETTING_COUNT        /* the page's rows: every setting */
 
 typedef struct VideoSetting {
     const char *key, *label;
@@ -82,6 +82,7 @@ static const char *const k_switches[] = {"off", "on"};
 static const char *const k_frames[] = {"30", "60", "120", "144", "240", "display", "off"};
 static const char *const k_anisotropy[] = {"off", "2x", "4x", "8x", "16x"};
 static const char *const k_msaa[] = {"off", "2x", "4x", "8x"};
+static const char *const k_distances[] = {"normal", "2x", "4x", "8x"};
 static const char *const k_icons[] = {"xbox", "pc"};
 static const char *const k_mouse_looks[] = {"stick", "raw"};
 static const char *const k_speeds[] = {"1", "2", "3", "4", "5", "6", "7", "8", "9", "10"};
@@ -95,10 +96,10 @@ static const VideoSetting k_settings[SETTING_COUNT] = {
     {"frame_limit", "frame limit", k_frames, COUNT(k_frames), 1},
     {"anisotropy", "anisotropy", k_anisotropy, COUNT(k_anisotropy), 4},
     {"msaa", "msaa", k_msaa, COUNT(k_msaa), 0},
+    {"draw_distance", "draw distance", k_distances, COUNT(k_distances), 1},
     {"button_icons", "button icons", k_icons, COUNT(k_icons), 0},
     {"mouse_look", "mouse look", k_mouse_looks, COUNT(k_mouse_looks), 1},
     {"mouse_speed", "mouse speed", k_speeds, COUNT(k_speeds), 4},
-    {"invert_mouse", "invert mouse", k_switches, COUNT(k_switches), 0},
 };
 
 static int s_values[SETTING_COUNT];
@@ -652,10 +653,10 @@ static const char *const k_template_values[] = {"autoaimValueWidget", "hudValueW
 
 /* The rows are wider, closer and their text smaller than Game Options': a
  * value such as fullscreen does not fit beside its label at the console's
- * size, and the page has ten rows where Game Options has five. */
+ * size, and the page has eleven rows where Game Options has five. */
 #define ROW_WIDTH  31.0f
 #define TEXT_SCALE 0.75f
-#define ROW_STEP   2.8f
+#define ROW_STEP   2.55f
 #define ROW_RAISE  3.5f      /* the first row, above Game Options' */
 
 static int is_template(const char *name)
@@ -1151,100 +1152,24 @@ static int add_quit_entry(Node *screen, const char *unused)
     return 1;
 }
 
-/* Control Setup's advanced page (front end and pause menu): INVERT MOUSE
- * below its rows, a copy of the game's own INVERT (ControlSetup.hst item 44,
- * the pad's) showing and changing Video.hst's item instead. */
-static void copy_events_for(Node *actor, const char *from, const char *to, int id)
+/* ControlSetup.hst: Invert Look (Reverse, keys 4, 14, 24 and 34 for each pad's
+ * setup and 44 for the one being set) off as a new player finds it; the disc
+ * has it on. It turns the mouse as it does the pad. */
+static void look_not_inverted(Buffer *history)
 {
-    uint32_t i, j;
-    char target[64];
-    for (i = 0; actor && i < actor->count; i++) {
-        Node *events = child(actor->children[i], "EVENTS");
-        for (j = 0; events && j < events->count; j++) {
-            const char *name = target_of(events->children[j], target, sizeof target);
-            if (name && !strcmp(name, from)) event_copy_after(events, j++, to, id);
+    static const char from[] = "<1>\"";
+    char *text = (char *)history->data, *at;
+    size_t n = history->size;
+    for (at = text; at && (size_t)(at - text) + 8 < n; ) {
+        char *reverse = (char *)memchr(at, 'R', n - (size_t)(at - text));
+        if (!reverse) break;
+        if ((size_t)(reverse - text) + 12 < n && !memcmp(reverse, "Reverse", 7)) {
+            char *mark = reverse + 7;
+            while ((size_t)(mark - text) + 4 < n && *mark != '<' && *mark != '\n') mark++;
+            if (!memcmp(mark, from, sizeof from - 1)) mark[1] = '0';
         }
+        at = reverse + 1;
     }
-}
-
-static void set_history_item(Node *node, int item)
-{
-    set_text(child(node, "HSTF"), VIDEO_HST);
-    set_byte(child(node, "ITM"), item);
-}
-
-static int add_invert_mouse(Node *screen, const char *unused)
-{
-    Node *row = actor_named(screen, "invert", NULL), *value = actor_named(screen, "reverseupdownValueWidget", NULL);
-    Node *deity = actor_named(screen, "DeityNoFade", NULL), *above = actor_named(screen, "hspeed", NULL);
-    Node *last = actor_named(screen, "vspeed", NULL), *limit = NULL;
-    float position[3], step[3];
-    int id = 0, row_id, value_id, item = SET_INVERT_MOUSE + 1;
-    uint32_t i, j, at;
-    (void)unused;
-    if (!row || !value || !deity || !above || !last || !get_vector(child(above, "POS"), step) ||
-            !get_vector(child(last, "POS"), position)) return 0;
-    for (i = 0; i < screen->count; i++)
-        if (actor_id(screen->children[i]) > id) id = actor_id(screen->children[i]);
-    row_id = ++id;
-    value_id = ++id;
-    /* One step below the last row, as it is below the one above it. */
-    position[1] -= step[1] - position[1];
-
-    row = node_clone(row);
-    set_byte(child(row, "ID"), row_id);
-    set_text(child(row, "NAME"), "invertmouse");
-    set_text(child(child(row, "ACTOR_VARIABLES"), "W_TMF"), OPTIONS_TXM);
-    set_byte(child(child(row, "ACTOR_VARIABLES"), "W_TMN"), text_label(SET_INVERT_MOUSE));
-    {
-        float row_position[3];
-        if (get_vector(child(row, "POS"), row_position)) {
-            row_position[1] = position[1];
-            set_vector(child(row, "POS"), row_position);
-        }
-    }
-    for (i = 0; i < row->count; i++) {
-        Node *events = child(row->children[i], "EVENTS");
-        for (j = 0; events && j < events->count; j++) retarget(events->children[j], "invertmouseValueWidget", value_id);
-    }
-    value = node_clone(value);
-    set_byte(child(value, "ID"), value_id);
-    set_text(child(value, "NAME"), "invertmouseValueWidget");
-    {
-        float value_position[3];
-        Node *vars = child(value, "ACTOR_VARIABLES");
-        if (get_vector(child(value, "POS"), value_position)) {
-            value_position[1] = position[1];
-            set_vector(child(value, "POS"), value_position);
-        }
-        set_text(child(vars, "W_THF"), VIDEO_HST);
-        set_byte(child(vars, "W_THI"), item);
-        set_text(child(vars, "A_HIF"), VIDEO_HST);
-        set_byte(child(vars, "A_HII"), item);
-    }
-    actor_named(screen, "reverseupdownValueWidget", &at);
-    node_insert(screen, at + 1, value);
-    actor_named(screen, "invert", &at);
-    node_insert(screen, at + 1, row);
-
-    /* Its value kept to 0 and 1, as INVERT's is ("invert > 1"). */
-    for (i = 0; i < deity->count && !limit; i++) {
-        Node *cause = child(deity->children[i], "CAUSE");
-        if (!strcmp(deity->children[i]->name, "LINK") && cause && is_event(cause, "History") &&
-                byte_of(child(cause, "ITM")) == 44)
-            limit = node_clone(deity->children[i]);
-    }
-    if (!limit || !child(limit, "EVENTS")) { node_free(limit); return 0; }
-    set_text(limit, "invertmouse > 1");
-    set_history_item(child(limit, "CAUSE"), item);
-    for (j = 0; j < child(limit, "EVENTS")->count; j++)
-        if (is_event(child(limit, "EVENTS")->children[j], "Hist"))
-            set_history_item(child(limit, "EVENTS")->children[j], item);
-    node_insert(deity, deity->count, limit);
-    /* Setup, Back and the languages' moves name INVERT: the new row too. */
-    copy_events_for(deity, "invert", "invertmouse", row_id);
-    copy_events_for(deity, "reverseupdownValueWidget", "invertmouseValueWidget", value_id);
-    return 1;
 }
 
 static int edit_video_screen(Node *screen, const char *unused)
@@ -1258,7 +1183,7 @@ static int write_patch(const char *game_dir)
     /* Per menu: its Options screen, the page and the page's .atr; then the
      * strings, the history file, history.txt and the marker. */
     enum { OPTIONS_TEXT = 3 * MENU_COUNT, VIDEO_HISTORY, HISTORY_LIST, MARKER, PRESS_START, MAIN_MENU,
-           CONTROLS, GAME_CONTROLS, FILE_COUNT };
+           CONTROL_HISTORY, FILE_COUNT };
     PatchFile files[FILE_COUNT];
     Trees trees;
     Buffer tree = {0}, existing = {0}, pause = {0};
@@ -1304,10 +1229,9 @@ static int write_patch(const char *game_dir)
     s_pause_screen = pause_screen;
     snprintf(from, sizeof from, SCREENS "mainmenu\\mainmenu.ati");
     if (!patch_screen(&trees, from, from, &files[MAIN_MENU], add_quit_entry, NULL)) goto done;
-    snprintf(from, sizeof from, SCREENS "controladvanced\\controladvanced.ati");
-    if (!patch_screen(&trees, from, from, &files[CONTROLS], add_invert_mouse, NULL)) goto done;
-    snprintf(from, sizeof from, SCREENS "ingamecontroladvanced\\ingamecontroladvanced.ati");
-    if (!patch_screen(&trees, from, from, &files[GAME_CONTROLS], add_invert_mouse, NULL)) goto done;
+    files[CONTROL_HISTORY].key = tree_key("data\\history\\controlsetup.hst");
+    if (!trees_read(&trees, "data\\history\\controlsetup.hst", &files[CONTROL_HISTORY].data)) goto done;
+    look_not_inverted(&files[CONTROL_HISTORY].data);
 
     files[OPTIONS_TEXT].key = tree_key("data\\text\\options.txm");
     files[VIDEO_HISTORY].key = tree_key("data\\history\\video.hst");
@@ -1614,8 +1538,8 @@ static void apply_setting(int setting)
     case SET_MSAA: nv2a_gpu_set_msaa(1 << s_values[SET_MSAA]); break;
     case SET_ICONS: nv2a_gpu_set_texture_replacements(s_values[SET_ICONS]); break;
     case SET_MOUSE_LOOK: xbox_KbmSetRawMouse(s_values[SET_MOUSE_LOOK]); break;
-    case SET_MOUSE_SPEED:             /* read each frame */
-    case SET_INVERT_MOUSE: break;
+    case SET_DRAW_DISTANCE:           /* read each frame */
+    case SET_MOUSE_SPEED: break;
     }
 }
 
@@ -1633,9 +1557,9 @@ static void apply_setting(int setting)
  * value plus the mouse's -- is written as the axis that comes out of the
  * deadzone as that sum.
  *
- * The game's Invert Look (ControlSetup.hst item 44) does not reach what is
- * added here: moving the mouse up looks up whichever way it is set (tried
- * both), and invert mouse (Control Setup's advanced page) turns that round. */
+ * The game's Invert Look (Control Setup > Advanced) flips the look y after
+ * this, so it turns the mouse as it does the pad: one setting for both, off
+ * as the patch's ControlSetup.hst has it for a new player. */
 
 static void menu_pointer(void);
 
@@ -1676,9 +1600,16 @@ void video_settings_mouse_look(void)
     for (step = 4; step > s_values[SET_MOUSE_SPEED]; step--) gain /= 1.4;
     turn[0] = (float)(dx * gain / seconds) + test;
     turn[1] = (float)(-dy * gain / seconds);
-    if (s_values[SET_INVERT_MOUSE]) turn[1] = -turn[1];
     for (axis = 0; axis < 2; axis++)
         if (turn[axis] != 0.0f) axes[axis] = into_deadzone(through_deadzone(axes[axis]) + turn[axis]);
+}
+
+/* Draw distance: how much further than the game's own distances (A_NDD
+ * where an actor starts to fade, A_MDD where it is gone: grass and plants
+ * have 15 to 25) actors with one are drawn. */
+float video_settings_draw_distance(void)
+{
+    return (float)(1 << s_values[SET_DRAW_DISTANCE]);
 }
 
 void video_settings_screen(int front_end, int pause_menu)
@@ -1741,7 +1672,13 @@ extern int xbox_KbmMenuWheel(void);
 static char s_game_dir[MAX_PATH];
 static volatile uint32_t s_menu_screen;     /* the screen's object; 0 in a level */
 static volatile uint32_t s_menu_screens;    /* screens entered: the object is reused */
-static char s_option_rows[64][32];          /* its option rows' names */
+/* Its option rows: each shows and steps a history item (its value widget's
+ * A_HIF/A_HII), kept to 0..max by a "> max" link (COMP 4); max 0 if none. */
+typedef struct OptionRow {
+    char name[32], file[40];
+    int item, max;
+} OptionRow;
+static OptionRow s_option_rows[64];
 static int s_option_row_count;
 
 /* A file of the game's data, patch0.tre's copy first. */
@@ -1788,6 +1725,43 @@ static int has_a_button_link(const Node *actor)
     return 0;
 }
 
+/* Which history item a row steps and how far: its links name its value
+ * widget (the setup's Finger), whose A_HIF/A_HII are the item; a "> max"
+ * link on the screen keeps it in range. */
+static void option_row_value(const Node *screen, const Node *row, OptionRow *out)
+{
+    char target[64];
+    const Node *value = NULL, *vars, *file;
+    uint32_t i, j;
+    out->file[0] = 0;
+    out->item = out->max = 0;
+    for (i = 0; i < row->count && !value; i++) {
+        const Node *events = child(row->children[i], "EVENTS");
+        for (j = 0; events && j < events->count && !value; j++)
+            if (target_of(events->children[j], target, sizeof target)) value = actor_named(screen, target, NULL);
+    }
+    vars = value ? child(value, "ACTOR_VARIABLES") : NULL;
+    file = child(vars, "A_HIF");
+    if (!file || file->value_size < 2 || byte_of(child(vars, "A_HII")) <= 0) return;
+    out->item = byte_of(child(vars, "A_HII"));
+    {
+        const char *text = (const char *)file->value, *slash = strrchr(text, '\\');
+        snprintf(out->file, sizeof out->file, "%s", slash ? slash + 1 : text);
+    }
+    for (i = 0; i < screen->count; i++) {
+        const Node *actor = screen->children[i];
+        for (j = 0; j < actor->count; j++) {
+            const Node *cause = child(actor->children[j], "CAUSE");
+            if (strcmp(actor->children[j]->name, "LINK") || !cause || !is_event(cause, "History") ||
+                    byte_of(child(cause, "COMP")) != 4 || byte_of(child(cause, "ITM")) != out->item ||
+                    !child(cause, "HSTF") || child(cause, "HSTF")->value_size != file->value_size ||
+                    _strnicmp((const char *)child(cause, "HSTF")->value, (const char *)file->value, file->value_size))
+                continue;
+            out->max = byte_of(child(cause, "VAL"));
+        }
+    }
+}
+
 /* The screen's option rows, from its .ati (`name` is its .atr). */
 static void find_option_rows(const char *name)
 {
@@ -1811,8 +1785,9 @@ static void find_option_rows(const char *name)
         if (!actor_name || !actor_name->value_size || n < k || _strnicmp((const char *)actor->value + n - k, kind, k) ||
                 has_a_button_link(actor))
             continue;
-        snprintf(s_option_rows[s_option_row_count++], sizeof s_option_rows[0], "%.*s",
+        snprintf(s_option_rows[s_option_row_count].name, sizeof s_option_rows[0].name, "%.*s",
                  (int)actor_name->value_size - 1, (const char *)actor_name->value);
+        option_row_value(screen, actor, &s_option_rows[s_option_row_count++]);
     }
     node_free(screen);
     free(file.data);
@@ -1860,20 +1835,40 @@ static int is_widget(uint32_t actor)
     return type == WIDGET_TYPE;
 }
 
-static int is_option_row(uint32_t actor)
+static const OptionRow *option_row(uint32_t actor)
 {
     char name[32];
     uint32_t text;
     int i;
-    if (!guest_read(actor + 0x5C, &text)) return 0;
+    if (!actor || !guest_read(actor + 0x5C, &text)) return NULL;
     __try {
         snprintf(name, sizeof name, "%s", (const char *)((uintptr_t)text + g_xbox_mem_offset));
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return 0;
+        return NULL;
     }
     for (i = 0; i < s_option_row_count; i++)
-        if (!strcmp(name, s_option_rows[i])) return 1;
-    return 0;
+        if (!strcmp(name, s_option_rows[i].name)) return &s_option_rows[i];
+    return NULL;
+}
+
+static int is_option_row(uint32_t actor)
+{
+    return option_row(actor) != NULL;
+}
+
+/* A click on an option row at the end of its values goes round to the other
+ * end (the game's own left and right stop there); 0 if it is not at an end. */
+static int wrap_option(uint32_t actor, int forward)
+{
+    const OptionRow *row = option_row(actor);
+    uint32_t items, value;
+    if (!row || row->max <= 0 || !(items = history_items(row->file, (uint32_t)row->item)) ||
+            !guest_read(items + 8u * (uint32_t)(row->item - 1), &value))
+        return 0;
+    if (forward && (int)value >= row->max) item_write(items, row->item, 0);
+    else if (!forward && (int)value <= 0) item_write(items, row->item, row->max);
+    else return 0;
+    return 1;
 }
 
 /* The screen's actors are a tree, walked depth first (sub_0009C1C0): the
@@ -2049,9 +2044,9 @@ static void menu_pointer(void)
     last_screen = s_menu_screens;
     if (pressed || wheel) pointer_busy_until = now + 500;
     if (pressed & 1) {
-        if (hovered) press(is_option_row(hovered) ? "RIGHT" : "A", 1);
+        if (hovered && !wrap_option(hovered, 1)) press(is_option_row(hovered) ? "RIGHT" : "A", 1);
     } else if (pressed & 2) {
-        if (hovered && is_option_row(hovered)) press("LEFT", 1);
+        if (hovered && is_option_row(hovered)) { if (!wrap_option(hovered, 0)) press("LEFT", 1); }
         else press(s_pause_menu ? "START" : "B", 1);
     }
     if (wheel) {

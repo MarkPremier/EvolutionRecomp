@@ -152,12 +152,13 @@ A pad works as on the console. Keyboard and mouse (on by default,
 | Menu back | Backspace |
 | D-pad | Arrow keys |
 
-Moving the mouse up looks up, whatever the game's own Invert Look (which is
-the pad's) says. **Options > Control Setup > Advanced > Invert mouse** turns
-that round (kept in `turok_settings.ini` as `invert_mouse`). With Mouse look
-set to "stick", the game's Invert Look applies and is undone for the mouse by
-`RECOMP_KBM_INVERT_Y=1` (the default); `RECOMP_KBM_SENS` sets the mouse counts for a full turn rate (default 80,
-lower is faster), and `RECOMP_KBM_MAP` rebinds keys, e.g.
+The game's own **Options > Control Setup > Advanced > Invert Look** turns the
+mouse as it does the pad. The disc has it on; the patch makes it off for a
+new player (ControlSetup.hst), and options saved before keep what they had,
+so switch it off there once if the mouse feels upside down.
+`RECOMP_KBM_INVERT_Y=1` inverts the mouse against it in "stick" mouse look.
+`RECOMP_KBM_SENS` sets the mouse counts for a full turn rate in "stick" mouse
+look (default 80, lower is faster), and `RECOMP_KBM_MAP` rebinds keys, e.g.
 `A=Space|Return,RT=MouseL,X=WheelDown|E`.
 
 ### Mouse in menus
@@ -168,8 +169,8 @@ as a pointer, as in the PC release:
 | Mouse | In a menu |
 |-------|-----------|
 | Move over an entry | focuses it |
-| Left click | chooses it; on an option row, the next value |
-| Right click | on an option row, the previous value; elsewhere Back (resume on the pause menu, as Esc) |
+| Left click | chooses it; on an option row, the next value (after the last, the first) |
+| Right click | on an option row, the previous value (before the first, the last); elsewhere Back (resume on the pause menu, as Esc) |
 | Wheel | over an option row, its value; elsewhere up / down |
 
 Leaving the menu for play takes the mouse back for look. The arrow shows once
@@ -207,6 +208,7 @@ effect at once and are kept in `turok_settings.ini` beside the exe:
 | Button icons | xbox, pc | |
 | Mouse look | raw, stick | |
 | Mouse speed | 1 to 10 (5 by default; each step 1.4x) | |
+| Draw distance | normal, 2x, 4x, 8x (2x by default) | |
 
 An environment variable set by hand still wins at start-up.
 
@@ -239,6 +241,10 @@ An environment variable set by hand still wins at start-up.
 - **MSAA** applies to the screen's targets (multisampled copies resolved
   whenever the game reads them); it combines with the render scale.
   **Anisotropy** applies to mipmapped textures.
+- **Draw distance**: grass, plants and other actors with a fade distance
+  (A_NDD where they start to fade, A_MDD where they are gone: 15 to 25 units
+  for grass) are drawn that many times further. The fade (`sub_0003C9E0`)
+  reads the two from a block at actor +0x1CC; they are scaled while it runs.
 - **Press Start** takes any button (the screen's link is given the button mask
   of its own any-button link).
 

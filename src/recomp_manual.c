@@ -234,6 +234,36 @@ void sub_0002F580(void)
     video_settings_mouse_look();
 }
 
+/* ── Draw distance (sub_0003C9E0) ──────────────────────────────
+ *
+ * An actor's distance fade (esi the actor, edi the camera; the factor on the
+ * FPU stack): its block at +0x1CC holds A_NDD, where it starts to fade, and
+ * A_MDD, where it is gone (grass and plants: 15 to 25 units), 0 for no limit.
+ * For the draw distance setting the two are scaled while the fade is worked
+ * out, then put back. */
+extern __declspec(thread) uint32_t g_esi;
+extern void sub_0003C9E0_gen(void);
+
+void sub_0003C9E0(void)
+{
+    float scale = video_settings_draw_distance(), fade_near, fade_far;
+    uint32_t block = g_esi ? TUROK_MEM32(g_esi + 0x1CCu) : 0, near_bits, far_bits;
+
+    if (scale == 1.0f || !block) { sub_0003C9E0_gen(); return; }
+    near_bits = TUROK_MEM32(block);
+    far_bits = TUROK_MEM32(block + 4u);
+    memcpy(&fade_near, &near_bits, 4);
+    memcpy(&fade_far, &far_bits, 4);
+    if (!(fade_near > 0.0f)) { sub_0003C9E0_gen(); return; }
+    fade_near *= scale;
+    fade_far *= scale;
+    memcpy((void *)((uintptr_t)block + g_xbox_mem_offset), &fade_near, 4);
+    memcpy((void *)((uintptr_t)(block + 4u) + g_xbox_mem_offset), &fade_far, 4);
+    sub_0003C9E0_gen();
+    TUROK_MEM32(block) = near_bits;
+    TUROK_MEM32(block + 4u) = far_bits;
+}
+
 /* ── Manual function overrides ─────────────────────────────── */
 
 /*
