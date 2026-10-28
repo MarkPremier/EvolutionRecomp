@@ -168,19 +168,35 @@ Recomp/
 A pad works as on the console. Keyboard and mouse (on by default,
 `RECOMP_KBM=0` turns them off; Alt+Esc releases the mouse):
 
-| Action | Keys |
-|--------|------|
+| Action | Default |
+|--------|---------|
 | Move / strafe | W A S D |
 | Look | Mouse |
 | Fire | Left mouse |
 | Weapon mode | Right mouse |
-| Jump / menu select | Space / Enter |
-| Next / previous weapon | Wheel down / up, or E / Q |
-| Duck | Ctrl or C |
-| Zoom | Middle mouse or Z |
-| Pause | Esc or Tab |
-| Menu back | Backspace |
-| D-pad | Arrow keys |
+| Jump | Space |
+| Next / previous weapon | Wheel down / up |
+| Duck | Ctrl |
+| Zoom | Middle mouse |
+| Pause | Esc |
+| Menu select / back | Enter or Space / Esc or Backspace |
+| Menu up / down / left / right | Arrow keys |
+
+### PC Controls
+
+**Options > PC Controls** (in the front end and the pause menu, under
+Control Setup) binds each action in play to one key or mouse input. Press
+Enter on a row, or click it, and it shows *Press a Key*: the next key, mouse
+button (including the side buttons) or wheel notch is its new one. A key
+another action had swaps over to the row's old key; six seconds with no
+press keeps the old one. Left and right step through the keys, and a right
+click on a row unbinds it. The choices are kept in `turok_settings.ini`
+under `[controls]` (key names as the page shows them, e.g. `jump=Space`,
+`fire=Mouse 1`).
+
+Menus keep Enter/Space to select, Esc/Backspace to go back and the arrow
+keys to move whatever the actions are bound to. In play the arrow keys are
+the pad's d-pad unless an action uses one.
 
 The game's own **Options > Control Setup > Advanced > Invert Look** turns the
 mouse as it does the pad. The disc has it on; the patch makes it off for a
@@ -188,8 +204,9 @@ new player (ControlSetup.hst), and options saved before keep what they had,
 so switch it off there once if the mouse feels upside down.
 `RECOMP_KBM_INVERT_Y=1` inverts the mouse against it in "stick" mouse look.
 `RECOMP_KBM_SENS` sets the mouse counts for a full turn rate in "stick" mouse
-look (default 80, lower is faster), and `RECOMP_KBM_MAP` rebinds keys, e.g.
-`A=Space|Return,RT=MouseL,X=WheelDown|E`.
+look (default 80, lower is faster). `RECOMP_KBM_MAP` sets the toolkit's
+starting keys for the pad inputs (e.g. `B=Back,BLACK=G`); PC Controls'
+bindings replace it for the actions they cover.
 
 ### Mouse in menus
 

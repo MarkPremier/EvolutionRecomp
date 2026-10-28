@@ -495,7 +495,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
      *   next/prev weapon X/Y = wheel down/up or E/Q, duck White = Ctrl or C,
      *   zoom (right stick click) = middle mouse or Z, pause Start = Esc or
      *   Tab, menu back B = Backspace, menu select A = Enter, d-pad = arrows.
-     * RECOMP_KBM=0 turns it off; Alt+Esc releases the mouse. */
+     * At start-up Options > PC Controls (video_settings.c) replaces the
+     * actions' keys with its own, one each (defaults as above without the
+     * second keys). RECOMP_KBM=0 turns it off; Alt+Esc releases the mouse. */
     if (!getenv("RECOMP_KBM"))
         _putenv_s("RECOMP_KBM", "1");
     if (!getenv("RECOMP_KBM_LOOK_DIRECT"))
@@ -516,9 +518,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
                   "WHITE=Control|C,BLACK=None,START=Escape|Tab,BACK=None,LTHUMB=None,"
                   "RTHUMB=MouseM|Z,UP=Up,DOWN=Down,LEFT=Left,RIGHT=Right");
     /* In menus (the front end and the pause menu) Escape is Back, as in the PC
-     * release, whose button icons show it; in play it pauses. */
+     * release, whose button icons show it; in play it pauses. Enter or Space
+     * selects and the arrows move there whatever Options > PC Controls binds
+     * them to in play (video_settings.c sets the play keys). */
     if (!getenv("RECOMP_KBM_MENU_MAP"))
-        _putenv_s("RECOMP_KBM_MENU_MAP", "B=Back|Escape,START=Tab");
+        _putenv_s("RECOMP_KBM_MENU_MAP", "A=Return|Space,B=Back|Escape,START=Tab,UP=Up,DOWN=Down,LEFT=Left,RIGHT=Right");
     /* No timeBeginPeriod(1): it slowed the intro movie to a few fps. The
      * toolkit's vblank and flip waits use high-resolution waitable timers. */
     printf("Loading XBE...\n");

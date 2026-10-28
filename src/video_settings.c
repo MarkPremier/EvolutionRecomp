@@ -65,7 +65,6 @@ extern void nv2a_gpu_set_msaa(int samples);
 enum { SET_RESOLUTION, SET_ASPECT, SET_DISPLAY, SET_VSYNC, SET_FRAMES, SET_ANISOTROPY, SET_MSAA, SET_DRAW_DISTANCE,
        SET_ICONS,
        SET_MOUSE_LOOK, SET_MOUSE_SPEED, SETTING_COUNT };
-#define VIDEO_ROWS SETTING_COUNT        /* the page's rows: every setting */
 
 typedef struct VideoSetting {
     const char *key, *label;
@@ -103,6 +102,73 @@ static const VideoSetting k_settings[SETTING_COUNT] = {
 };
 
 static int s_values[SETTING_COUNT];
+
+/* ── PC controls ──────────────────────────────────────────────────
+ *
+ * A page of its own, PC CONTROLS, under CONTROL SETUP: each keyboard and
+ * mouse action on one key or mouse input, chosen by pressing it (Enter or a
+ * click on the row, then the key) or stepped through with left and right.
+ * Row n is PCControls.hst item n + 1, its value an index into k_keys, whose
+ * names are what the rows show. Each goes to the toolkit as its pad input's
+ * one key (xbox_KbmSetBinding); turok_settings.ini's [controls] keeps them. */
+#define KEY_MOUSE_L    0x101      /* the toolkit's mouse codes (xinput_device.c) */
+#define KEY_MOUSE_R    0x102
+#define KEY_MOUSE_M    0x103
+#define KEY_WHEEL_UP   0x104
+#define KEY_WHEEL_DOWN 0x105
+#define KEY_MOUSE_4    0x106
+#define KEY_MOUSE_5    0x107
+
+typedef struct KeyName {
+    int code;
+    const char *name;
+} KeyName;
+
+/* F11 and F12 are the window's own (captures). The last is what a row shows
+ * while it waits for its key. */
+static const KeyName k_keys[] = {
+    {0, "none"},
+    {KEY_MOUSE_L, "mouse 1"}, {KEY_MOUSE_R, "mouse 2"}, {KEY_MOUSE_M, "mouse 3"},
+    {KEY_MOUSE_4, "mouse 4"}, {KEY_MOUSE_5, "mouse 5"}, {KEY_WHEEL_UP, "wheel up"}, {KEY_WHEEL_DOWN, "wheel down"},
+    {'A', "A"}, {'B', "B"}, {'C', "C"}, {'D', "D"}, {'E', "E"}, {'F', "F"}, {'G', "G"}, {'H', "H"}, {'I', "I"},
+    {'J', "J"}, {'K', "K"}, {'L', "L"}, {'M', "M"}, {'N', "N"}, {'O', "O"}, {'P', "P"}, {'Q', "Q"}, {'R', "R"},
+    {'S', "S"}, {'T', "T"}, {'U', "U"}, {'V', "V"}, {'W', "W"}, {'X', "X"}, {'Y', "Y"}, {'Z', "Z"},
+    {'0', "0"}, {'1', "1"}, {'2', "2"}, {'3', "3"}, {'4', "4"}, {'5', "5"}, {'6', "6"}, {'7', "7"}, {'8', "8"}, {'9', "9"},
+    {VK_SPACE, "space"}, {VK_RETURN, "enter"}, {VK_TAB, "tab"}, {VK_ESCAPE, "escape"}, {VK_BACK, "backspace"},
+    {VK_SHIFT, "shift"}, {VK_CONTROL, "ctrl"}, {VK_MENU, "alt"}, {VK_CAPITAL, "caps lock"},
+    {VK_UP, "up"}, {VK_DOWN, "down"}, {VK_LEFT, "left"}, {VK_RIGHT, "right"},
+    {VK_INSERT, "insert"}, {VK_DELETE, "delete"}, {VK_HOME, "home"}, {VK_END, "end"},
+    {VK_PRIOR, "page up"}, {VK_NEXT, "page down"},
+    {VK_F1, "F1"}, {VK_F2, "F2"}, {VK_F3, "F3"}, {VK_F4, "F4"}, {VK_F5, "F5"},
+    {VK_F6, "F6"}, {VK_F7, "F7"}, {VK_F8, "F8"}, {VK_F9, "F9"}, {VK_F10, "F10"},
+    {VK_NUMPAD0, "num 0"}, {VK_NUMPAD1, "num 1"}, {VK_NUMPAD2, "num 2"}, {VK_NUMPAD3, "num 3"}, {VK_NUMPAD4, "num 4"},
+    {VK_NUMPAD5, "num 5"}, {VK_NUMPAD6, "num 6"}, {VK_NUMPAD7, "num 7"}, {VK_NUMPAD8, "num 8"}, {VK_NUMPAD9, "num 9"},
+    {VK_ADD, "num plus"}, {VK_SUBTRACT, "num minus"}, {VK_MULTIPLY, "num times"}, {VK_DIVIDE, "num divide"},
+    {VK_DECIMAL, "num point"},
+    {VK_OEM_1, "semicolon"}, {VK_OEM_PLUS, "equals"}, {VK_OEM_COMMA, "comma"}, {VK_OEM_MINUS, "minus"},
+    {VK_OEM_PERIOD, "period"}, {VK_OEM_2, "slash"}, {VK_OEM_3, "tilde"}, {VK_OEM_4, "l bracket"},
+    {VK_OEM_5, "backslash"}, {VK_OEM_6, "r bracket"}, {VK_OEM_7, "quote"},
+    {-1, "press a key"},
+};
+#define KEY_COUNT COUNT(k_keys)
+#define KEY_PRESS (KEY_COUNT - 1)
+
+/* Turok's own pad layout (Control Setup's default), as the keyboard and
+ * mouse take it. */
+enum { BIND_FORWARD, BIND_BACK, BIND_LEFT, BIND_RIGHT, BIND_FIRE, BIND_MODE, BIND_JUMP, BIND_DUCK,
+       BIND_NEXT, BIND_PREVIOUS, BIND_ZOOM, BIND_PAUSE, BIND_COUNT };
+static const struct {
+    const char *key, *label, *target;
+    int code;
+} k_binds[BIND_COUNT] = {
+    {"forward", "forward", "MOVE_UP", 'W'}, {"back", "back", "MOVE_DOWN", 'S'},
+    {"strafe_left", "strafe left", "MOVE_LEFT", 'A'}, {"strafe_right", "strafe right", "MOVE_RIGHT", 'D'},
+    {"fire", "fire", "RT", KEY_MOUSE_L}, {"weapon_mode", "weapon mode", "LT", KEY_MOUSE_R},
+    {"jump", "jump", "A", VK_SPACE}, {"duck", "duck", "WHITE", VK_CONTROL},
+    {"next_weapon", "next weapon", "X", KEY_WHEEL_DOWN}, {"previous_weapon", "prev weapon", "Y", KEY_WHEEL_UP},
+    {"zoom", "zoom", "RTHUMB", KEY_MOUSE_M}, {"pause", "pause", "START", VK_ESCAPE},
+};
+static int s_binds[BIND_COUNT];       /* each a k_keys index */
 static char s_ini_path[MAX_PATH];
 static volatile int s_front_end = 1;     /* the title is in its 4:3 front end */
 static volatile int s_pause_menu;        /* on the pause menu's first screen */
@@ -119,6 +185,50 @@ static void settings_save(void)
     int s;
     for (s = 0; s < SETTING_COUNT; s++)
         WritePrivateProfileStringA("video", k_settings[s].key, k_settings[s].values[s_values[s]], s_ini_path);
+}
+
+static int key_index(int code)
+{
+    int k;
+    for (k = 0; k < KEY_PRESS; k++)
+        if (k_keys[k].code == code) return k;
+    return 0;
+}
+
+static int key_named(const char *name)
+{
+    int k;
+    for (k = 0; k < KEY_PRESS; k++)
+        if (!_stricmp(k_keys[k].name, name)) return k;
+    return -1;
+}
+
+static void controls_save(void)
+{
+    int b;
+    for (b = 0; b < BIND_COUNT; b++)
+        WritePrivateProfileStringA("controls", k_binds[b].key, k_keys[s_binds[b]].name, s_ini_path);
+}
+
+/* The pad inputs' keys: each action's, and the d-pad its arrow where no
+ * action took it (a menu has its arrows either way: RECOMP_KBM_MENU_MAP). */
+extern void xbox_KbmSetBinding(const char *target, const int *keys, int count);
+
+static void apply_bindings(void)
+{
+    static const struct { const char *target; int code; } dpad[] = {
+        {"UP", VK_UP}, {"DOWN", VK_DOWN}, {"LEFT", VK_LEFT}, {"RIGHT", VK_RIGHT}};
+    int b, d;
+    for (b = 0; b < BIND_COUNT; b++) {
+        int code = k_keys[s_binds[b]].code;
+        xbox_KbmSetBinding(k_binds[b].target, &code, code > 0);
+    }
+    for (d = 0; d < COUNT(dpad); d++) {
+        int code = dpad[d].code;
+        for (b = 0; b < BIND_COUNT; b++)
+            if (k_keys[s_binds[b]].code == code) code = 0;
+        xbox_KbmSetBinding(dpad[d].target, &code, code > 0);
+    }
 }
 
 /* A value's index from its text; -1 if it is none of them. */
@@ -180,6 +290,12 @@ void video_settings_load(void)
     for (s = 0; s < SETTING_COUNT; s++)
         fprintf(stderr, " %s %s", k_settings[s].key, k_settings[s].values[s_values[s]]);
     fprintf(stderr, "\n");
+
+    for (s = 0; s < BIND_COUNT; s++) {
+        GetPrivateProfileStringA("controls", k_binds[s].key, "", text, sizeof text, s_ini_path);
+        s_binds[s] = *text ? key_named(text) : -1;
+        if (s_binds[s] < 0) s_binds[s] = key_index(k_binds[s].code);
+    }
 }
 
 /* ── Archives ─────────────────────────────────────────────────── */
@@ -570,16 +686,17 @@ static const char *target_of(const Node *event, char *name, size_t size)
 #define OPTIONS_TXM   "$\\Data\\Text\\Options.txm"
 #define OPTIONS_HST   "$\\Data\\History\\Options.hst"
 #define VIDEO_HST     "$\\Data\\History\\Video.hst"
+#define CONTROLS_HST  "$\\Data\\History\\PCControls.hst"
 #define SCREENS       "data\\levels\\u_jcowlishaw\\screens\\"
 
 /* Where the page goes: the front end's Options and the pause menu's, each
  * with its own Game Options page to build from (the pause menu's has the
  * darker panel and returns to the game). */
 static const struct VideoMenu {
-    const char *menu, *game_options, *page;
+    const char *menu, *game_options, *page, *controls;
 } k_menus[] = {
-    {"options", "gameoptions", "VideoOptions"},
-    {"ingameoptionsmenu", "ingameoptions", "InGameVideoOptions"},
+    {"options", "gameoptions", "VideoOptions", "PCControls"},
+    {"ingameoptionsmenu", "ingameoptions", "InGameVideoOptions", "InGamePCControls"},
 };
 #define MENU_COUNT (sizeof k_menus / sizeof *k_menus)
 
@@ -595,53 +712,87 @@ static int text_label(int setting)
     return key;
 }
 
-/* An Options screen: a VIDEO OPTIONS entry in the empty slot below SOUND
- * OPTIONS, opening the page `page`. */
-static int add_video_entry(Node *screen, const char *page)
+/* Then the controls page's: its entry, title, each row's label, and the key
+ * names every row's value shows (keys are bytes: all end below 256). */
+#define TEXT_CONTROLS       text_label(SETTING_COUNT)
+#define TEXT_CONTROLS_TITLE (TEXT_CONTROLS + 1)
+#define TEXT_BIND_LABEL(b)  (TEXT_CONTROLS + 2 + (b))
+#define TEXT_KEYS           (TEXT_CONTROLS + 2 + BIND_COUNT)
+
+/* A copy of SOUND OPTIONS named `name`, showing text key `text` and opening
+ * the page `page`, after the actor `after`; the screen's setup and fade
+ * events name it as they do SOUND OPTIONS. */
+static int add_menu_entry(Node *screen, const char *name, int text, const char *page, const char *after, int id)
 {
     char level[MAX_PATH];
     uint32_t at, i, j;
-    Node *sound = actor_named(screen, "soundvideo", &at), *control = actor_named(screen, "control", NULL);
-    Node *deity = actor_named(screen, "DeityNoFade", NULL), *video, *link;
-    float position[3], above[3];
-    int id = 0;
-    if (!sound || !control || !deity || !get_vector(child(sound, "POS"), position) ||
-            !get_vector(child(control, "POS"), above)) return 0;
-    for (i = 0; i < screen->count; i++) {
-        Node *number = child(screen->children[i], "ID");
-        if (number && number->value_size == 1 && number->value[0] > id) id = number->value[0];
+    Node *sound = actor_named(screen, "soundvideo", NULL), *deity = actor_named(screen, "DeityNoFade", NULL);
+    Node *entry, *link;
+    if (!sound || !deity || !actor_named(screen, after, &at)) return 0;
+    entry = node_clone(sound);
+    set_byte(child(entry, "ID"), id);
+    set_text(child(entry, "NAME"), name);
+    set_byte(child(child(entry, "ACTOR_VARIABLES"), "W_TMN"), text);
+    link = child(entry, "LINK");
+    if (!link || !child(link, "EVENTS")) {
+        node_free(entry);
+        return 0;
     }
-    id++;
-    video = node_clone(sound);
-    set_byte(child(video, "ID"), id);
-    set_text(child(video, "NAME"), "videooptions");
-    /* One step below SOUND OPTIONS, as SOUND OPTIONS is below CONTROL SETUP. */
-    position[1] -= above[1] - position[1];
-    set_vector(child(video, "POS"), position);
-    set_byte(child(child(video, "ACTOR_VARIABLES"), "W_TMN"), TEXT_ENTRY);
-    link = child(video, "LINK");
-    if (!link || !child(link, "EVENTS")) return 0;
-    set_text(link, "videooptions selected");
+    snprintf(level, sizeof level, "%s selected", name);
+    set_text(link, level);
     snprintf(level, sizeof level, "$/Data/Levels/U_JCowlishaw\\Screens\\%s\\%s.atr", page, page);
     for (i = 0; i < child(link, "EVENTS")->count; i++) {
         Node *event = child(link, "EVENTS")->children[i];
         if (event->value_size == 5 && !memcmp(event->value, "Level", 5)) set_text(child(event, "LN"), level);
     }
-    node_insert(screen, at + 1, video);
+    node_insert(screen, at + 1, entry);
 
-    /* The screen's setup and fade events name every entry. */
     for (i = 0; i < deity->count; i++) {
         Node *events = child(deity->children[i], "EVENTS");
         for (j = 0; events && j < events->count; j++) {
-            char name[64];
-            const char *target = target_of(events->children[j], name, sizeof name);
+            char target_name[64];
+            const char *target = target_of(events->children[j], target_name, sizeof target_name);
             if (target && !strcmp(target, "soundvideo")) {
                 Node *copy = node_clone(events->children[j]);
-                set_text(child(copy, "TARGETNAME"), "videooptions");
+                set_text(child(copy, "TARGETNAME"), name);
                 set_byte(child(copy, "TARGETID"), id);
                 node_insert(events, ++j, copy);
             }
         }
+    }
+    return 1;
+}
+
+/* Options' entries top to bottom, evenly from the first: PC CONTROLS under
+ * CONTROL SETUP, VIDEO OPTIONS under SOUND OPTIONS (the gap the console left
+ * there, where the PC release kept a control-setup entry), a little closer
+ * than the console's five. */
+static const char *const k_option_entries[] = {"options", "control", "pccontrols", "soundvideo", "videooptions",
+                                               "saveoptions"};
+#define OPTION_STEP 3.6f
+
+static int add_video_entry(Node *screen, const char *page)
+{
+    const struct VideoMenu *menu = NULL;
+    const Node *first = actor_named(screen, "options", NULL);
+    float top[3], position[3];
+    uint32_t i;
+    int id = 0, e;
+    for (i = 0; i < MENU_COUNT; i++)
+        if (!strcmp(k_menus[i].page, page)) menu = &k_menus[i];
+    for (i = 0; i < screen->count; i++) {
+        const Node *number = child(screen->children[i], "ID");
+        if (number && number->value_size == 1 && number->value[0] > id) id = number->value[0];
+    }
+    if (!menu || !first || !get_vector(child(first, "POS"), top) ||
+            !add_menu_entry(screen, "videooptions", TEXT_ENTRY, menu->page, "soundvideo", id + 1) ||
+            !add_menu_entry(screen, "pccontrols", TEXT_CONTROLS, menu->controls, "control", id + 2))
+        return 0;
+    for (e = 0; e < COUNT(k_option_entries); e++) {
+        Node *entry = actor_named(screen, k_option_entries[e], NULL);
+        if (!entry || !get_vector(child(entry, "POS"), position)) return 0;
+        position[1] = top[1] - e * OPTION_STEP;
+        set_vector(child(entry, "POS"), position);
     }
     return 1;
 }
@@ -653,11 +804,25 @@ static const char *const k_template_values[] = {"autoaimValueWidget", "hudValueW
 
 /* The rows are wider, closer and their text smaller than Game Options': a
  * value such as fullscreen does not fit beside its label at the console's
- * size, and the page has eleven rows where Game Options has five. */
+ * size, and the pages have eleven and twelve rows where Game Options has
+ * five. */
 #define ROW_WIDTH  31.0f
 #define TEXT_SCALE 0.75f
-#define ROW_STEP   2.55f
 #define ROW_RAISE  3.5f      /* the first row, above Game Options' */
+
+/* A page made from Game Options: its rows, each a label and a value showing
+ * (and stepping, 0 to last) an item of the page's history file. */
+typedef struct PageRow {
+    char key[32];
+    int label, value_text, last;
+} PageRow;
+typedef struct PageSpec {
+    const char *history;
+    int title, count;
+    float step, text_scale;
+    const char *font;     /* the rows' font, or NULL for the template's */
+    PageRow rows[16];
+} PageSpec;
 
 static int is_template(const char *name)
 {
@@ -679,14 +844,14 @@ static void retarget(Node *event, const char *name, int id)
     set_byte(child(event, "TARGETID"), id);
 }
 
-static int make_video_screen(Node *screen)
+static int make_page(Node *screen, const PageSpec *page)
 {
     Node *row = actor_named(screen, k_template_rows[0], NULL), *value = actor_named(screen, k_template_values[0], NULL);
     Node *title = actor_named(screen, "title", NULL), *bbutton = actor_named(screen, "BButton", NULL);
     Node *deity = actor_named(screen, "DeityNoFade", NULL), *limit = NULL;
     float row_position[3], row_scale[3], value_position[3], value_scale[3];
-    char name[64], row_names[VIDEO_ROWS][32], value_names[VIDEO_ROWS][48];
-    int row_ids[VIDEO_ROWS], value_ids[VIDEO_ROWS], id = 0, s;
+    char name[64], row_names[16][32], value_names[16][48];
+    int row_ids[16], value_ids[16], id = 0, s;
     uint32_t i, j, at = 0;
 
     if (!row || !value || !title || !bbutton || !deity || !get_vector(child(row, "POS"), row_position) ||
@@ -706,12 +871,12 @@ static int make_video_screen(Node *screen)
             at = i;
         }
     }
-    for (s = 0; s < VIDEO_ROWS; s++) {
+    for (s = 0; s < page->count; s++) {
         Node *label = node_clone(row), *box = node_clone(value);
         Node *label_vars = child(label, "ACTOR_VARIABLES"), *box_vars = child(box, "ACTOR_VARIABLES");
         float position[3], scale[3];
-        snprintf(row_names[s], sizeof row_names[s], "%s", k_settings[s].key);
-        snprintf(value_names[s], sizeof value_names[s], "%sValueWidget", k_settings[s].key);
+        snprintf(row_names[s], sizeof row_names[s], "%s", page->rows[s].key);
+        snprintf(value_names[s], sizeof value_names[s], "%sValueWidget", page->rows[s].key);
         row_ids[s] = ++id;
         value_ids[s] = ++id;
         set_byte(child(label, "ID"), row_ids[s]);
@@ -720,28 +885,34 @@ static int make_video_screen(Node *screen)
         set_text(child(box, "NAME"), value_names[s]);
 
         memcpy(position, row_position, sizeof position);
-        position[1] += ROW_RAISE - s * ROW_STEP;
+        position[1] += ROW_RAISE - s * page->step;
         set_vector(child(label, "POS"), position);
         memcpy(scale, row_scale, sizeof scale);
         scale[0] = ROW_WIDTH;
-        scale[1] *= TEXT_SCALE;
+        scale[1] *= page->text_scale;
         set_vector(child(label, "SCALE"), scale);
         memcpy(position, value_position, sizeof position);
         position[0] += (ROW_WIDTH - row_scale[0]) / 2;
-        position[1] += ROW_RAISE - s * ROW_STEP;
+        position[1] += ROW_RAISE - s * page->step;
         set_vector(child(box, "POS"), position);
         memcpy(scale, value_scale, sizeof scale);
-        scale[1] *= TEXT_SCALE;
+        scale[1] *= page->text_scale;
         set_vector(child(box, "SCALE"), scale);
 
         set_text(child(label_vars, "W_TMF"), OPTIONS_TXM);
-        set_byte(child(label_vars, "W_TMN"), text_label(s));
+        set_byte(child(label_vars, "W_TMN"), page->rows[s].label);
         set_text(child(box_vars, "W_TMF"), OPTIONS_TXM);
-        set_byte(child(box_vars, "W_TMN"), text_label(s) + 1);
-        set_text(child(box_vars, "W_THF"), VIDEO_HST);
+        set_byte(child(box_vars, "W_TMN"), page->rows[s].value_text);
+        set_text(child(box_vars, "W_THF"), page->history);
         set_byte(child(box_vars, "W_THI"), s + 1);
-        set_text(child(box_vars, "A_HIF"), VIDEO_HST);
+        set_text(child(box_vars, "A_HIF"), page->history);
         set_byte(child(box_vars, "A_HII"), s + 1);
+        /* Another font: the value box names one (W_FON); the label takes a
+         * copy, as Control Setup's labels name theirs. */
+        if (page->font && child(box_vars, "W_FON")) {
+            set_text(child(box_vars, "W_FON"), page->font);
+            if (!child(label_vars, "W_FON")) node_insert(label_vars, 0, node_clone(child(box_vars, "W_FON")));
+        }
         /* The row's own setup points its value box at it. */
         for (i = 0; i < label->count; i++) {
             Node *events = child(label->children[i], "EVENTS");
@@ -754,7 +925,7 @@ static int make_video_screen(Node *screen)
     node_free(value);
 
     set_text(child(child(title, "ACTOR_VARIABLES"), "W_TMF"), OPTIONS_TXM);
-    set_byte(child(child(title, "ACTOR_VARIABLES"), "W_TMN"), TEXT_TITLE);
+    set_byte(child(child(title, "ACTOR_VARIABLES"), "W_TMN"), page->title);
     /* The back button's moves for languages with longer words. */
     for (i = bbutton->count; i-- > 0;)
         if (!strcmp(bbutton->children[i]->name, "LINK")) node_remove(bbutton, i);
@@ -781,7 +952,7 @@ static int make_video_screen(Node *screen)
             if (!target || !is_template(target)) continue;
             if (strcmp(target, k_template_rows[0])) { node_remove(events, j); continue; }
             if (event->value_size == 5 && !memcmp(event->value, "Name.", 5)) {
-                for (s = VIDEO_ROWS; s-- > 1;) {
+                for (s = page->count; s-- > 1;) {
                     Node *copy = node_clone(event);
                     retarget(copy, row_names[s], row_ids[s]);
                     node_insert(events, j + 1, copy);
@@ -791,17 +962,17 @@ static int make_video_screen(Node *screen)
         }
     }
     if (!limit) return 0;
-    for (s = 0; s < VIDEO_ROWS; s++) {
+    for (s = 0; s < page->count; s++) {
         Node *link = node_clone(limit), *cause = child(link, "CAUSE"), *events = child(link, "EVENTS");
-        int last = k_settings[s].count - 1;
+        int last = page->rows[s].last;
         snprintf(name, sizeof name, "%s > %d", row_names[s], last);
         set_text(link, name);
-        set_text(child(cause, "HSTF"), VIDEO_HST);
+        set_text(child(cause, "HSTF"), page->history);
         set_byte(child(cause, "ITM"), s + 1);
         set_byte(child(cause, "VAL"), last);
         for (j = 0; events && j < events->count; j++)
             if (events->children[j]->value_size == 4 && !memcmp(events->children[j]->value, "Hist", 4)) {
-                set_text(child(events->children[j], "HSTF"), VIDEO_HST);
+                set_text(child(events->children[j], "HSTF"), page->history);
                 set_byte(child(events->children[j], "ITM"), s + 1);
                 set_byte(child(events->children[j], "VAL"), last);
             }
@@ -834,6 +1005,19 @@ static void add_text(Buffer *text, int key, const char *value)
     char line[96];
     snprintf(line, sizeof line, "*key = %d\r\n*value = \"%s\"\r\n", key, value);
     buffer_text(text, line);
+}
+
+/* The controls page's font has lower case: its strings in title case, as
+ * Control Setup's ("Weapon Mode"), but for a lone "a". */
+static void add_title_text(Buffer *text, int key, const char *value)
+{
+    char title[48];
+    size_t i;
+    snprintf(title, sizeof title, "%s", value);
+    for (i = 0; title[i]; i++)
+        if ((i == 0 || title[i - 1] == ' ') && !(title[i] == 'a' && title[i + 1] == ' '))
+            title[i] = (char)toupper((unsigned char)title[i]);
+    add_text(text, key, title);
 }
 
 /* Video.hst, each item starting at the saved setting. */
@@ -1174,16 +1358,56 @@ static void look_not_inverted(Buffer *history)
 
 static int edit_video_screen(Node *screen, const char *unused)
 {
+    PageSpec page = {VIDEO_HST, TEXT_TITLE, SETTING_COUNT, 2.55f, TEXT_SCALE, NULL};
+    int s;
     (void)unused;
-    return make_video_screen(screen);
+    for (s = 0; s < SETTING_COUNT; s++) {
+        snprintf(page.rows[s].key, sizeof page.rows[s].key, "%s", k_settings[s].key);
+        page.rows[s].label = text_label(s);
+        page.rows[s].value_text = text_label(s) + 1;
+        page.rows[s].last = k_settings[s].count - 1;
+    }
+    return make_page(screen, &page);
+}
+
+/* Every row's value is a key name; the last one, "press a key", only while
+ * the row waits for its key (a step past the last key reads as none). */
+static int edit_controls_screen(Node *screen, const char *unused)
+{
+    PageSpec page = {CONTROLS_HST, TEXT_CONTROLS_TITLE, BIND_COUNT, 2.35f, TEXT_SCALE, "$/Data/Fonts/Proportional.fnt"};
+    int b;
+    (void)unused;
+    for (b = 0; b < BIND_COUNT; b++) {
+        snprintf(page.rows[b].key, sizeof page.rows[b].key, "%s", k_binds[b].key);
+        page.rows[b].label = TEXT_BIND_LABEL(b);
+        page.rows[b].value_text = TEXT_KEYS;
+        page.rows[b].last = KEY_COUNT - 1;
+    }
+    return make_page(screen, &page);
+}
+
+/* PCControls.hst, each item starting at the saved key. */
+static void make_controls_history(Buffer *out)
+{
+    char line[96];
+    int b;
+    buffer_text(out, ";------------------------------------------------------------------------------\r\n"
+                     ";  PC controls (recompilation)\r\n"
+                     ";------------------------------------------------------------------------------\r\n\r\n"
+                     "*Key   = 0\r\n*Value = \"All\"\r\n\r\n");
+    for (b = 0; b < BIND_COUNT; b++) {
+        snprintf(line, sizeof line, "*Key   = %d\r\n*Value = \"%s <%d>\"\r\n\r\n", b + 1, k_binds[b].key, s_binds[b]);
+        buffer_text(out, line);
+    }
 }
 
 static int write_patch(const char *game_dir)
 {
-    /* Per menu: its Options screen, the page and the page's .atr; then the
-     * strings, the history file, history.txt and the marker. */
-    enum { OPTIONS_TEXT = 3 * MENU_COUNT, VIDEO_HISTORY, HISTORY_LIST, MARKER, PRESS_START, MAIN_MENU,
-           CONTROL_HISTORY, FILE_COUNT };
+    /* Per menu: its Options screen, the video page and its .atr, the
+     * controls page and its .atr; then the strings, the history files,
+     * history.txt and the marker. */
+    enum { OPTIONS_TEXT = 5 * MENU_COUNT, VIDEO_HISTORY, HISTORY_LIST, MARKER, PRESS_START, MAIN_MENU,
+           CONTROL_HISTORY, PC_CONTROLS_HISTORY, FILE_COUNT };
     PatchFile files[FILE_COUNT];
     Trees trees;
     Buffer tree = {0}, existing = {0}, pause = {0};
@@ -1212,7 +1436,7 @@ static int write_patch(const char *game_dir)
 
     for (m = 0; m < MENU_COUNT; m++) {
         const struct VideoMenu *menu = &k_menus[m];
-        PatchFile *out = &files[3 * m];
+        PatchFile *out = &files[5 * m];
         snprintf(from, sizeof from, SCREENS "%s\\%s.ati", menu->menu, menu->menu);
         if (!patch_screen(&trees, from, from, &out[0], add_video_entry, menu->page)) goto done;
         snprintf(from, sizeof from, SCREENS "%s\\%s.ati", menu->game_options, menu->game_options);
@@ -1221,6 +1445,12 @@ static int write_patch(const char *game_dir)
         snprintf(from, sizeof from, SCREENS "%s\\%s.atr", menu->game_options, menu->game_options);
         snprintf(to, sizeof to, SCREENS "%s\\%s.atr", menu->page, menu->page);
         if (!patch_screen(&trees, from, to, &out[2], make_video_descriptor, menu->page)) goto done;
+        snprintf(from, sizeof from, SCREENS "%s\\%s.ati", menu->game_options, menu->game_options);
+        snprintf(to, sizeof to, SCREENS "%s\\%s.ati", menu->controls, menu->controls);
+        if (!patch_screen(&trees, from, to, &out[3], edit_controls_screen, NULL)) goto done;
+        snprintf(from, sizeof from, SCREENS "%s\\%s.atr", menu->game_options, menu->game_options);
+        snprintf(to, sizeof to, SCREENS "%s\\%s.atr", menu->controls, menu->controls);
+        if (!patch_screen(&trees, from, to, &out[4], make_video_descriptor, menu->controls)) goto done;
     }
     snprintf(from, sizeof from, SCREENS "firstinteractivescreen\\firstinteractivescreen.ati");
     if (!patch_screen(&trees, from, from, &files[PRESS_START], any_button_starts, NULL)) goto done;
@@ -1235,6 +1465,7 @@ static int write_patch(const char *game_dir)
 
     files[OPTIONS_TEXT].key = tree_key("data\\text\\options.txm");
     files[VIDEO_HISTORY].key = tree_key("data\\history\\video.hst");
+    files[PC_CONTROLS_HISTORY].key = tree_key("data\\history\\pccontrols.hst");
     files[HISTORY_LIST].key = tree_key("data\\history\\history.txt");
     files[MARKER].key = tree_key(PATCH_MARKER);
     if (!trees_read(&trees, "data\\text\\options.txm", &files[OPTIONS_TEXT].data)) goto done;
@@ -1245,15 +1476,20 @@ static int write_patch(const char *game_dir)
         for (i = 0; i < k_settings[s].count; i++)
             add_text(&files[OPTIONS_TEXT].data, text_label(s) + 1 + i, k_settings[s].values[i]);
     }
+    add_text(&files[OPTIONS_TEXT].data, TEXT_CONTROLS, "PC CONTROLS");
+    add_text(&files[OPTIONS_TEXT].data, TEXT_CONTROLS_TITLE, "PC Controls");
+    for (s = 0; s < BIND_COUNT; s++) add_title_text(&files[OPTIONS_TEXT].data, TEXT_BIND_LABEL(s), k_binds[s].label);
+    for (i = 0; i < KEY_COUNT; i++) add_title_text(&files[OPTIONS_TEXT].data, TEXT_KEYS + i, k_keys[i].name);
 
     if (!trees_read(&trees, "data\\history\\history.txt", &files[HISTORY_LIST].data)) goto done;
     while (files[HISTORY_LIST].data.size &&
            (files[HISTORY_LIST].data.data[files[HISTORY_LIST].data.size - 1] == '\r' ||
             files[HISTORY_LIST].data.data[files[HISTORY_LIST].data.size - 1] == '\n'))
         files[HISTORY_LIST].data.size--;
-    buffer_text(&files[HISTORY_LIST].data, "\r\n" VIDEO_HST "\r\n");
+    buffer_text(&files[HISTORY_LIST].data, "\r\n" VIDEO_HST "\r\n" CONTROLS_HST "\r\n");
 
     make_history(&files[VIDEO_HISTORY].data);
+    make_controls_history(&files[PC_CONTROLS_HISTORY].data);
     buffer_text(&files[MARKER].data, "Video Options for the Turok: Evolution recompilation\r\n");
 
     tree_build(files, FILE_COUNT, &tree);
@@ -1556,6 +1792,7 @@ static void apply_setting(int setting)
  * limits, and by the game's Invert Look. Mouse speed steps by 1.4x. */
 
 static void menu_pointer(void);
+static void controls_frame(void);
 
 static float s_mouse_turn[2];          /* yaw, pitch: stick units x seconds, not yet used */
 
@@ -1563,6 +1800,7 @@ void video_settings_mouse_look(void)
 {
     double gain;
     int dx = 0, dy = 0, step;
+    controls_frame();
     menu_pointer();
     if (s_values[SET_MOUSE_LOOK] != 1) return;
     xbox_FramebufferMouseDelta(&dx, &dy);
@@ -1983,9 +2221,154 @@ static void press_step(void)
     s_press_count--;
 }
 
+/* ── PC controls, live ─────────────────────────────────────────────
+ *
+ * Each frame (on the game's thread, which owns the history values): the
+ * page's rows as the player steps them, and a row waiting for its key. Enter
+ * or a click on a row starts the wait: the row shows "press a key", the
+ * keyboard and mouse stop reaching the game (xbox_KbmSetCapture), and once
+ * everything is let go the next key, mouse button or wheel notch is the
+ * row's. A key another action had swaps with this row's old one. Six
+ * seconds without one, or leaving the page, keeps the old key. */
+extern int xbox_FramebufferKeyDown(int vk);
+extern int xbox_FramebufferMouseButton(int which);
+extern void xbox_KbmSetCapture(int on);
+
+static int s_capture;               /* 0, 1 waiting for all up, 2 for a key, 3 for the new key to go up */
+static int s_capture_bind, s_capture_old;
+static uint32_t s_capture_screens;
+static DWORD s_capture_until;
+
+/* Which action a page row binds; -1 if it is not one of them. */
+static int binding_row(uint32_t actor)
+{
+    const OptionRow *row = option_row(actor);
+    if (!row || _stricmp(row->file, "PCControls.hst") || row->item < 1 || row->item > BIND_COUNT) return -1;
+    return row->item - 1;
+}
+
+static void controls_show(int bind, int key)
+{
+    uint32_t items = history_items("pccontrols.hst", BIND_COUNT);
+    if (items) item_write(items, bind + 1, key);
+}
+
+static void controls_set(int bind, int key)
+{
+    int old = s_binds[bind], other;
+    if (key < 0 || key >= KEY_PRESS) key = 0;
+    controls_show(bind, key);
+    if (key == old) return;
+    for (other = 0; key && other < BIND_COUNT; other++)
+        if (other != bind && s_binds[other] == key) {
+            s_binds[other] = old;
+            controls_show(other, old);
+        }
+    s_binds[bind] = key;
+    apply_bindings();
+    controls_save();
+    fprintf(stderr, "[CONTROLS] %s: %s\n", k_binds[bind].key, k_keys[key].name);
+}
+
+static void capture_start(int bind)
+{
+    s_capture = 1;
+    s_capture_bind = bind;
+    s_capture_old = s_binds[bind];
+    s_capture_screens = s_menu_screens;
+    s_capture_until = GetTickCount() + 6000;
+    xbox_KbmSetCapture(1);
+    controls_show(bind, KEY_PRESS);
+}
+
+static int any_input_down(void)
+{
+    int k;
+    for (k = 0; k < 5; k++)
+        if (xbox_FramebufferMouseButton(k)) return 1;
+    for (k = 1; k < 256; k++)
+        if (xbox_FramebufferKeyDown(k)) return 1;
+    return 0;
+}
+
+static void drain_mouse(void)
+{
+    int which;
+    for (which = 0; which < 5; which++) xbox_FramebufferMouseClicks(which);
+    xbox_KbmMenuWheel();
+}
+
+/* The key, button or notch just pressed, as a k_keys index; -1 if none. */
+static int pressed_key(void)
+{
+    static const int buttons[5] = {KEY_MOUSE_L, KEY_MOUSE_R, KEY_MOUSE_M, KEY_MOUSE_4, KEY_MOUSE_5};
+    int which, wheel = xbox_KbmMenuWheel(), k;
+    for (which = 0; which < 5; which++)
+        if (xbox_FramebufferMouseClicks(which)) return key_index(buttons[which]);
+    if (wheel) return key_index(wheel > 0 ? KEY_WHEEL_UP : KEY_WHEEL_DOWN);
+    for (k = 1; k < KEY_PRESS; k++)
+        if (k_keys[k].code > 0 && k_keys[k].code < 256 && xbox_FramebufferKeyDown(k_keys[k].code)) return k;
+    return -1;
+}
+
+static void capture_step(void)
+{
+    int key, expired = (long)(GetTickCount() - s_capture_until) >= 0;
+    if (s_capture < 3 && (expired || s_capture_screens != s_menu_screens || !s_in_menu)) {
+        controls_show(s_capture_bind, s_capture_old);
+        s_capture = 3;
+    }
+    switch (s_capture) {
+    case 1:
+        if (any_input_down()) break;
+        drain_mouse();
+        s_capture = 2;
+        break;
+    case 2:
+        if ((key = pressed_key()) < 0) break;
+        controls_set(s_capture_bind, key);
+        s_capture = 3;
+        break;
+    case 3:
+        /* The new key goes up before the game hears the keyboard again: an
+         * Escape bound to pause is not also the menu's Back. */
+        if (any_input_down()) break;
+        drain_mouse();
+        xbox_KbmSetCapture(0);
+        s_capture = 0;
+        break;
+    }
+}
+
+/* The rows as the player steps them (left and right, the wheel). */
+static void controls_watch(void)
+{
+    static DWORD next;
+    static uint32_t seen;
+    uint32_t items, value;
+    int b;
+    if ((long)(GetTickCount() - next) < 0) return;
+    next = GetTickCount() + 100;
+    if (!(items = history_items("pccontrols.hst", BIND_COUNT))) return;
+    if (items != seen) {
+        /* The history starts at the patch's keys; a change since is put back. */
+        for (b = 0; b < BIND_COUNT; b++) item_write(items, b + 1, s_binds[b]);
+        seen = items;
+        return;
+    }
+    for (b = 0; b < BIND_COUNT && guest_read(items + 8u * (uint32_t)b, &value); b++)
+        if ((int)value != s_binds[b]) controls_set(b, clamp((int)value, 0, KEY_COUNT - 1));
+}
+
+static void controls_frame(void)
+{
+    if (s_capture) capture_step();
+    else controls_watch();
+}
+
 static void menu_pointer(void)
 {
-    static int pointer_on;
+    static int pointer_on, enter_was;
     static float last_x = -1, last_y = -1;
     static uint32_t last_focus, last_screen;
     static DWORD pointer_busy_until;    /* the pointer's own presses still landing */
@@ -2003,6 +2386,7 @@ static void menu_pointer(void)
         xbox_FramebufferMouseClicks(1);
         return;
     }
+    if (s_capture) return;                  /* the mouse is the waiting row's */
     press_step();
     pressed = (xbox_FramebufferMouseClicks(0) ? 1 : 0) | (xbox_FramebufferMouseClicks(1) ? 2 : 0);
     wheel = xbox_KbmMenuWheel();
@@ -2010,6 +2394,14 @@ static void menu_pointer(void)
     if (over) hovered = entry_at(screen, x, y);
     guest_read(screen + 0x198, &focus);
     moved = over && (x != last_x || y != last_y);
+    /* RECOMP_MENU_TRACE: what the pointer saw, when it moved or clicked. */
+    {
+        static int trace = -1;
+        if (trace < 0) trace = getenv("RECOMP_MENU_TRACE") != NULL;
+        if (trace && (moved || pressed || wheel))
+            fprintf(stderr, "[MENU] pointer %.0f,%.0f over %d hovered %08X focus %08X pressed %d wheel %d\n",
+                    x, y, over, hovered, focus, pressed, wheel);
+    }
 
     /* The keys or a pad moved the focus: the arrow goes until the mouse moves. */
     if (s_menu_screens == last_screen && last_focus && focus != last_focus && !moved && !pressed &&
@@ -2025,6 +2417,22 @@ static void menu_pointer(void)
     last_focus = focus;
     last_screen = s_menu_screens;
     if (pressed || wheel) pointer_busy_until = now + 500;
+    /* A controls row: Enter or a click waits for its key, a right click
+     * unbinds it. */
+    {
+        int enter = xbox_FramebufferKeyDown(VK_RETURN), bind = -1;
+        if (enter && !enter_was && focus) bind = binding_row(focus);
+        enter_was = enter;
+        if (bind < 0 && (pressed & 1) && hovered) bind = binding_row(hovered);
+        if (bind >= 0) {
+            capture_start(bind);
+            return;
+        }
+        if ((pressed & 2) && hovered && (bind = binding_row(hovered)) >= 0) {
+            controls_set(bind, 0);
+            pressed = 0;
+        }
+    }
     if (pressed & 1) {
         if (hovered && !wrap_option(hovered, 1)) press(is_option_row(hovered) ? "RIGHT" : "A", 1);
     } else if (pressed & 2) {
@@ -2115,6 +2523,7 @@ void video_settings_start(const char *game_dir)
     apply_setting(SET_MSAA);
     apply_setting(SET_ICONS);
     apply_setting(SET_MOUSE_LOOK);
+    apply_bindings();
     if (s_values[SET_DISPLAY]) xbox_FramebufferSetFullscreen(1);
     thread = CreateThread(NULL, 0, video_watch, NULL, 0, NULL);
     if (thread) CloseHandle(thread);
