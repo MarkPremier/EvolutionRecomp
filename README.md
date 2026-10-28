@@ -152,9 +152,11 @@ A pad works as on the console. Keyboard and mouse (on by default,
 | Menu back | Backspace |
 | D-pad | Arrow keys |
 
-The game ships with Invert Look on; the mouse is inverted back so moving it
-up looks up (`RECOMP_KBM_INVERT_Y=0` if you turn the game's option off).
-`RECOMP_KBM_SENS` sets the mouse counts for a full turn rate (default 80,
+Moving the mouse up looks up, whatever the game's own Invert Look (which is
+the pad's) says. **Options > Control Setup > Advanced > Invert mouse** turns
+that round (kept in `turok_settings.ini` as `invert_mouse`). With Mouse look
+set to "stick", the game's Invert Look applies and is undone for the mouse by
+`RECOMP_KBM_INVERT_Y=1` (the default); `RECOMP_KBM_SENS` sets the mouse counts for a full turn rate (default 80,
 lower is faster), and `RECOMP_KBM_MAP` rebinds keys, e.g.
 `A=Space|Return,RT=MouseL,X=WheelDown|E`.
 
@@ -170,9 +172,10 @@ as a pointer, as in the PC release:
 | Right click | on an option row, the previous value; elsewhere Back (resume on the pause menu, as Esc) |
 | Wheel | over an option row, its value; elsewhere up / down |
 
-Leaving the menu for play takes the mouse back for look. The arrow is the PC
-release's `cursor.dds`, read from the PC install named by `pc_game_dir` (see
-Button icons below); without one it is Windows' own.
+Leaving the menu for play takes the mouse back for look. The arrow shows once
+the mouse moves and hides again when the keys or a pad move the highlight. It
+is the PC release's `cursor.dds`, read from the PC install named by
+`pc_game_dir` (see Button icons below); without one it is Windows' own.
 
 How it works: the screen loader's `this` (`sub_00054A60`) is the screen; its
 actors are a tree from +0x9C (walked as `sub_0009C1C0` does), each widget's
@@ -194,7 +197,7 @@ effect at once and are kept in `turok_settings.ini` beside the exe:
 
 | Row | Values | Same as |
 |-----|--------|---------|
-| Resolution | auto, 480p, 960p, 1440p, 1920p (lines; the width follows the aspect) | `RECOMP_RENDER_SCALE` |
+| Resolution | auto, 480p, 960p, 1440p, 1920p, 2160p (lines; the width follows the aspect; auto matches the monitor, 2160 on 4K) | `RECOMP_RENDER_SCALE` |
 | Aspect ratio | 4:3, 16:10, 16:9, 21:9, auto (the monitor's) | |
 | Display | windowed, fullscreen (borderless) | Alt+Enter |
 | VSync | off, on | `RECOMP_VSYNC` |

@@ -32,6 +32,7 @@
 
 #include <windows.h>
 #include <ctype.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <stddef.h>
@@ -62,7 +63,9 @@ extern void nv2a_gpu_set_msaa(int samples);
  * through its values (shown, and written in turok_settings.ini, as their
  * text). */
 enum { SET_RESOLUTION, SET_ASPECT, SET_DISPLAY, SET_VSYNC, SET_FRAMES, SET_ANISOTROPY, SET_MSAA, SET_ICONS,
-       SET_MOUSE_LOOK, SET_MOUSE_SPEED, SETTING_COUNT };
+       SET_MOUSE_LOOK, SET_MOUSE_SPEED, SET_INVERT_MOUSE, SETTING_COUNT };
+/* The rows of the Video Options page; invert mouse is Control Setup's. */
+#define VIDEO_ROWS SET_INVERT_MOUSE
 
 typedef struct VideoSetting {
     const char *key, *label;
@@ -70,7 +73,9 @@ typedef struct VideoSetting {
     int count, fallback;
 } VideoSetting;
 
-static const char *const k_resolutions[] = {"auto", "480p", "960p", "1440p", "1920p"};
+static const char *const k_resolutions[] = {"auto", "480p", "960p", "1440p", "1920p", "2160p"};
+/* Each as the render scale: lines over the console's 480 (0 automatic). */
+static const float k_resolution_scales[] = {0, 1, 2, 3, 4, 4.5f};
 static const char *const k_aspects[] = {"4:3", "16:10", "16:9", "21:9", "auto"};
 static const char *const k_displays[] = {"windowed", "fullscreen"};
 static const char *const k_switches[] = {"off", "on"};
@@ -93,6 +98,7 @@ static const VideoSetting k_settings[SETTING_COUNT] = {
     {"button_icons", "button icons", k_icons, COUNT(k_icons), 0},
     {"mouse_look", "mouse look", k_mouse_looks, COUNT(k_mouse_looks), 1},
     {"mouse_speed", "mouse speed", k_speeds, COUNT(k_speeds), 4},
+    {"invert_mouse", "invert mouse", k_switches, COUNT(k_switches), 0},
 };
 
 static int s_values[SETTING_COUNT];
@@ -123,11 +129,17 @@ static int value_index(int setting, const char *text)
     return -1;
 }
 
-/* RECOMP_RENDER_SCALE's value as the resolution row's (a factor; 1 is 480p). */
+/* RECOMP_RENDER_SCALE's value as the resolution row's (a factor; 1 is 480p):
+ * the nearest. */
 static int resolution_from_scale(const char *text)
 {
+    int r, nearest = 1;
+    double scale;
     if (!text || !*text || !_stricmp(text, "auto")) return 0;
-    return clamp((int)(atof(text) + 0.5), 1, COUNT(k_resolutions) - 1);
+    scale = atof(text);
+    for (r = 2; r < COUNT(k_resolution_scales); r++)
+        if (fabs(k_resolution_scales[r] - scale) < fabs(k_resolution_scales[nearest] - scale)) nearest = r;
+    return nearest;
 }
 
 void video_settings_load(void)
@@ -155,7 +167,7 @@ void video_settings_load(void)
     env = getenv("RECOMP_RENDER_SCALE");
     if (env && *env) s_values[SET_RESOLUTION] = resolution_from_scale(env);
     else {
-        if (s_values[SET_RESOLUTION]) snprintf(text, sizeof text, "%d", s_values[SET_RESOLUTION]);
+        if (s_values[SET_RESOLUTION]) snprintf(text, sizeof text, "%g", k_resolution_scales[s_values[SET_RESOLUTION]]);
         else strcpy(text, "auto");
         _putenv_s("RECOMP_RENDER_SCALE", text);
     }
@@ -672,8 +684,8 @@ static int make_video_screen(Node *screen)
     Node *title = actor_named(screen, "title", NULL), *bbutton = actor_named(screen, "BButton", NULL);
     Node *deity = actor_named(screen, "DeityNoFade", NULL), *limit = NULL;
     float row_position[3], row_scale[3], value_position[3], value_scale[3];
-    char name[64], row_names[SETTING_COUNT][32], value_names[SETTING_COUNT][48];
-    int row_ids[SETTING_COUNT], value_ids[SETTING_COUNT], id = 0, s;
+    char name[64], row_names[VIDEO_ROWS][32], value_names[VIDEO_ROWS][48];
+    int row_ids[VIDEO_ROWS], value_ids[VIDEO_ROWS], id = 0, s;
     uint32_t i, j, at = 0;
 
     if (!row || !value || !title || !bbutton || !deity || !get_vector(child(row, "POS"), row_position) ||
@@ -693,7 +705,7 @@ static int make_video_screen(Node *screen)
             at = i;
         }
     }
-    for (s = 0; s < SETTING_COUNT; s++) {
+    for (s = 0; s < VIDEO_ROWS; s++) {
         Node *label = node_clone(row), *box = node_clone(value);
         Node *label_vars = child(label, "ACTOR_VARIABLES"), *box_vars = child(box, "ACTOR_VARIABLES");
         float position[3], scale[3];
@@ -768,7 +780,7 @@ static int make_video_screen(Node *screen)
             if (!target || !is_template(target)) continue;
             if (strcmp(target, k_template_rows[0])) { node_remove(events, j); continue; }
             if (event->value_size == 5 && !memcmp(event->value, "Name.", 5)) {
-                for (s = SETTING_COUNT; s-- > 1;) {
+                for (s = VIDEO_ROWS; s-- > 1;) {
                     Node *copy = node_clone(event);
                     retarget(copy, row_names[s], row_ids[s]);
                     node_insert(events, j + 1, copy);
@@ -778,7 +790,7 @@ static int make_video_screen(Node *screen)
         }
     }
     if (!limit) return 0;
-    for (s = 0; s < SETTING_COUNT; s++) {
+    for (s = 0; s < VIDEO_ROWS; s++) {
         Node *link = node_clone(limit), *cause = child(link, "CAUSE"), *events = child(link, "EVENTS");
         int last = k_settings[s].count - 1;
         snprintf(name, sizeof name, "%s > %d", row_names[s], last);
@@ -1139,6 +1151,102 @@ static int add_quit_entry(Node *screen, const char *unused)
     return 1;
 }
 
+/* Control Setup's advanced page (front end and pause menu): INVERT MOUSE
+ * below its rows, a copy of the game's own INVERT (ControlSetup.hst item 44,
+ * the pad's) showing and changing Video.hst's item instead. */
+static void copy_events_for(Node *actor, const char *from, const char *to, int id)
+{
+    uint32_t i, j;
+    char target[64];
+    for (i = 0; actor && i < actor->count; i++) {
+        Node *events = child(actor->children[i], "EVENTS");
+        for (j = 0; events && j < events->count; j++) {
+            const char *name = target_of(events->children[j], target, sizeof target);
+            if (name && !strcmp(name, from)) event_copy_after(events, j++, to, id);
+        }
+    }
+}
+
+static void set_history_item(Node *node, int item)
+{
+    set_text(child(node, "HSTF"), VIDEO_HST);
+    set_byte(child(node, "ITM"), item);
+}
+
+static int add_invert_mouse(Node *screen, const char *unused)
+{
+    Node *row = actor_named(screen, "invert", NULL), *value = actor_named(screen, "reverseupdownValueWidget", NULL);
+    Node *deity = actor_named(screen, "DeityNoFade", NULL), *above = actor_named(screen, "hspeed", NULL);
+    Node *last = actor_named(screen, "vspeed", NULL), *limit = NULL;
+    float position[3], step[3];
+    int id = 0, row_id, value_id, item = SET_INVERT_MOUSE + 1;
+    uint32_t i, j, at;
+    (void)unused;
+    if (!row || !value || !deity || !above || !last || !get_vector(child(above, "POS"), step) ||
+            !get_vector(child(last, "POS"), position)) return 0;
+    for (i = 0; i < screen->count; i++)
+        if (actor_id(screen->children[i]) > id) id = actor_id(screen->children[i]);
+    row_id = ++id;
+    value_id = ++id;
+    /* One step below the last row, as it is below the one above it. */
+    position[1] -= step[1] - position[1];
+
+    row = node_clone(row);
+    set_byte(child(row, "ID"), row_id);
+    set_text(child(row, "NAME"), "invertmouse");
+    set_text(child(child(row, "ACTOR_VARIABLES"), "W_TMF"), OPTIONS_TXM);
+    set_byte(child(child(row, "ACTOR_VARIABLES"), "W_TMN"), text_label(SET_INVERT_MOUSE));
+    {
+        float row_position[3];
+        if (get_vector(child(row, "POS"), row_position)) {
+            row_position[1] = position[1];
+            set_vector(child(row, "POS"), row_position);
+        }
+    }
+    for (i = 0; i < row->count; i++) {
+        Node *events = child(row->children[i], "EVENTS");
+        for (j = 0; events && j < events->count; j++) retarget(events->children[j], "invertmouseValueWidget", value_id);
+    }
+    value = node_clone(value);
+    set_byte(child(value, "ID"), value_id);
+    set_text(child(value, "NAME"), "invertmouseValueWidget");
+    {
+        float value_position[3];
+        Node *vars = child(value, "ACTOR_VARIABLES");
+        if (get_vector(child(value, "POS"), value_position)) {
+            value_position[1] = position[1];
+            set_vector(child(value, "POS"), value_position);
+        }
+        set_text(child(vars, "W_THF"), VIDEO_HST);
+        set_byte(child(vars, "W_THI"), item);
+        set_text(child(vars, "A_HIF"), VIDEO_HST);
+        set_byte(child(vars, "A_HII"), item);
+    }
+    actor_named(screen, "reverseupdownValueWidget", &at);
+    node_insert(screen, at + 1, value);
+    actor_named(screen, "invert", &at);
+    node_insert(screen, at + 1, row);
+
+    /* Its value kept to 0 and 1, as INVERT's is ("invert > 1"). */
+    for (i = 0; i < deity->count && !limit; i++) {
+        Node *cause = child(deity->children[i], "CAUSE");
+        if (!strcmp(deity->children[i]->name, "LINK") && cause && is_event(cause, "History") &&
+                byte_of(child(cause, "ITM")) == 44)
+            limit = node_clone(deity->children[i]);
+    }
+    if (!limit || !child(limit, "EVENTS")) { node_free(limit); return 0; }
+    set_text(limit, "invertmouse > 1");
+    set_history_item(child(limit, "CAUSE"), item);
+    for (j = 0; j < child(limit, "EVENTS")->count; j++)
+        if (is_event(child(limit, "EVENTS")->children[j], "Hist"))
+            set_history_item(child(limit, "EVENTS")->children[j], item);
+    node_insert(deity, deity->count, limit);
+    /* Setup, Back and the languages' moves name INVERT: the new row too. */
+    copy_events_for(deity, "invert", "invertmouse", row_id);
+    copy_events_for(deity, "reverseupdownValueWidget", "invertmouseValueWidget", value_id);
+    return 1;
+}
+
 static int edit_video_screen(Node *screen, const char *unused)
 {
     (void)unused;
@@ -1149,7 +1257,8 @@ static int write_patch(const char *game_dir)
 {
     /* Per menu: its Options screen, the page and the page's .atr; then the
      * strings, the history file, history.txt and the marker. */
-    enum { OPTIONS_TEXT = 3 * MENU_COUNT, VIDEO_HISTORY, HISTORY_LIST, MARKER, PRESS_START, MAIN_MENU, FILE_COUNT };
+    enum { OPTIONS_TEXT = 3 * MENU_COUNT, VIDEO_HISTORY, HISTORY_LIST, MARKER, PRESS_START, MAIN_MENU,
+           CONTROLS, GAME_CONTROLS, FILE_COUNT };
     PatchFile files[FILE_COUNT];
     Trees trees;
     Buffer tree = {0}, existing = {0}, pause = {0};
@@ -1195,6 +1304,10 @@ static int write_patch(const char *game_dir)
     s_pause_screen = pause_screen;
     snprintf(from, sizeof from, SCREENS "mainmenu\\mainmenu.ati");
     if (!patch_screen(&trees, from, from, &files[MAIN_MENU], add_quit_entry, NULL)) goto done;
+    snprintf(from, sizeof from, SCREENS "controladvanced\\controladvanced.ati");
+    if (!patch_screen(&trees, from, from, &files[CONTROLS], add_invert_mouse, NULL)) goto done;
+    snprintf(from, sizeof from, SCREENS "ingamecontroladvanced\\ingamecontroladvanced.ati");
+    if (!patch_screen(&trees, from, from, &files[GAME_CONTROLS], add_invert_mouse, NULL)) goto done;
 
     files[OPTIONS_TEXT].key = tree_key("data\\text\\options.txm");
     files[VIDEO_HISTORY].key = tree_key("data\\history\\video.hst");
@@ -1492,7 +1605,7 @@ static void apply_frames(void)
 static void apply_setting(int setting)
 {
     switch (setting) {
-    case SET_RESOLUTION: nv2a_gpu_set_render_scale((float)s_values[SET_RESOLUTION]); break;
+    case SET_RESOLUTION: nv2a_gpu_set_render_scale(k_resolution_scales[s_values[SET_RESOLUTION]]); break;
     case SET_ASPECT: apply_aspect(); xbox_FramebufferSetWindowAspect(aspect_ratio()); break;
     case SET_DISPLAY: xbox_FramebufferSetFullscreen(s_values[SET_DISPLAY]); break;
     case SET_VSYNC: xbox_SetPresentInterval(s_values[SET_VSYNC]); break;
@@ -1501,7 +1614,8 @@ static void apply_setting(int setting)
     case SET_MSAA: nv2a_gpu_set_msaa(1 << s_values[SET_MSAA]); break;
     case SET_ICONS: nv2a_gpu_set_texture_replacements(s_values[SET_ICONS]); break;
     case SET_MOUSE_LOOK: xbox_KbmSetRawMouse(s_values[SET_MOUSE_LOOK]); break;
-    case SET_MOUSE_SPEED: break;      /* read each frame */
+    case SET_MOUSE_SPEED:             /* read each frame */
+    case SET_INVERT_MOUSE: break;
     }
 }
 
@@ -1517,7 +1631,12 @@ static void apply_setting(int setting)
  * it (|a| - 0.3) / 0.7 (the remap sub_001420D0 also does). A small mouse
  * movement fell inside it and was lost, so the sum -- the pad's effective
  * value plus the mouse's -- is written as the axis that comes out of the
- * deadzone as that sum. */
+ * deadzone as that sum.
+ *
+ * The game's Invert Look (ControlSetup.hst item 44) does not reach what is
+ * added here: moving the mouse up looks up whichever way it is set (tried
+ * both), and invert mouse (Control Setup's advanced page) turns that round. */
+
 static void menu_pointer(void);
 
 static float through_deadzone(float axis)
@@ -1557,6 +1676,7 @@ void video_settings_mouse_look(void)
     for (step = 4; step > s_values[SET_MOUSE_SPEED]; step--) gain /= 1.4;
     turn[0] = (float)(dx * gain / seconds) + test;
     turn[1] = (float)(-dy * gain / seconds);
+    if (s_values[SET_INVERT_MOUSE]) turn[1] = -turn[1];
     for (axis = 0; axis < 2; axis++)
         if (turn[axis] != 0.0f) axes[axis] = into_deadzone(through_deadzone(axes[axis]) + turn[axis]);
 }
@@ -1585,7 +1705,8 @@ void video_settings_cinema(int on)
  * under it focused, a click choosing it. Here, in any menu (FE Flag not 0):
  *
  *   - the toolkit lets the mouse go and shows the PC's cursor.dds
- *     (xbox_FramebufferSetMenuPointer, xbox_FramebufferSetCursorImage);
+ *     (xbox_FramebufferSetMenuPointer, xbox_FramebufferSetCursorImage) once
+ *     the mouse moves; when the keys or a pad move the focus it hides again;
  *   - moving over an entry focuses it as the menu's up and down do: the
  *     controller handed from the old entry to the new, then the screen's own
  *     SetFocus (set_focus);
@@ -1609,7 +1730,8 @@ extern void xbox_FramebufferSetMenuPointer(int on);
 extern int xbox_FramebufferPointer(int *x, int *y, int *width, int *height);
 extern void xbox_FramebufferSetCursorImage(const uint32_t *bgra, int width, int height, int hot_x, int hot_y);
 extern float nv2a_gpu_presented_aspect(void);
-extern int xbox_FramebufferMouseButton(int which);
+extern int xbox_FramebufferMouseClicks(int which);
+extern void xbox_FramebufferHidePointer(void);
 extern void xbox_KbmPulse(const char *target, int ms);
 extern int xbox_KbmMenuWheel(void);
 
@@ -1618,6 +1740,7 @@ extern int xbox_KbmMenuWheel(void);
 
 static char s_game_dir[MAX_PATH];
 static volatile uint32_t s_menu_screen;     /* the screen's object; 0 in a level */
+static volatile uint32_t s_menu_screens;    /* screens entered: the object is reused */
 static char s_option_rows[64][32];          /* its option rows' names */
 static int s_option_row_count;
 
@@ -1707,6 +1830,7 @@ void video_settings_menu_screen(uint32_t screen, const char *name)
     }
     find_option_rows(name);
     s_menu_screen = screen;
+    s_menu_screens++;
     fprintf(stderr, "[MENU] screen %08X, %d option rows\n", screen, s_option_row_count);
 }
 
@@ -1884,32 +2008,46 @@ static void press_step(void)
 
 static void menu_pointer(void)
 {
-    static int pointer_on, last_buttons;
+    static int pointer_on;
     static float last_x = -1, last_y = -1;
+    static uint32_t last_focus, last_screen;
+    static DWORD pointer_busy_until;    /* the pointer's own presses still landing */
     uint32_t screen = s_menu_screen, focus = 0, hovered = 0;
-    int on = s_in_menu && screen, buttons, pressed, wheel, over;
+    int on = s_in_menu && screen, pressed, wheel, over, moved;
+    DWORD now = GetTickCount();
     float x, y;
     if (on != pointer_on) {
         xbox_FramebufferSetMenuPointer(on);
         pointer_on = on;
         s_press_count = 0;
     }
-    if (!on) return;
+    if (!on) {
+        xbox_FramebufferMouseClicks(0);     /* play's clicks are not a menu's */
+        xbox_FramebufferMouseClicks(1);
+        return;
+    }
     press_step();
-    buttons = xbox_FramebufferMouseButton(0) | xbox_FramebufferMouseButton(1) << 1;
-    pressed = buttons & ~last_buttons;
-    last_buttons = buttons;
+    pressed = (xbox_FramebufferMouseClicks(0) ? 1 : 0) | (xbox_FramebufferMouseClicks(1) ? 2 : 0);
     wheel = xbox_KbmMenuWheel();
     over = pointer_on_menu(&x, &y);
     if (over) hovered = entry_at(screen, x, y);
     guest_read(screen + 0x198, &focus);
+    moved = over && (x != last_x || y != last_y);
+
+    /* The keys or a pad moved the focus: the arrow goes until the mouse moves. */
+    if (s_menu_screens == last_screen && last_focus && focus != last_focus && !moved && !pressed &&
+            !s_press_count && (long)(now - pointer_busy_until) >= 0)
+        xbox_FramebufferHidePointer();
 
     /* Moving onto an entry focuses it; a still pointer leaves the keys be. */
-    if (hovered && hovered != focus && (pressed || x != last_x || y != last_y)) {
+    if (hovered && hovered != focus && (pressed || moved)) {
         set_focus(screen, focus, hovered);
         focus = hovered;
     }
     if (over) { last_x = x; last_y = y; }
+    last_focus = focus;
+    last_screen = s_menu_screens;
+    if (pressed || wheel) pointer_busy_until = now + 500;
     if (pressed & 1) {
         if (hovered) press(is_option_row(hovered) ? "RIGHT" : "A", 1);
     } else if (pressed & 2) {
