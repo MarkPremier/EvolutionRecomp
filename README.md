@@ -250,14 +250,16 @@ An environment variable set by hand still wins at start-up.
   the Xbox textures. In menus Escape is Back (and resumes from the pause
   menu); in play it pauses (`RECOMP_KBM_MENU_MAP`).
 
-- **Mouse look, raw**: the mouse turns the camera by its counts, at any frame
-  rate, instead of moving the right stick (which turns at a stick's capped,
-  accelerated rate). The counts over the frame's time are added to player 1's
-  look axes after the input mapper (`sub_0002F580`); the game does not clamp
-  them. The look axes then pass a 0.3 deadzone ((|a| - 0.3) / 0.7), which
-  swallowed small movements, so the pad's and the mouse's effective values
-  are summed and written as the axis that comes out of it as that sum. "stick" is the old behaviour, tuned by `RECOMP_KBM_SENS`. The game's
-  own horiz/vert speed (Control Setup) still scale it.
+- **Mouse look, raw** (native mouselook): the view turns by the mouse's
+  counts alone, at any frame rate, with no acceleration. The look stick goes
+  through a 0.3 deadzone, a response curve (`sub_00142280`: x0.25 under half
+  deflection, x0.3 under 0.9, squared above it, so turning jumps from 0.27 to
+  0.81) and an easing towards larger values before the controller turns by
+  it; the mouse skips all of that and is added in the turn functions
+  themselves (`sub_00144430` yaw, `sub_00144560` pitch), so it keeps what the
+  game does there: slower when zoomed, the pitch limits, and Invert Look
+  (which turns the mouse and the pad alike). Up and across turn alike per
+  count. "stick" is the old behaviour, tuned by `RECOMP_KBM_SENS`.
 - **MSAA** applies to the screen's targets (multisampled copies resolved
   whenever the game reads them); it combines with the render scale.
   **Anisotropy** applies to mipmapped textures.

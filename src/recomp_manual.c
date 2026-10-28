@@ -225,8 +225,9 @@ void sub_001642A0(void)
  *
  * The input mapper fills each player's axes (0x250BC0 + i*0x54, +0x08..+0x14:
  * move x, move y, look x, look y) from the pads once a frame; the player turns
- * by the look axes, unclamped (sub_0014E620 reads them). The mouse is added
- * after it (video_settings_mouse_look). */
+ * by the look axes, unclamped (sub_0014E620 reads them). After it, each
+ * frame's mouse counts are taken (video_settings_mouse_look) for the turn
+ * functions below, and the menu pointer runs. */
 extern void sub_0002F580_gen(void);
 void sub_0002F580(void)
 {
@@ -262,6 +263,69 @@ void sub_0003C9E0(void)
     sub_0003C9E0_gen();
     TUROK_MEM32(block) = near_bits;
     TUROK_MEM32(block + 4u) = far_bits;
+}
+
+/* ── Stick response curve (sub_00142280) ───────────────────────
+ *
+ * this-call (the controller), args: float *x, float *y, and a third. For
+ * the stick vector's length m: under 0.5 both are scaled by 0.25, under 0.9
+ * by 0.3, and above it each is squared (keeping its sign). */
+extern void sub_00142280_gen(void);
+
+void sub_00142280(void)
+{
+    static int trace = -1;
+    uint32_t ret = TUROK_MEM32(g_esp), xp = TUROK_MEM32(g_esp + 4u), yp = TUROK_MEM32(g_esp + 8u), self = g_ecx;
+    float x0, y0, x1, y1;
+    if (trace < 0) trace = getenv("RECOMP_CURVE_TRACE") != NULL;
+    memcpy(&x0, (void *)((uintptr_t)xp + g_xbox_mem_offset), 4);
+    memcpy(&y0, (void *)((uintptr_t)yp + g_xbox_mem_offset), 4);
+    sub_00142280_gen();
+    if (trace && (x0 != 0.0f || y0 != 0.0f)) {
+        static unsigned n;
+        memcpy(&x1, (void *)((uintptr_t)xp + g_xbox_mem_offset), 4);
+        memcpy(&y1, (void *)((uintptr_t)yp + g_xbox_mem_offset), 4);
+        if (n++ % 15 == 0)
+            fprintf(stderr, "[CURVE] from %06X this %08X x %.3f y %.3f -> %.3f %.3f\n", ret, self, x0, y0, x1, y1);
+    }
+}
+
+/* ── Native mouse look (sub_00144430 yaw, sub_00144560 pitch) ──
+ *
+ * The player controller's turn functions, after the stick's deadzone,
+ * response curve and easing (sub_00144780): yaw takes (.., speed, frame
+ * time, x) as arguments 4-6, pitch (.., frame time, x, y) as 8-10, and turn
+ * by value x speed x frame time x a zoom factor. The mouse's turn
+ * (video_settings_take_mouse_turn) is added to the value over the frame
+ * time, so the view turns by the mouse's counts alone. */
+extern void sub_00144430_gen(void);
+extern void sub_00144560_gen(void);
+
+static void add_mouse_turn(uint32_t time_arg, uint32_t value_arg, int axis)
+{
+    float frame_time, value, turn;
+    uint32_t bits = TUROK_MEM32(time_arg);
+    memcpy(&frame_time, &bits, 4);
+    if (!(frame_time > 0.0f) || frame_time > 1.0f) return;
+    turn = video_settings_take_mouse_turn(axis);
+    if (turn == 0.0f) return;
+    bits = TUROK_MEM32(value_arg);
+    memcpy(&value, &bits, 4);
+    value += turn / frame_time;
+    memcpy(&bits, &value, 4);
+    TUROK_MEM32(value_arg) = bits;
+}
+
+void sub_00144430(void)
+{
+    add_mouse_turn(g_esp + 0x14u, g_esp + 0x18u, 0);
+    sub_00144430_gen();
+}
+
+void sub_00144560(void)
+{
+    add_mouse_turn(g_esp + 0x20u, g_esp + 0x28u, 1);
+    sub_00144560_gen();
 }
 
 /* ── Manual function overrides ─────────────────────────────── */

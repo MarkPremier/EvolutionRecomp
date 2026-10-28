@@ -1543,65 +1543,47 @@ static void apply_setting(int setting)
     }
 }
 
-/* Raw mouse look, after the input mapper has filled the players' axes
- * (sub_0002F580): the mouse's counts this frame, over the frame's time, are
- * added to player 1's look axes (0x250BD0 x, 0x250BD4 y, at stick scale).
- * The game turns by axis x turn rate x frame time and does not clamp the
- * axes, so a count turns the camera by the same angle at any frame rate and
- * any speed of hand -- not at a stick's rate, as the mouse did through the
- * right stick. Mouse speed steps by 1.4x around 5.
- *
- * Further on, the look axes pass a deadzone: under 0.3 is nothing, and above
- * it (|a| - 0.3) / 0.7 (the remap sub_001420D0 also does). A small mouse
- * movement fell inside it and was lost, so the sum -- the pad's effective
- * value plus the mouse's -- is written as the axis that comes out of the
- * deadzone as that sum.
- *
- * The game's Invert Look (Control Setup > Advanced) flips the look y after
- * this, so it turns the mouse as it does the pad: one setting for both, off
- * as the patch's ControlSetup.hst has it for a new player. */
+/* Raw mouse look: native, not through the stick. The look stick passes a
+ * 0.3 deadzone, a response curve (sub_00142280: x0.25 under half
+ * deflection, x0.3 under 0.9, squared above, so a jump from 0.27 to 0.81)
+ * and an easing towards larger values before the game turns by it
+ * (sub_00144430 yaw, sub_00144560 pitch: value x turn speed x frame time x
+ * a zoom factor). Through all that a mouse felt sluggish when slow and
+ * accelerated when fast. Instead each frame's counts are held here, after
+ * the input mapper (sub_0002F580), and the two turn functions add them to
+ * their stick value (recomp_manual.c): the view turns by the counts, at any
+ * frame rate, slower when zoomed as the game makes it, within its pitch
+ * limits, and by the game's Invert Look. Mouse speed steps by 1.4x. */
 
 static void menu_pointer(void);
 
-static float through_deadzone(float axis)
-{
-    float size = axis < 0 ? -axis : axis;
-    return size <= 0.3f ? 0.0f : (axis < 0 ? -1.0f : 1.0f) * (size - 0.3f) / 0.7f;
-}
-
-static float into_deadzone(float effective)
-{
-    if (effective == 0.0f) return 0.0f;
-    return effective < 0 ? -(0.3f + 0.7f * -effective) : 0.3f + 0.7f * effective;
-}
+static float s_mouse_turn[2];          /* yaw, pitch: stick units x seconds, not yet used */
 
 void video_settings_mouse_look(void)
 {
-    static LARGE_INTEGER frequency, last;
-    static float test = -1;
-    LARGE_INTEGER now;
-    double seconds, gain;
-    float turn[2];
-    int dx = 0, dy = 0, step, axis;
-    float *axes = (float *)((uintptr_t)0x250BD0u + g_xbox_mem_offset);
+    double gain;
+    int dx = 0, dy = 0, step;
     menu_pointer();
-    /* DIAG RECOMP_LOOK_TEST=<x>: a constant effective look x. */
-    if (test < 0) test = getenv("RECOMP_LOOK_TEST") ? (float)atof(getenv("RECOMP_LOOK_TEST")) : 0;
-    if (s_values[SET_MOUSE_LOOK] != 1 && test <= 0) return;
-    if (!frequency.QuadPart) QueryPerformanceFrequency(&frequency);
-    QueryPerformanceCounter(&now);
-    seconds = last.QuadPart ? (double)(now.QuadPart - last.QuadPart) / (double)frequency.QuadPart : 1.0 / 60;
-    last = now;
-    if (seconds < 0.001) seconds = 0.001;
-    if (seconds > 0.1) seconds = 0.1;
-    if (s_values[SET_MOUSE_LOOK] == 1) xbox_FramebufferMouseDelta(&dx, &dy);
-    if (s_in_menu || (!dx && !dy && test <= 0)) return;
-    for (gain = 0.0005, step = 4; step < s_values[SET_MOUSE_SPEED]; step++) gain *= 1.4;
+    if (s_values[SET_MOUSE_LOOK] != 1) return;
+    xbox_FramebufferMouseDelta(&dx, &dy);
+    if (s_in_menu) {
+        s_mouse_turn[0] = s_mouse_turn[1] = 0;
+        return;
+    }
+    for (gain = 0.0002, step = 4; step < s_values[SET_MOUSE_SPEED]; step++) gain *= 1.4;
     for (step = 4; step > s_values[SET_MOUSE_SPEED]; step--) gain /= 1.4;
-    turn[0] = (float)(dx * gain / seconds) + test;
-    turn[1] = (float)(-dy * gain / seconds);
-    for (axis = 0; axis < 2; axis++)
-        if (turn[axis] != 0.0f) axes[axis] = into_deadzone(through_deadzone(axes[axis]) + turn[axis]);
+    /* Down the screen as the pad's down (Invert Look flips both); pitch
+     * doubled, as the game turns pitch at half its yaw speed, so a count
+     * turns the view as far up as across. */
+    s_mouse_turn[0] += (float)(dx * gain);
+    s_mouse_turn[1] += (float)(dy * gain * 2);
+}
+
+float video_settings_take_mouse_turn(int axis)
+{
+    float turn = s_mouse_turn[axis & 1];
+    s_mouse_turn[axis & 1] = 0;
+    return turn;
 }
 
 /* Draw distance: how much further than the game's own distances (A_NDD
