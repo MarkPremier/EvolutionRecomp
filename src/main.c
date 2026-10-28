@@ -15,8 +15,8 @@
  *
  * Customize this file for your game:
  *   - Set YOUR_GAME_ENTRY_POINT to the XBE entry point address
- *   - Set YOUR_GAME_XBE_PATH to where the XBE file lives
- *   - Set YOUR_GAME_DIR to the game data directory
+ *   - Set YOUR_GAME_DIR to the game data directory the build tries (the
+ *     player's own copy is found or extracted by game_files.c)
  *   - Add any CRT global pre-initialization your game needs
  *   - Customize the VEH handler for game-specific crash diagnosis
  *
@@ -42,6 +42,7 @@
 /* xboxrecomp runtime headers */
 #include <xbox/xboxrecomp.h>
 #include "video_settings.h"
+#include "game_files.h"
 
 /*
  * If xboxrecomp.h is not an umbrella header in your setup, include
@@ -85,8 +86,10 @@ extern ptrdiff_t g_xbox_mem_offset;
  * Run: py -3 -m tools.xbe_parser game/default.xbe
  */
 #define YOUR_GAME_ENTRY_POINT   0x0001106F  /* XBE entry point VA */
-#define YOUR_GAME_XBE_PATH      "P:\\Recomp\\turok\\Turok - Evolution (USA)\\default.xbe"
 #define YOUR_GAME_DIR            "P:\\Recomp\\turok\\Turok - Evolution (USA)"
+
+/* The player's disc files (game_files_locate). */
+static char s_game_dir[MAX_PATH], s_xbe_path[MAX_PATH];
 
 /* ── Forward declarations ──────────────────────────────────── */
 
@@ -509,8 +512,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     SymInitialize(GetCurrentProcess(), NULL, TRUE);
     AddVectoredExceptionHandler(1, veh_handler);
 
-    /* Step 1: Load XBE */
-    if (!load_xbe(YOUR_GAME_XBE_PATH, &xbe_data, &xbe_size)) {
+    /* Step 1: Load XBE, from the player's copy of the disc (game_files.c:
+     * found, extracted from an image, or asked for). */
+    if (!game_files_locate(YOUR_GAME_DIR, s_game_dir, sizeof s_game_dir)) return 0;
+    snprintf(s_xbe_path, sizeof s_xbe_path, "%s\\default.xbe", s_game_dir);
+    printf("Game files: %s\n", s_game_dir);
+    if (!load_xbe(s_xbe_path, &xbe_data, &xbe_size)) {
         MessageBoxA(NULL, "Failed to load default.xbe.\n"
                     "Place the game files in the 'game' subdirectory.",
                     "Recomp", MB_ICONERROR);
@@ -563,7 +570,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     /* Step 4: Set game directory for file I/O path translation */
     {
         extern void xbox_path_init(const char *game_dir, const char *save_dir);
-        xbox_path_init(YOUR_GAME_DIR, NULL);
+        xbox_path_init(s_game_dir, NULL);
     }
 
     /* Step 5: Initialize kernel bridge (thunk table in Xbox memory) */
@@ -573,7 +580,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     /* The Video Options page in the Options menu: patch0.tre beside the
      * supertrees, made from the game's own menus before the title mounts its
      * archives, and the thread that applies the page's settings. */
-    video_settings_start(YOUR_GAME_DIR);
+    video_settings_start(s_game_dir);
 
     /* Step 6: Initialize stack */
     g_esp = XBOX_STACK_TOP;

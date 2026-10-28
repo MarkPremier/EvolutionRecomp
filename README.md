@@ -46,7 +46,24 @@ CPU-renderer build (about 9 fps on the title screen).
 - Known issues: environment-map layers
   (water, Tek bow) and cave lighting are not yet compared with the console.
 
-## What you need
+## Playing
+
+You need your own copy of Turok: Evolution for the original Xbox, **USA**
+release. Start `turok_evolution.exe`:
+
+- Put your disc image (`.iso`, a full image of the disc, or a trimmed
+  `.xiso`) beside the program, and it is extracted once into a `game` folder
+  there (about 2.5 GB).
+- Or, with no image beside it, the program asks for the image or for the
+  `default.xbe` in a folder of already extracted files.
+
+The folder is remembered in `turok_settings.ini` (`[paths] game_dir`), and the
+game's `default.xbe` is checked to be the USA release's (SHA-1
+`25e1d77b216a2e557d7a5de6266cda64ae62627b`): the recompiled code is that
+executable's, so other releases are refused. `RECOMP_GAME_DIR` names the
+folder by hand. Saves go in that folder's `udata`.
+
+## What you need to build it
 
 - An original Xbox disc image of Turok: Evolution (USA), XISO format
 - Windows 10/11 with Visual Studio 2022 or later ("Desktop development with C++",
@@ -72,8 +89,11 @@ Recomp/
    xdvdfs unpack "Turok - Evolution (USA).iso" "turok/Turok - Evolution (USA)"
    ```
 
-   The disc path is hard-coded in `src/main.c` (`YOUR_GAME_XBE_PATH`,
-   `YOUR_GAME_DIR`); change it if yours differs.
+   The code generation below reads `default.xbe` from this folder. At run
+   time the program finds the files itself (see [Playing](#playing)); the
+   folder in `src/main.c`'s `YOUR_GAME_DIR` is one it tries before asking.
+   `RECOMP_GAME_SETUP=1` makes it look only beside the program, as a new
+   install does.
 
 2. **Get both toolkits**
 
@@ -267,6 +287,7 @@ the disc has them. A `patch0.tre` that something else wrote is left alone.
 | Path | What it is |
 |------|------------|
 | `src/main.c` | Host entry point: loads the XBE, sets the runtime defaults below, calls the game's entry point |
+| `src/game_files.c` | Finds the player's USA disc files, checks `default.xbe`, and extracts a disc image (XDVDFS) into `game` |
 | `src/video_settings.c` | The Video Options page: builds `patch0.tre` from the disc's menus (its `.tre` and screen formats are described there), keeps `turok_settings.ini`, and applies the page's values through the history values the menu writes |
 | `src/recomp_manual.c` | Hand-written overrides: D3D's GetVisibilityTestResult (sub_00194B40) completes unfinished tests as visible; DirectSound's idle-voice handler (sub_001B23DD) ignores voices nobody owns (the emulated APU could report one, and quitting a level crashed); the shadow manager's constructor (sub_0017D5C0) takes its shadow distance and map size from `RECOMP_SHADOW_DISTANCE`/`RECOMP_SHADOW_MAP` |
 | `seeds/manual_seeds.json` | Functions only reached through pointers (XPP init) |
