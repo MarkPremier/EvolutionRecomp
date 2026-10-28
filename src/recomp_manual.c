@@ -328,6 +328,28 @@ void sub_00144560(void)
     sub_00144560_gen();
 }
 
+/* ── Sound volume (sub_000DD7E0) ── DIAG RECOMP_SNDVOL_TRACE ──
+ * A sound's volume: its level (+0x1C of the first argument) x a group
+ * factor (sub_000D5A20) x the fourth argument, as 20 log10 dB. */
+extern void sub_000DD7E0_gen(void);
+
+void sub_000DD7E0(void)
+{
+    static int trace = -1;
+    if (trace < 0) trace = getenv("RECOMP_SNDVOL_TRACE") != NULL;
+    if (trace) {
+        static unsigned n;
+        uint32_t a1 = TUROK_MEM32(g_esp + 4u), level_bits = a1 ? TUROK_MEM32(a1 + 0x1Cu) : 0, a4 = TUROK_MEM32(g_esp + 0x10u);
+        float level, scale;
+        memcpy(&level, &level_bits, 4);
+        memcpy(&scale, &a4, 4);
+        if (n++ < 200)
+            fprintf(stderr, "[SNDVOL] from %06X sound %08X level %.4f x %.4f (a2 %08X a3 %08X)\n", TUROK_MEM32(g_esp),
+                    a1, level, scale, TUROK_MEM32(g_esp + 8u), TUROK_MEM32(g_esp + 0xCu));
+    }
+    sub_000DD7E0_gen();
+}
+
 /* ── Manual function overrides ─────────────────────────────── */
 
 /*
