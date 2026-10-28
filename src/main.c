@@ -431,6 +431,16 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
      * they are silence: the intro and the menus had no music. */
     if (!getenv("RECOMP_APU_NO_REDIR"))
         _putenv_s("RECOMP_APU_NO_REDIR", "1");
+    /* The console's audio setting (XC_AUDIO), stereo by default.
+     * RECOMP_AUDIO_FLAGS=2 (Surround) or 0x10000 (Dolby Digital) is for
+     * diagnosis only: the EP's encoder needs a Y ROM the emulation lacks and
+     * parks itself, burning its whole cycle budget, while the GP still mixes
+     * stereo. */
+    {
+        extern void xbox_SetAudioFlags(uint32_t flags);
+        const char *flags = getenv("RECOMP_AUDIO_FLAGS");
+        if (flags && *flags) xbox_SetAudioFlags((uint32_t)strtoul(flags, NULL, 0));
+    }
     /* The window that shows the guest framebuffer; without it the title runs
      * and renders with nothing on screen. */
     if (!getenv("RECOMP_FB_WINDOW"))

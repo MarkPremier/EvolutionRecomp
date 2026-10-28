@@ -1,5 +1,5 @@
 diff --git a/src/apu/apu_core.c b/src/apu/apu_core.c
-index c5c8a86..8359e25 100644
+index c5c8a86..c5febed 100644
 --- a/src/apu/apu_core.c
 +++ b/src/apu/apu_core.c
 @@ -135,6 +135,8 @@ extern void xbox_worker_stack_free(int slot);
@@ -54,7 +54,38 @@ index c5c8a86..8359e25 100644
      xbox_worker_stack_free(slot);
      qemu_mutex_lock(&d->lock);
  
-@@ -569,8 +583,13 @@ static void throttle(MCPXAPUState *d)
+@@ -405,8 +419,9 @@ void mcpx_apu_monitor_finalize(MCPXAPUState *d)
+ /* Optional raw PCM capture for offline analysis (RECOMP_APU_WAV=<base>):
+  * <base>.emu.raw = EP/DSP mixdown before the software mixer,
+  * <base>.mix.raw = what is actually submitted to the audio backend. */
+-static FILE *g_wav_emu, *g_wav_mix;
++static FILE *g_wav_emu, *g_wav_mix, *g_wav_6ch;
+ static int g_wav_init;
++extern int mcpx_apu_surround_window(const int16_t (**frames)[6]);
+ 
+ static void apu_wav_capture(const int16_t (*buf)[2], int n, int mix)
+ {
+@@ -419,12 +434,19 @@ static void apu_wav_capture(const int16_t (*buf)[2], int n, int mix)
+             g_wav_emu = fopen(path, "wb");
+             snprintf(path, sizeof(path), "%s.mix.raw", base);
+             g_wav_mix = fopen(path, "wb");
++            snprintf(path, sizeof(path), "%s.6ch.raw", base);
++            g_wav_6ch = fopen(path, "wb");
+         }
+     }
+     FILE *f = mix ? g_wav_mix : g_wav_emu;
+     if (f) {
+         fwrite(buf, sizeof(int16_t) * 2, n, f);
+     }
++    if (!mix && g_wav_6ch) {
++        const int16_t (*surround)[6];
++        mcpx_apu_surround_window(&surround);
++        fwrite(surround, sizeof(int16_t) * 6, n, g_wav_6ch);
++    }
+ }
+ 
+ /* Declick: a sound that is cut off abruptly makes the mix step from a large
+@@ -569,8 +591,13 @@ static void throttle(MCPXAPUState *d)
  
      int64_t now_us = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
  
@@ -69,7 +100,7 @@ index c5c8a86..8359e25 100644
          d->next_frame_time_us = now_us;
      }
  
-@@ -592,6 +611,8 @@ static void throttle(MCPXAPUState *d)
+@@ -592,6 +619,8 @@ static void throttle(MCPXAPUState *d)
   * se_frame - Process one audio frame (VP -> GP -> EP pipeline)
   * ============================================================ */
  
@@ -78,7 +109,7 @@ index c5c8a86..8359e25 100644
  static void se_frame(MCPXAPUState *d)
  {
      mcpx_apu_update_dsp_preference(d);
-@@ -614,9 +635,31 @@ static void se_frame(MCPXAPUState *d)
+@@ -614,9 +643,31 @@ static void se_frame(MCPXAPUState *d)
      float mixbins[NUM_MIXBINS][NUM_SAMPLES_PER_FRAME];
      memset(mixbins, 0, sizeof(mixbins));
  
@@ -113,7 +144,7 @@ index c5c8a86..8359e25 100644
  
      d->ep_frame_div++;
  
-@@ -695,9 +738,16 @@ static void *mcpx_apu_frame_thread(void *arg)
+@@ -695,9 +746,16 @@ static void *mcpx_apu_frame_thread(void *arg)
           * thread starved there indefinitely: Burnout 3 froze on its vehicle
           * select, blocked in voice_lock at raised IRQL, which in turn held
           * off every USB interrupt. */
@@ -134,10 +165,18 @@ index c5c8a86..8359e25 100644
  
      qemu_mutex_unlock(&d->lock);
 diff --git a/src/apu/apu_dsp.c b/src/apu/apu_dsp.c
-index 5f65480..992a50c 100644
+index 5f65480..556d827 100644
 --- a/src/apu/apu_dsp.c
 +++ b/src/apu/apu_dsp.c
-@@ -252,6 +252,33 @@ static void dsp_frame_stub(MCPXAPUState *d,
+@@ -30,6 +30,7 @@
+ #include "dsp/dsp_state.h"
+ #include "dsp/debug.h"
+ 
++#include <math.h>
+ #include <stdlib.h>
+ #include <string.h>
+ #include <errno.h>
+@@ -252,6 +253,33 @@ static void dsp_frame_stub(MCPXAPUState *d,
      g_dbg.ep.cycles = 0;
  }
  
@@ -171,7 +210,31 @@ index 5f65480..992a50c 100644
  /* ============================================================
   * Real GP/EP DSP56300 pipeline (ported from xemu gp_ep.c)
   * ============================================================ */
-@@ -344,10 +371,35 @@ static void scatter_gather_rw(MCPXAPUState *d, hwaddr sge_base,
+@@ -298,9 +326,22 @@ static void scatter_gather_rw(MCPXAPUState *d, hwaddr sge_base,
+     unsigned int bytes_to_copy = TARGET_PAGE_SIZE - offset_in_page;
+ 
+     (void)d;
+-    (void)max_sge;
+ 
+     while (len > 0) {
++        /* Past the end of the page table: xemu asserts here. Writes are
++         * dropped and reads return silence, rather than taking whatever
++         * follows the table as a physical address. */
++        if (page_entry > max_sge) {
++            static int reported;
++            if (reported < 10) {
++                reported++;
++                fprintf(stderr, "[APU-DSP] DMA past the page table: sge base %08llX max %u, "
++                        "offset %06X len %zu %s\n", (unsigned long long)sge_base, max_sge,
++                        page_entry * TARGET_PAGE_SIZE + offset_in_page, len, dir ? "write" : "read");
++            }
++            if (!dir) memset(ptr, 0, len);
++            return;
++        }
+         uint32_t prd_address = ldl_le_phys(address_space_memory,
+                                            sge_base + page_entry * 8 + 0);
+         uint8_t *guest = dsp_ram_address(prd_address + offset_in_page,
+@@ -344,10 +385,79 @@ static void scatter_gather_rw(MCPXAPUState *d, hwaddr sge_base,
      }
  }
  
@@ -198,16 +261,60 @@ index 5f65480..992a50c 100644
 +    (void)d;
 +}
 +
++/* The GP's six-channel mix, as the title's DSP image (DirectSound's
++ * dsstdfx) leaves it for the EP: each frame it writes each channel's 32
++ * samples (24-bit DSP words) into its own ring in scratch memory, at
++ * RECOMP_APU_SURROUND_BASE (0x8000) + channel x RECOMP_APU_SURROUND_STRIDE
++ * (0x800), for the EP. Kept for RECOMP_APU_WAV's .6ch.raw: with Turok, in
++ * every XC_AUDIO mode only rings 0 and 2 (left, right) carry sound --
++ * DirectSound still pans to the front pair alone -- so this is not yet a
++ * route to 5.1 output. */
++static int16_t s_surround[256][6];
++static int s_surround_seen;
++static uint32_t s_surround_base = 0x8000, s_surround_stride = 0x800;
++
++static void surround_capture(MCPXAPUState *d, const uint8_t *ptr, uint32_t addr, size_t len)
++{
++    static int configured;
++    uint32_t ch, slot, i;
++    if (!configured) {
++        const char *base = getenv("RECOMP_APU_SURROUND_BASE"), *stride = getenv("RECOMP_APU_SURROUND_STRIDE");
++        if (base && *base) s_surround_base = (uint32_t)strtoul(base, NULL, 0);
++        if (stride && *stride) s_surround_stride = (uint32_t)strtoul(stride, NULL, 0);
++        configured = 1;
++    }
++    if (len != NUM_SAMPLES_PER_FRAME * 4 || addr < s_surround_base ||
++            addr >= s_surround_base + 6 * s_surround_stride)
++        return;
++    ch = (addr - s_surround_base) / s_surround_stride;
++    slot = (d->ep_frame_div % 8) * NUM_SAMPLES_PER_FRAME;
++    for (i = 0; i < NUM_SAMPLES_PER_FRAME; i++) {
++        uint32_t word;
++        memcpy(&word, ptr + 4 * i, 4);
++        s_surround[slot + i][ch] = (int16_t)(((int32_t)(word << 8)) >> 16);   /* 24 -> 16 bits */
++    }
++    s_surround_seen = 1;
++}
++
++/* The last window (256 frames) of the six-channel mix: FL FR C LFE SL SR
++ * as the rings are ordered. 0 if the GP has not written them. */
++int mcpx_apu_surround_window(const int16_t (**frames)[6])
++{
++    *frames = (const int16_t (*)[6])s_surround;
++    return s_surround_seen;
++}
++
  static void gp_scratch_rw(void *opaque, uint8_t *ptr, uint32_t addr, size_t len,
                            bool dir)
  {
 +    s_dsp_dma_count[0]++;
      MCPXAPUState *d = opaque;
++    if (dir) surround_capture(d, ptr, addr, len);
 +    scratch_trace(d, "GP", d->regs[NV_PAPU_GPSADDR], addr, len, dir);
      scatter_gather_rw(d, d->regs[NV_PAPU_GPSADDR], d->regs[NV_PAPU_GPSMAXSGE],
                        ptr, addr, len, dir);
  }
-@@ -355,7 +407,9 @@ static void gp_scratch_rw(void *opaque, uint8_t *ptr, uint32_t addr, size_t len,
+@@ -355,7 +465,9 @@ static void gp_scratch_rw(void *opaque, uint8_t *ptr, uint32_t addr, size_t len,
  static void ep_scratch_rw(void *opaque, uint8_t *ptr, uint32_t addr, size_t len,
                            bool dir)
  {
@@ -217,7 +324,7 @@ index 5f65480..992a50c 100644
      scatter_gather_rw(d, d->regs[NV_PAPU_EPSADDR], d->regs[NV_PAPU_EPSMAXSGE],
                        ptr, addr, len, dir);
  }
-@@ -396,6 +450,7 @@ static uint32_t circular_scatter_gather_rw(MCPXAPUState *d, hwaddr sge_base,
+@@ -396,6 +508,7 @@ static uint32_t circular_scatter_gather_rw(MCPXAPUState *d, hwaddr sge_base,
  static void gp_fifo_rw(void *opaque, uint8_t *ptr, unsigned int index,
                         size_t len, bool dir)
  {
@@ -225,7 +332,7 @@ index 5f65480..992a50c 100644
      MCPXAPUState *d = opaque;
      uint32_t base;
      uint32_t end;
-@@ -448,6 +503,7 @@ static bool ep_sink_samples(MCPXAPUState *d, uint8_t *ptr, size_t len)
+@@ -448,6 +561,7 @@ static bool ep_sink_samples(MCPXAPUState *d, uint8_t *ptr, size_t len)
  static void ep_fifo_rw(void *opaque, uint8_t *ptr, unsigned int index,
                         size_t len, bool dir)
  {
@@ -233,7 +340,16 @@ index 5f65480..992a50c 100644
      MCPXAPUState *d = opaque;
      uint32_t base;
      uint32_t end;
-@@ -623,6 +679,25 @@ static void dsp_frame_engine(MCPXAPUState *d,
+@@ -619,10 +733,52 @@ void mcpx_apu_ep_write(void *opaque, hwaddr addr, uint64_t val, unsigned int siz
+     }
+ }
+ 
++static double s_bin_energy[NUM_MIXBINS];
++static unsigned long s_bin_samples;
++
++#define DSP_FRAME_CYCLE_BUDGET 106667u   /* 160 MHz / 1500 frames a second */
++
+ static void dsp_frame_engine(MCPXAPUState *d,
                               float mixbins[NUM_MIXBINS][NUM_SAMPLES_PER_FRAME])
  {
      static bool logged_gp, logged_ep;
@@ -253,29 +369,61 @@ index 5f65480..992a50c 100644
 +        fprintf(stderr, "[APU-DSP]   dma: gp scratch %lu ep scratch %lu gp fifo r %lu w %lu ep fifo r %lu w %lu; "
 +                "gp pc %06X ep pc %06X\n", s_dsp_dma_count[0], s_dsp_dma_count[1], s_dsp_dma_count[2],
 +                s_dsp_dma_count[3], s_dsp_dma_count[4], s_dsp_dma_count[5], d->gp.dsp->core.pc, d->ep.dsp->core.pc);
++        {
++            /* Each active mixbin's RMS over the last second (full scale 1000). */
++            char line[1024];
++            int len = 0;
++            for (int b = 0; b < NUM_MIXBINS; b++)
++                if (s_bin_energy[b] > 0)
++                    len += snprintf(line + len, sizeof(line) - len, " %d:%.0f", b,
++                                    1000.0 * sqrt(s_bin_energy[b] / ((double)s_bin_samples + 1)));
++            fprintf(stderr, "[APU-DSP]   mixbins%s\n", len ? line : " silent");
++            memset(s_bin_energy, 0, sizeof(s_bin_energy));
++            s_bin_samples = 0;
++        }
 +        diag_next = GetTickCount() + 1000;
 +        gp_cycles_max = ep_cycles_max = 0;
++    }
++    if (diag) {
++        for (int b = 0; b < NUM_MIXBINS; b++)
++            for (int i = 0; i < NUM_SAMPLES_PER_FRAME; i++)
++                s_bin_energy[b] += (double)mixbins[b][i] * mixbins[b][i];
++        s_bin_samples += NUM_SAMPLES_PER_FRAME;
 +    }
  
      /* Write VP results to the GP DSP MIXBUF */
      for (int mixbin = 0; mixbin < NUM_MIXBINS; mixbin++) {
-@@ -646,6 +721,7 @@ static void dsp_frame_engine(MCPXAPUState *d,
+@@ -642,10 +798,16 @@ static void dsp_frame_engine(MCPXAPUState *d,
+         dsp_start_frame(d->gp.dsp);
+         d->gp.dsp->core.is_idle = false;
+         d->gp.dsp->core.cycle_count = 0;
++        /* Until it idles, but no longer than the chip could: 160 MHz over a
++         * 32-sample frame is ~106k cycles. A program that never idles (the
++         * EP's encoders, set up for surround or Dolby Digital output) held
++         * this thread, and the APU lock, forever. */
+         do {
              dsp_run(d->gp.dsp, 1000);
-         } while (!d->gp.dsp->core.is_idle && d->gp.realtime);
+-        } while (!d->gp.dsp->core.is_idle && d->gp.realtime);
++        } while (!d->gp.dsp->core.is_idle && d->gp.realtime &&
++                 d->gp.dsp->core.cycle_count < DSP_FRAME_CYCLE_BUDGET);
          g_dbg.gp.cycles = d->gp.dsp->core.cycle_count;
 +        if (d->gp.dsp->core.cycle_count > gp_cycles_max) gp_cycles_max = d->gp.dsp->core.cycle_count;
          mcpx_apu_dsp_gp_runs++;
          if (!logged_gp) {
              logged_gp = true;
-@@ -677,6 +753,7 @@ static void dsp_frame_engine(MCPXAPUState *d,
+@@ -675,8 +837,10 @@ static void dsp_frame_engine(MCPXAPUState *d,
+             d->ep.dsp->core.cycle_count = 0;
+             do {
                  dsp_run(d->ep.dsp, 1000);
-             } while (!d->ep.dsp->core.is_idle && d->ep.realtime);
+-            } while (!d->ep.dsp->core.is_idle && d->ep.realtime);
++            } while (!d->ep.dsp->core.is_idle && d->ep.realtime &&
++                     d->ep.dsp->core.cycle_count < 8 * DSP_FRAME_CYCLE_BUDGET);
              g_dbg.ep.cycles = d->ep.dsp->core.cycle_count;
 +            if (d->ep.dsp->core.cycle_count > ep_cycles_max) ep_cycles_max = d->ep.dsp->core.cycle_count;
              mcpx_apu_dsp_ep_runs++;
              if (!logged_ep) {
                  logged_ep = true;
-@@ -734,7 +811,18 @@ void mcpx_apu_update_dsp_preference(MCPXAPUState *d)
+@@ -734,7 +898,18 @@ void mcpx_apu_update_dsp_preference(MCPXAPUState *d)
      }
  
      if (preference) {
@@ -473,6 +621,489 @@ index 7c36737..6ee587e 100644
  
              if (!voice_get_mask(d, v, NV_PAVS_VOICE_PAR_STATE,
                                  NV_PAVS_VOICE_PAR_STATE_ACTIVE_VOICE)) {
+diff --git a/src/apu/dsp/dsp_cpu.c b/src/apu/dsp/dsp_cpu.c
+index 6f16f8a..f5cc103 100644
+--- a/src/apu/dsp/dsp_cpu.c
++++ b/src/apu/dsp/dsp_cpu.c
+@@ -157,12 +157,12 @@ static const OpcodeEntry nonparallel_opcodes[] = {
+     { "00000001010000001100d110", "and #xxxx, D", dis_and_long, emu_and_long },
+     { "00000000iiiiiiii101110EE", "andi #xx, D", dis_andi, emu_andi },
+     { "0000110000011101SiiiiiiD", "asl #ii, S2, D", dis_asl_imm, emu_asl_imm },
+-    { "0000110000011110010SsssD", "asl S1, S2, D", NULL, NULL },
++    { "0000110000011110010SsssD", "asl S1, S2, D", NULL, emu_asl_reg },
+     { "0000110000011100SiiiiiiD", "asr #ii, S2, D", dis_asr_imm, emu_asr_imm },
+-    { "0000110000011110011SsssD", "asr S1, S2, D", NULL, NULL },
++    { "0000110000011110011SsssD", "asr S1, S2, D", NULL, emu_asr_reg },
+     { "00001101000100000100CCCC", "bcc xxxx", dis_bcc_long, emu_bcc_long }, //??
+     { "00000101CCCC01aaaa0aaaaa", "bcc xxx", dis_bcc_imm, emu_bcc_imm },
+-    { "0000110100011RRR0100CCCC", "bcc Rn", NULL, NULL },
++    { "0000110100011RRR0100CCCC", "bcc Rn", NULL, emu_bcc_rn },
+     { "0000101101MMMRRR0S00bbbb", "bchg #n, [X or Y]:ea", dis_bchg_ea, emu_bchg_ea, match_MMMRRR },
+     { "0000101100aaaaaa0S00bbbb", "bchg #n, [X or Y]:aa", dis_bchg_aa, emu_bchg_aa },
+     { "0000101110pppppp0S00bbbb", "bchg #n, [X or Y]:pp", dis_bchg_pp, emu_bchg_pp },
+@@ -175,7 +175,7 @@ static const OpcodeEntry nonparallel_opcodes[] = {
+     { "0000101011DDDDDD010bbbbb", "bclr #n, D", dis_bclr_reg, emu_bclr_reg },
+     { "000011010001000011000000", "bra xxxx", dis_bra_long, emu_bra_long },
+     { "00000101000011aaaa0aaaaa", "bra xxx", dis_bra_imm, emu_bra_imm },
+-    { "0000110100011RRR11000000", "bra Rn", NULL, NULL },
++    { "0000110100011RRR11000000", "bra Rn", NULL, emu_bra_rn },
+     { "0000110010MMMRRR0S0bbbbb", "brclr #n, [X or Y]:ea, xxxx", NULL, NULL, match_MMMRRR },
+     { "0000110010aaaaaa1S0bbbbb", "brclr #n, [X or Y]:aa, xxxx", NULL, NULL },
+     { "0000110011pppppp0S0bbbbb", "brclr #n, [X or Y]:pp, xxxx", dis_brclr_pp, emu_brclr_pp },
+@@ -187,9 +187,9 @@ static const OpcodeEntry nonparallel_opcodes[] = {
+     { "0000110011pppppp0S1bbbbb", "brset #n, [X or Y]:pp, xxxx", dis_brset_pp, emu_brset_pp },
+     { "0000010010qqqqqq0S1bbbbb", "brset #n, [X or Y]:qq, xxxx", NULL, NULL },
+     { "0000110011DDDDDD101bbbbb", "brset #n, S, xxxx", dis_brset_reg, emu_brset_reg },
+-    { "00001101000100000000CCCC", "bscc xxxx", NULL, NULL },
+-    { "00000101CCCC00aaaa0aaaaa", "bscc xxx", NULL, NULL },
+-    { "0000110100011RRR0000CCCC", "bscc Rn", NULL, NULL },
++    { "00001101000100000000CCCC", "bscc xxxx", NULL, emu_bscc_long },
++    { "00000101CCCC00aaaa0aaaaa", "bscc xxx", NULL, emu_bscc_imm },
++    { "0000110100011RRR0000CCCC", "bscc Rn", NULL, emu_bscc_rn },
+     { "0000110110MMMRRR0S0bbbbb", "bsclr #n, [X or Y]:ea, xxxx", NULL, NULL, match_MMMRRR },
+     { "0000110110aaaaaa1S0bbbbb", "bsclr #n, [X or Y]:aa, xxxx", NULL, NULL },
+     { "0000010010qqqqqq1S0bbbbb", "bsclr #n, [X or Y]:qq, xxxx", NULL, NULL },
+@@ -202,7 +202,7 @@ static const OpcodeEntry nonparallel_opcodes[] = {
+     { "0000101011DDDDDD011bbbbb", "bset, #n, D", dis_bset_reg, emu_bset_reg },
+     { "000011010001000010000000", "bsr xxxx", dis_bsr_long, emu_bsr_long },
+     { "00000101000010aaaa0aaaaa", "bsr xxx", dis_bsr_imm, emu_bsr_imm },
+-    { "0000110100011RRR10000000", "bsr Rn", NULL, NULL },
++    { "0000110100011RRR10000000", "bsr Rn", NULL, emu_bsr_rn },
+     { "0000110110MMMRRR0S1bbbbb", "bsset #n, [X or Y]:ea, xxxx", NULL, NULL, match_MMMRRR },
+     { "0000110110aaaaaa1S1bbbbb", "bsset #n, [X or Y]:aa, xxxx", NULL, NULL },
+     { "0000110111pppppp0S1bbbbb", "bsset #n, [X or Y]:pp, xxxx", NULL, NULL },
+@@ -213,7 +213,7 @@ static const OpcodeEntry nonparallel_opcodes[] = {
+     { "0000101110pppppp0S10bbbb", "btst #n, [X or Y]:pp", dis_btst_pp, emu_btst_pp },
+     { "0000000101qqqqqq0S10bbbb", "btst #n, [X or Y]:qq", NULL, NULL },
+     { "0000101111DDDDDD0110bbbb", "btst #n, D", dis_btst_reg, emu_btst_reg },
+-    { "0000110000011110000000SD", "clb S, D", NULL, NULL },
++    { "0000110000011110000000SD", "clb S, D", NULL, emu_clb },
+     { "0000000101iiiiii1000d101", "cmp #xx, S2", dis_cmp_imm, emu_cmp_imm },
+     { "00000001010000001100d101", "cmp #xxxx, S2", dis_cmp_long, emu_cmp_long },
+     { "00001100000111111111gggd", "cmpu S1, S2", dis_cmpu, emu_cmpu },
+@@ -235,14 +235,14 @@ static const OpcodeEntry nonparallel_opcodes[] = {
+     { "000000000000000010001100", "enddo", NULL, emu_enddo },
+     { "0000000101iiiiii1000d011", "eor #xx, D", NULL, NULL },
+     { "00000001010000001100d011", "eor #xxxx, D", NULL, NULL },
+-    { "0000110000011010000sSSSD", "extract S1, S2, D", NULL, NULL },
+-    { "0000110000011000000s000D", "extract #CO, S2, D", NULL, NULL },
+-    { "0000110000011010100sSSSD", "extractu S1, S2, D", NULL, NULL },
+-    { "0000110000011000100s000D", "extractu #CO, S2, D", NULL, NULL },
++    { "0000110000011010000sSSSD", "extract S1, S2, D", NULL, emu_extract_reg },
++    { "0000110000011000000s000D", "extract #CO, S2, D", NULL, emu_extract_imm },
++    { "0000110000011010100sSSSD", "extractu S1, S2, D", NULL, emu_extractu_reg },
++    { "0000110000011000100s000D", "extractu #CO, S2, D", NULL, emu_extractu_imm },
+     { "000000000000000000000101", "ill", NULL, emu_illegal },
+     { "00000000000000000000100d", "inc D", NULL, emu_inc },
+-    { "00001100000110110qqqSSSD", "insert S1, S2, D", NULL, NULL },
+-    { "00001100000110010qqq000D", "insert #CO, S2, D", NULL, NULL },
++    { "00001100000110110qqqSSSD", "insert S1, S2, D", NULL, emu_insert_reg },
++    { "00001100000110010qqq000D", "insert #CO, S2, D", NULL, emu_insert_imm },
+     { "00001110CCCCaaaaaaaaaaaa", "jcc xxx", dis_jcc_imm, emu_jcc_imm },
+     { "0000101011MMMRRR1010CCCC", "jcc ea", dis_jcc_ea, emu_jcc_ea, match_MMMRRR },
+     { "0000101001MMMRRR1S00bbbb", "jclr #n, [X or Y]:ea, xxxx", dis_jclr_ea, emu_jclr_ea, match_MMMRRR },
+@@ -274,9 +274,9 @@ static const OpcodeEntry nonparallel_opcodes[] = {
+     { "0000010011000RRR000ddddd", "lra Rn, D", NULL, NULL },
+     { "0000010001000000010ddddd", "lra xxxx, D", NULL, NULL },
+     { "000011000001111010iiiiiD", "lsl #ii, D", dis_lsl_imm, emu_lsl_imm },
+-    { "00001100000111100001sssD", "lsl S, D", NULL, NULL },
+-    { "000011000001111011iiiiiD", "lsr #ii, D", NULL, NULL },
+-    { "00001100000111100011sssD", "lsr S, D", NULL, NULL },
++    { "00001100000111100001sssD", "lsl S, D", NULL, emu_lsl_reg },
++    { "000011000001111011iiiiiD", "lsr #ii, D", NULL, emu_lsr_imm },
++    { "00001100000111100011sssD", "lsr S, D", NULL, emu_lsr_reg },
+     { "00000100010MMRRR000ddddd", "lua ea, D", dis_lua, emu_lua },
+     { "0000010000aaaRRRaaaadddd", "lua (Rn + aa), D", dis_lua_rel, emu_lua_rel },
+     { "00000001000sssss11QQdk10", "mac S, #n, D", NULL, NULL },
+@@ -284,7 +284,7 @@ static const OpcodeEntry nonparallel_opcodes[] = {
+     { "00000001001001101sdkQQQQ", "mac_s_u S1, S2, D", NULL, NULL },
+     { "00000001000sssss11QQdk11", "macr S1, S2, D", NULL, NULL },
+     { "000000010100000111qqdk11", "macri #xxxx, S, D", NULL, NULL },
+-    { "00001100000110111000sssD", "merge S, D", NULL, NULL },
++    { "00001100000110111000sssD", "merge S, D", NULL, emu_merge },
+     { "0000101001110RRR1WDDDDDD", "move X:(Rn + xxxx) <-> R", dis_move_x_long, emu_move_x_long },
+     { "0000101101110RRR1WDDDDDD", "move Y:(Rn + xxxx) <-> R", NULL, NULL },
+     { "0000001aaaaaaRRR1a0WDDDD", "move X:(Rn + xxx) <-> R", dis_move_x_imm, emu_move_x_imm },
+@@ -310,7 +310,7 @@ static const OpcodeEntry nonparallel_opcodes[] = {
+     { "000000010100000111qqdk01", "mpyri #xxxx, S, D", NULL, NULL },
+     { "000000000000000000000000", "nop", NULL, emu_nop},
+     { "0000000111011RRR0001d101", "norm Rn, D", dis_norm, emu_norm },
+-    { "00001100000111100010sssD", "normf S, D", NULL, NULL },
++    { "00001100000111100010sssD", "normf S, D", NULL, emu_normf },
+     { "0000000101iiiiii1000d010", "or #xx, D", NULL, NULL },
+     { "00000001010000001100d010", "or #xxxx, D", dis_or_long, emu_or_long },
+     { "00000000iiiiiiii111110EE", "ori #xx, D", dis_ori, emu_ori },
+@@ -608,6 +608,40 @@ void dsp56k_execute_instruction(dsp_core_t* dsp)
+ 
+     bool tracing = TRACE_DSP_DISASM || trace_event_get_state(TRACE_DSP56K_EXECUTE_INSTRUCTION_DISASM);
+ 
++    /* RECOMP_DSP_TRACE=<skip>,<count>[,gp]: the EP's (or GP's) instructions
++     * <skip> onwards, disassembled with the accumulators, to stderr. */
++    {
++        static int configured;
++        static unsigned long long skip, count, executed;
++        static int want_gp;
++        if (!configured) {
++            const char *e = getenv("RECOMP_DSP_TRACE");
++            configured = 1;
++            if (e) {
++                skip = strtoull(e, (char **)&e, 0);
++                if (*e == ',') count = strtoull(e + 1, (char **)&e, 0);
++                if (*e == ',') want_gp = 1;
++            }
++        }
++        static FILE *out;
++        if (count && (bool)dsp->is_gp == (bool)want_gp && executed++ >= skip && executed <= skip + count) {
++            if (!out) {
++                out = fopen("dsp_trace.txt", "w");
++                if (out) setvbuf(out, NULL, _IOFBF, 1 << 20);
++                else out = stderr;
++            }
++            if (executed == skip + count) fflush(out);
++            if (disasm_instruction(dsp, DSP_TRACE_MODE))
++                fprintf(out, "[DSPT] %04X %06X %-40s A=%02X:%06X:%06X B=%02X:%06X:%06X X0=%06X X1=%06X Y0=%06X Y1=%06X SR=%04X R0=%04X R1=%04X R4=%04X\n",
++                        dsp->pc, dsp->cur_inst, disasm_get_instruction_text(dsp),
++                        dsp->registers[DSP_REG_A2], dsp->registers[DSP_REG_A1], dsp->registers[DSP_REG_A0],
++                        dsp->registers[DSP_REG_B2], dsp->registers[DSP_REG_B1], dsp->registers[DSP_REG_B0],
++                        dsp->registers[DSP_REG_X0], dsp->registers[DSP_REG_X1], dsp->registers[DSP_REG_Y0],
++                        dsp->registers[DSP_REG_Y1], dsp->registers[DSP_REG_SR], dsp->registers[DSP_REG_R0],
++                        dsp->registers[DSP_REG_R1], dsp->registers[DSP_REG_R4]);
++        }
++    }
++
+     /* Disasm current instruction ? (trace mode only) */
+     if (tracing) {
+         disasm_return = disasm_instruction(dsp, DSP_TRACE_MODE);
+@@ -947,7 +981,10 @@ uint32_t dsp56k_read_memory(dsp_core_t* dsp, int space, uint32_t address)
+             }
+         }
+     } else if (space == DSP_SPACE_Y) {
+-        assert(address < DSP_YRAM_SIZE);
++        /* The EP's Dolby Digital encoder reads tables above its 256 words of
++         * Y RAM (a Y ROM, presumably); the read used to run off the array. */
++        if (address >= DSP_YRAM_SIZE)
++            return 0;
+         return dsp->yram[address];
+     } else if (space == DSP_SPACE_P) {
+         return read_memory_p(dsp, address);
+@@ -1215,9 +1252,11 @@ static uint16_t dsp_asr56(uint32_t *dest, int n)
+ {
+     /* Shift right dest n bits: D>>=n */
+ 
+-    uint64_t dest_v = dest[2] | ((uint64_t)dest[1] << 24) | ((uint64_t)dest[0] << 48);
++    /* Arithmetic: the accumulator's sign (bit 55) fills from the left. */
++    int64_t dest_v = (int64_t)((dest[2] | ((uint64_t)dest[1] << 24) | ((uint64_t)dest[0] << 48)) << 8) >> 8;
+ 
+-    uint16_t carry = (dest_v >> (n-1)) & 1;
++    if (n > 55) n = 55;
++    uint16_t carry = n ? (dest_v >> (n-1)) & 1 : 0;
+ 
+     dest_v >>= n;
+     dest[2] = dest_v & BITMASK(24);
+diff --git a/src/apu/dsp/dsp_dma.c b/src/apu/dsp/dsp_dma.c
+index f415bf3..a0f8010 100644
+--- a/src/apu/dsp/dsp_dma.c
++++ b/src/apu/dsp/dsp_dma.c
+@@ -201,6 +201,19 @@ static void dsp_dma_run(DSPDMAState *s)
+ 
+         size_t transfer_size = count * item_size;
+ 
++        /* RECOMP_APU_DSPDMA_TRACE: the first DMA nodes each DSP runs. */
++        {
++            static int on = -1;
++            static int logged[2];
++            if (on < 0) on = getenv("RECOMP_APU_DSPDMA_TRACE") != NULL;
++            if (on && logged[s->core->is_gp ? 1 : 0]++ < 200)
++                fprintf(stderr, "[DSPDMA] %s %s %s:%04X count %u (ch %u) buf %X fmt %u scratch base %06X off %06X size %06X%s\n",
++                        s->core->is_gp ? "GP" : "EP", direction ? "dsp->" : "->dsp",
++                        mem_space == DSP_SPACE_X ? "x" : mem_space == DSP_SPACE_Y ? "y" : "p",
++                        mem_address, count, channel_count, buf_id, format, scratch_base,
++                        scratch_offset, scratch_size, dsp_interleave ? " interleaved" : "");
++        }
++
+         // FIXME: Remove this intermediate buffer
+         static uint8_t *scratch_buf = NULL;
+         static size_t scratch_buf_size = 0;
+diff --git a/src/apu/dsp/dsp_emu.c.inc b/src/apu/dsp/dsp_emu.c.inc
+index b512707..6af323c 100644
+--- a/src/apu/dsp/dsp_emu.c.inc
++++ b/src/apu/dsp/dsp_emu.c.inc
+@@ -27,8 +27,14 @@ typedef void (*emu_func_t)(dsp_core_t* dsp);
+ 
+ static void emu_undefined(dsp_core_t* dsp)
+ {
++    static int reported;
+     dsp->cur_inst_len = 0;
+-    printf("Dsp: 0x%04x: 0x%06x Illegal instruction\n",dsp->pc, dsp->cur_inst);
++    /* Report only the first few: this runs on the audio thread with the APU
++     * lock held, and an unthrottled flood of prints stalls the whole game. */
++    if (reported < 20) {
++        reported++;
++        fprintf(stderr, "Dsp: 0x%04x: 0x%06x Illegal instruction\n", dsp->pc, dsp->cur_inst);
++    }
+     /* Add some artificial CPU cycles to avoid being stuck in an infinite loop */
+     dsp->instr_cycle += 100;
+     if (dsp->exception_debugging) {
+@@ -5968,6 +5974,101 @@ static void emu_asr_imm(dsp_core_t* dsp)
+     emu_ccr_update_e_u_n_z(dsp, dest[0], dest[1], dest[2]);
+ }
+ 
++/* Shifts by a register amount, lsr by an immediate, clb and normf: the
++ * 0x0C1E group, which the EP's Dolby Digital encoder uses. The amount
++ * register (sss) is A1, B1, X0, Y0, X1 or Y1. */
++static uint32_t dsp_shift_amount_reg(dsp_core_t* dsp)
++{
++    static const int regs[8] = { DSP_REG_A1, DSP_REG_B1, DSP_REG_A1, DSP_REG_B1,
++                                 DSP_REG_X0, DSP_REG_Y0, DSP_REG_X1, DSP_REG_Y1 };
++    return dsp->registers[regs[(dsp->cur_inst >> 1) & 7]] & BITMASK(24);
++}
++
++static void dsp_shift_acc(dsp_core_t* dsp, int src, int dst, int left, uint32_t n)
++{
++    uint32_t dest[3];
++    uint16_t newsr;
++
++    dest[0] = dsp->registers[src ? DSP_REG_B2 : DSP_REG_A2];
++    dest[1] = dsp->registers[src ? DSP_REG_B1 : DSP_REG_A1];
++    dest[2] = dsp->registers[src ? DSP_REG_B0 : DSP_REG_A0];
++    if (n > 56) n = 56;
++    newsr = left ? dsp_asl56(dest, n) : dsp_asr56(dest, n);
++    dsp->registers[dst ? DSP_REG_B2 : DSP_REG_A2] = dest[0];
++    dsp->registers[dst ? DSP_REG_B1 : DSP_REG_A1] = dest[1];
++    dsp->registers[dst ? DSP_REG_B0 : DSP_REG_A0] = dest[2];
++
++    dsp->registers[DSP_REG_SR] &= BITMASK(16)-((1<<DSP_SR_C)|(1<<DSP_SR_V));
++    dsp->registers[DSP_REG_SR] |= newsr & ((1<<DSP_SR_C)|(1<<DSP_SR_V)|(1<<DSP_SR_L));
++    emu_ccr_update_e_u_n_z(dsp, dest[0], dest[1], dest[2]);
++}
++
++static void emu_asl_reg(dsp_core_t* dsp)
++{
++    dsp_shift_acc(dsp, (dsp->cur_inst >> 4) & 1, dsp->cur_inst & 1, 1, dsp_shift_amount_reg(dsp) & BITMASK(6));
++}
++
++static void emu_asr_reg(dsp_core_t* dsp)
++{
++    dsp_shift_acc(dsp, (dsp->cur_inst >> 4) & 1, dsp->cur_inst & 1, 0, dsp_shift_amount_reg(dsp) & BITMASK(6));
++}
++
++/* Logical shifts of D1 only, as lsl/lsr #ii do one bit at a time. */
++static void dsp_shift_d1(dsp_core_t* dsp, int left, uint32_t n)
++{
++    int d1 = (dsp->cur_inst & 1) ? DSP_REG_B1 : DSP_REG_A1;
++    uint32_t v = dsp->registers[d1] & BITMASK(24), carry = 0;
++
++    if (n > 24) n = 24;
++    if (n) {
++        carry = left ? (v >> (24 - n)) & 1 : (v >> (n - 1)) & 1;
++        v = n == 24 ? 0 : (left ? (v << n) & BITMASK(24) : v >> n);
++    }
++    dsp->registers[d1] = v;
++    dsp->registers[DSP_REG_SR] &= BITMASK(16)-((1<<DSP_SR_C)|(1<<DSP_SR_N)|(1<<DSP_SR_Z)|(1<<DSP_SR_V));
++    dsp->registers[DSP_REG_SR] |= carry << DSP_SR_C;
++    dsp->registers[DSP_REG_SR] |= ((v >> 23) & 1) << DSP_SR_N;
++    dsp->registers[DSP_REG_SR] |= (v == 0) << DSP_SR_Z;
++}
++
++static void emu_lsr_imm(dsp_core_t* dsp) { dsp_shift_d1(dsp, 0, (dsp->cur_inst >> 1) & BITMASK(5)); }
++static void emu_lsl_reg(dsp_core_t* dsp) { dsp_shift_d1(dsp, 1, dsp_shift_amount_reg(dsp) & BITMASK(5)); }
++static void emu_lsr_reg(dsp_core_t* dsp) { dsp_shift_d1(dsp, 0, dsp_shift_amount_reg(dsp) & BITMASK(5)); }
++
++/* clb: 9 minus the number of leading sign bits of S's 56 bits -- the shift
++ * normf needs to normalize it -- into D1, D2 sign-extended, D0 cleared.
++ * Zero (or all ones) gives 0. */
++static void emu_clb(dsp_core_t* dsp)
++{
++    int src = (dsp->cur_inst >> 1) & 1, dst = dsp->cur_inst & 1;
++    uint64_t v = ((uint64_t)(dsp->registers[src ? DSP_REG_B2 : DSP_REG_A2] & 0xff) << 48) |
++                 ((uint64_t)(dsp->registers[src ? DSP_REG_B1 : DSP_REG_A1] & 0xffffff) << 24) |
++                 (uint64_t)(dsp->registers[src ? DSP_REG_B0 : DSP_REG_A0] & 0xffffff);
++    uint32_t sign = (v >> 55) & 1, count = 0, result;
++    int bit;
++
++    for (bit = 55; bit >= 0 && ((v >> bit) & 1) == sign; bit--)
++        count++;
++    result = count >= 56 ? 0 : (uint32_t)(9 - (int)count) & BITMASK(24);
++    dsp->registers[dst ? DSP_REG_B2 : DSP_REG_A2] = (result >> 23) & 1 ? 0xff : 0;
++    dsp->registers[dst ? DSP_REG_B1 : DSP_REG_A1] = result;
++    dsp->registers[dst ? DSP_REG_B0 : DSP_REG_A0] = 0;
++    dsp->registers[DSP_REG_SR] &= BITMASK(16)-((1<<DSP_SR_N)|(1<<DSP_SR_Z)|(1<<DSP_SR_V));
++    dsp->registers[DSP_REG_SR] |= ((result >> 23) & 1) << DSP_SR_N;
++    dsp->registers[DSP_REG_SR] |= (result == 0) << DSP_SR_Z;
++}
++
++/* normf: D shifted right by S if S is positive, left by -S if negative. */
++static void emu_normf(dsp_core_t* dsp)
++{
++    int32_t amount = dsp_signextend(24, dsp_shift_amount_reg(dsp));
++    int d = dsp->cur_inst & 1;
++    if (amount >= 0)
++        dsp_shift_acc(dsp, d, d, 0, (uint32_t)amount);
++    else
++        dsp_shift_acc(dsp, d, d, 1, (uint32_t)-amount);
++}
++
+ static void emu_bcc_long(dsp_core_t* dsp)
+ {
+     uint32_t xxxx = read_memory_p(dsp, dsp->pc+1);
+@@ -6355,6 +6456,71 @@ static void emu_bsr_imm(dsp_core_t* dsp)
+     dsp->instr_cycle += 2;
+ }
+ 
++/* Conditional branches to subroutine, and the PC-relative register forms of
++ * the branches; the EP's Dolby Digital encoder uses bscc. */
++static void dsp_branch_sub(dsp_core_t* dsp, uint32_t displacement)
++{
++    dsp_stack_push(dsp, dsp->pc+dsp->cur_inst_len, dsp->registers[DSP_REG_SR], 0);
++    dsp->pc += displacement;
++    dsp->pc &= BITMASK(24);
++    dsp->cur_inst_len = 0;
++}
++
++static void emu_bscc_long(dsp_core_t* dsp)
++{
++    uint32_t xxxx = read_memory_p(dsp, dsp->pc+1);
++    dsp->cur_inst_len++;
++
++    if (emu_calc_cc(dsp, dsp->cur_inst & BITMASK(4)))
++        dsp_branch_sub(dsp, xxxx);
++    dsp->instr_cycle += 4;
++}
++
++static void emu_bscc_imm(dsp_core_t* dsp)
++{
++    uint32_t xxx = (dsp->cur_inst & BITMASK(5))
++                 + ((dsp->cur_inst & (BITMASK(4) << 6)) >> 1);
++
++    if (emu_calc_cc(dsp, (dsp->cur_inst >> 12) & BITMASK(4)))
++        dsp_branch_sub(dsp, dsp_signextend(9, xxx));
++    dsp->instr_cycle += 2;
++}
++
++static uint32_t dsp_branch_rn(dsp_core_t* dsp)
++{
++    return dsp->registers[DSP_REG_R0 + ((dsp->cur_inst >> 8) & BITMASK(3))];
++}
++
++static void emu_bscc_rn(dsp_core_t* dsp)
++{
++    if (emu_calc_cc(dsp, dsp->cur_inst & BITMASK(4)))
++        dsp_branch_sub(dsp, dsp_branch_rn(dsp));
++    dsp->instr_cycle += 2;
++}
++
++static void emu_bsr_rn(dsp_core_t* dsp)
++{
++    dsp_branch_sub(dsp, dsp_branch_rn(dsp));
++    dsp->instr_cycle += 2;
++}
++
++static void emu_bcc_rn(dsp_core_t* dsp)
++{
++    if (emu_calc_cc(dsp, dsp->cur_inst & BITMASK(4))) {
++        dsp->pc += dsp_branch_rn(dsp);
++        dsp->pc &= BITMASK(24);
++        dsp->cur_inst_len = 0;
++    }
++}
++
++static void emu_bra_rn(dsp_core_t* dsp)
++{
++    dsp->pc += dsp_branch_rn(dsp);
++    dsp->pc &= BITMASK(24);
++    dsp->cur_inst_len = 0;
++    dsp->instr_cycle += 2;
++}
++
+ static void emu_bset_ea(dsp_core_t* dsp)
+ {
+     uint32_t memspace, addr, value, newcarry, numbit;
+@@ -6841,6 +7007,85 @@ static void emu_enddo(dsp_core_t* dsp)
+     dsp_stack_pop(dsp, &dsp->registers[DSP_REG_LA], &dsp->registers[DSP_REG_LC]);
+ }
+ 
++/* Bit-field instructions (DSP56300): extract, extractu, insert, merge. The
++ * control word, a register or the extension word (#CO), has the field's
++ * offset in bits 5-0 and its width in bits 17-12, over the 56-bit
++ * accumulator. Dolby's encoders on the EP use them (DirectSound set up for
++ * surround or Dolby Digital output); the port had them unimplemented. */
++static uint64_t dsp_acc_get(dsp_core_t* dsp, int b)
++{
++    return ((uint64_t)(dsp->registers[b ? DSP_REG_B2 : DSP_REG_A2] & 0xff) << 48) |
++           ((uint64_t)(dsp->registers[b ? DSP_REG_B1 : DSP_REG_A1] & 0xffffff) << 24) |
++           (uint64_t)(dsp->registers[b ? DSP_REG_B0 : DSP_REG_A0] & 0xffffff);
++}
++
++static void dsp_acc_set(dsp_core_t* dsp, int b, uint64_t v)
++{
++    dsp->registers[b ? DSP_REG_B2 : DSP_REG_A2] = (uint32_t)(v >> 48) & 0xff;
++    dsp->registers[b ? DSP_REG_B1 : DSP_REG_A1] = (uint32_t)(v >> 24) & 0xffffff;
++    dsp->registers[b ? DSP_REG_B0 : DSP_REG_A0] = (uint32_t)v & 0xffffff;
++    dsp->registers[DSP_REG_SR] &= BITMASK(16) - ((1 << DSP_SR_C) | (1 << DSP_SR_V));
++    emu_ccr_update_e_u_n_z(dsp, dsp->registers[b ? DSP_REG_B2 : DSP_REG_A2],
++                           dsp->registers[b ? DSP_REG_B1 : DSP_REG_A1],
++                           dsp->registers[b ? DSP_REG_B0 : DSP_REG_A0]);
++}
++
++/* The SSS/qqq register field of these instructions. */
++static uint32_t dsp_bitfield_reg(dsp_core_t* dsp, uint32_t field)
++{
++    static const int regs[8] = { DSP_REG_A0, DSP_REG_B0, DSP_REG_A1, DSP_REG_B1,
++                                 DSP_REG_X0, DSP_REG_Y0, DSP_REG_X1, DSP_REG_Y1 };
++    return dsp->registers[regs[field & 7]] & 0xffffff;
++}
++
++static void dsp_extract(dsp_core_t* dsp, uint32_t control, int signed_field)
++{
++    uint32_t offset = control & 0x3f, width = (control >> 12) & 0x3f;
++    int src = (dsp->cur_inst >> 4) & 1, dst = dsp->cur_inst & 1;
++    uint64_t v = offset < 56 ? dsp_acc_get(dsp, src) >> offset : 0;
++    if (width < 56) {
++        v &= ((uint64_t)1 << width) - 1;
++        if (signed_field && width && (v >> (width - 1)) & 1) v |= ~(((uint64_t)1 << width) - 1);
++    }
++    dsp_acc_set(dsp, dst, v & 0x00ffffffffffffffULL);
++}
++
++static void dsp_insert(dsp_core_t* dsp, uint32_t control)
++{
++    uint32_t offset = control & 0x3f, width = (control >> 12) & 0x3f;
++    int dst = dsp->cur_inst & 1;
++    uint64_t field = dsp_bitfield_reg(dsp, (dsp->cur_inst >> 4) & 7);
++    uint64_t mask = width >= 56 ? 0x00ffffffffffffffULL : (((uint64_t)1 << width) - 1);
++    uint64_t v = dsp_acc_get(dsp, dst);
++    if (offset < 56) v = (v & ~(mask << offset)) | ((field & mask) << offset);
++    dsp_acc_set(dsp, dst, v & 0x00ffffffffffffffULL);
++}
++
++static uint32_t dsp_extension_word(dsp_core_t* dsp)
++{
++    uint32_t word = read_memory_p(dsp, dsp->pc + 1);
++    dsp->cur_inst_len++;
++    return word;
++}
++
++static void emu_extract_reg(dsp_core_t* dsp)  { dsp_extract(dsp, dsp_bitfield_reg(dsp, (dsp->cur_inst >> 1) & 7), 1); }
++static void emu_extract_imm(dsp_core_t* dsp)  { dsp_extract(dsp, dsp_extension_word(dsp), 1); }
++static void emu_extractu_reg(dsp_core_t* dsp) { dsp_extract(dsp, dsp_bitfield_reg(dsp, (dsp->cur_inst >> 1) & 7), 0); }
++static void emu_extractu_imm(dsp_core_t* dsp) { dsp_extract(dsp, dsp_extension_word(dsp), 0); }
++static void emu_insert_reg(dsp_core_t* dsp)   { dsp_insert(dsp, dsp_bitfield_reg(dsp, (dsp->cur_inst >> 1) & 7)); }
++static void emu_insert_imm(dsp_core_t* dsp)   { dsp_insert(dsp, dsp_extension_word(dsp)); }
++
++static void emu_merge(dsp_core_t* dsp)
++{
++    int dst = dsp->cur_inst & 1;
++    uint32_t src = dsp_bitfield_reg(dsp, (dsp->cur_inst >> 1) & 7);
++    uint32_t d1 = dsp->registers[dst ? DSP_REG_B1 : DSP_REG_A1] & 0xffffff;
++    uint64_t v = dsp_acc_get(dsp, dst);
++    d1 = ((src & 0xfff) << 12) | (d1 & 0xfff);
++    v = (v & ~((uint64_t)0xffffff << 24)) | ((uint64_t)d1 << 24);
++    dsp_acc_set(dsp, dst, v);
++}
++
+ static void emu_illegal(dsp_core_t* dsp)
+ {
+     /* Raise interrupt p:0x003e */
 diff --git a/src/input/xinput_device.c b/src/input/xinput_device.c
 index 3c7bdd4..2f1f452 100644
 --- a/src/input/xinput_device.c
@@ -1290,6 +1921,41 @@ index 93dc2ec..200b507 100644
          t_guest_irql = v;
          if (old >= DISPATCH_LEVEL)
              InterlockedDecrement(&g_guest_levels[old]);
+diff --git a/src/kernel/kernel_xbox.c b/src/kernel/kernel_xbox.c
+index 6f8b112..3add01b 100644
+--- a/src/kernel/kernel_xbox.c
++++ b/src/kernel/kernel_xbox.c
+@@ -12,6 +12,14 @@
+ #include "kernel.h"
+ #include <string.h>
+ 
++/* XC_AUDIO's value (xbox_SetAudioFlags), read by DirectSound at start-up. */
++static uint32_t g_xbox_audio_flags;
++
++void xbox_SetAudioFlags(uint32_t flags)
++{
++    g_xbox_audio_flags = flags;
++}
++
+ /* ============================================================================
+  * Exported Data Objects
+  *
+@@ -177,10 +185,12 @@ NTSTATUS __stdcall xbox_ExQueryNonVolatileSetting(
+         break;
+ 
+     case XC_AUDIO:
+-        /* Stereo PCM matches the two-channel host output. 1 means mono;
+-         * advertising AC3 requires an encoded-output path. */
++        /* Stereo PCM (0) unless the host set otherwise (xbox_SetAudioFlags):
++         * 1 mono, 2 surround (matrixed), 0x10000 Dolby Digital (AC3). With
++         * AC3 DirectSound mixes 5.1, which a host can play as six channels
++         * (the GP's mix) instead of encoding it. */
+         if (ValueLength >= sizeof(ULONG)) {
+-            *(PULONG)Value = 0x00000000;
++            *(PULONG)Value = g_xbox_audio_flags;
+             if (Type) *Type = 4; /* REG_DWORD */
+             if (ResultLength) *ResultLength = sizeof(ULONG);
+         }
 diff --git a/src/kernel/nv2a_gpu.h b/src/kernel/nv2a_gpu.h
 index b8d804a..bc3fdb1 100644
 --- a/src/kernel/nv2a_gpu.h
