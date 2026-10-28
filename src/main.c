@@ -222,7 +222,9 @@ static void print_guest_context(void *rip)
  * Declared rather than included so this does not depend on src/apu being on
  * the include path. */
 typedef struct MCPXAPUState MCPXAPUState;
-extern MCPXAPUState *mcpx_apu_init_standalone(uint8_t *ram_ptr);
+typedef uint8_t *(*APUPhysicalMemoryMapper)(uint64_t physical, uint32_t bytes);
+extern MCPXAPUState *mcpx_apu_init_standalone_mapped(uint8_t *ram_ptr, APUPhysicalMemoryMapper mapper);
+extern uint8_t *xbox_ApuPhysicalPointer(uint64_t physical, uint32_t bytes);
 extern MCPXAPUState *g_apu_state;
 extern bool apu_hook_handle_mmio(PCONTEXT ctx, uintptr_t fault_addr,
                                  uint32_t fault_xbox_va, int is_write);
@@ -422,6 +424,13 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
      * APU behind it. */
     if (!getenv("RECOMP_AC97_READY"))
         _putenv_s("RECOMP_AC97_READY", "1");
+    /* The APU reads guest memory through the kernel's resolver (see the
+     * mcpx_apu_init_standalone_mapped call). Its redirect of a page a live
+     * contiguous block owns sent the music's stream buffers -- ordinary RAM
+     * sharing a number with such a block -- to the contiguous bank, where
+     * they are silence: the intro and the menus had no music. */
+    if (!getenv("RECOMP_APU_NO_REDIR"))
+        _putenv_s("RECOMP_APU_NO_REDIR", "1");
     /* The window that shows the guest framebuffer; without it the title runs
      * and renders with nothing on screen. */
     if (!getenv("RECOMP_FB_WINDOW"))
@@ -555,10 +564,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
      * Gated on the same variable that unmaps its registers, because the two
      * halves are useless apart: a trap with no model declines every access,
      * and a model nothing traps into never sees a register. The APU walks
-     * Xbox physical RAM to find voice buffers, so it gets the guest RAM
-     * base. */
+     * Xbox physical RAM to find voice buffers. The memory layout keeps
+     * contiguous allocations (DirectSound's buffers among them) in a bank of
+     * their own, so every APU access, the voices' as well as the DSP's, goes
+     * through the kernel's resolver; the flat guess read unrelated RAM. */
     if (getenv("RECOMP_AC97_READY")) {
-        g_apu_state = mcpx_apu_init_standalone((uint8_t *)xbox_GetMemoryBase());
+        g_apu_state = mcpx_apu_init_standalone_mapped((uint8_t *)xbox_GetMemoryBase(), xbox_ApuPhysicalPointer);
         fprintf(stderr, "[BOOT] emulated APU %s\n",
                 g_apu_state ? "up" : "FAILED to initialise");
     }

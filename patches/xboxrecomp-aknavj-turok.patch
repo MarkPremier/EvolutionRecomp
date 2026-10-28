@@ -1,5 +1,5 @@
 diff --git a/src/apu/apu_core.c b/src/apu/apu_core.c
-index c5c8a86..e703fc0 100644
+index c5c8a86..8359e25 100644
 --- a/src/apu/apu_core.c
 +++ b/src/apu/apu_core.c
 @@ -135,6 +135,8 @@ extern void xbox_worker_stack_free(int slot);
@@ -54,8 +54,248 @@ index c5c8a86..e703fc0 100644
      xbox_worker_stack_free(slot);
      qemu_mutex_lock(&d->lock);
  
+@@ -569,8 +583,13 @@ static void throttle(MCPXAPUState *d)
+ 
+     int64_t now_us = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
+ 
++    /* Behind schedule, the frames are made at once until it is caught up:
++     * a wait that oversleeps (the system timer can be 15 ms coarse) must not
++     * cost audio time, or the output runs slower than real time and the
++     * queue drains (crackling). Only a stall of more than eight packets
++     * starts the schedule afresh. */
+     if (d->next_frame_time_us == 0 ||
+-        now_us - d->next_frame_time_us > EP_FRAME_US) {
++        now_us - d->next_frame_time_us > 8 * EP_FRAME_US) {
+         d->next_frame_time_us = now_us;
+     }
+ 
+@@ -592,6 +611,8 @@ static void throttle(MCPXAPUState *d)
+  * se_frame - Process one audio frame (VP -> GP -> EP pipeline)
+  * ============================================================ */
+ 
++static double g_apu_yield_s;     /* RECOMP_APU_DIAG: time given away to the title */
++
+ static void se_frame(MCPXAPUState *d)
+ {
+     mcpx_apu_update_dsp_preference(d);
+@@ -614,9 +635,31 @@ static void se_frame(MCPXAPUState *d)
+     float mixbins[NUM_MIXBINS][NUM_SAMPLES_PER_FRAME];
+     memset(mixbins, 0, sizeof(mixbins));
+ 
+-    mcpx_apu_vp_frame(d, mixbins);
+-    mcpx_apu_dsp_frame(d, mixbins);
+-    mcpx_apu_monitor_frame(d);
++    {
++        /* RECOMP_APU_DIAG: where a second's frames went. */
++        static LARGE_INTEGER frequency, report;
++        static double vp_s, dsp_s, out_s;
++        static int diag = -1;
++        LARGE_INTEGER t0, t1, t2, t3;
++        if (diag < 0) diag = getenv("RECOMP_APU_DIAG") != NULL;
++        if (!frequency.QuadPart) QueryPerformanceFrequency(&frequency);
++        QueryPerformanceCounter(&t0);
++        mcpx_apu_vp_frame(d, mixbins);
++        QueryPerformanceCounter(&t1);
++        mcpx_apu_dsp_frame(d, mixbins);
++        QueryPerformanceCounter(&t2);
++        mcpx_apu_monitor_frame(d);
++        QueryPerformanceCounter(&t3);
++        vp_s += (double)(t1.QuadPart - t0.QuadPart) / frequency.QuadPart;
++        dsp_s += (double)(t2.QuadPart - t1.QuadPart) / frequency.QuadPart;
++        out_s += (double)(t3.QuadPart - t2.QuadPart) / frequency.QuadPart;
++        if (diag && t3.QuadPart - report.QuadPart >= frequency.QuadPart) {
++            fprintf(stderr, "[APU-TIME] last second: vp %.0f ms dsp %.0f ms output %.0f ms yield %.0f ms\n",
++                    vp_s * 1000, dsp_s * 1000, out_s * 1000, g_apu_yield_s * 1000);
++            vp_s = dsp_s = out_s = g_apu_yield_s = 0;
++            report = t3;
++        }
++    }
+ 
+     d->ep_frame_div++;
+ 
+@@ -695,9 +738,16 @@ static void *mcpx_apu_frame_thread(void *arg)
+          * thread starved there indefinitely: Burnout 3 froze on its vehicle
+          * select, blocked in voice_lock at raised IRQL, which in turn held
+          * off every USB interrupt. */
+-        qemu_mutex_unlock(&d->lock);
+-        SwitchToThread();
+-        qemu_mutex_lock(&d->lock);
++        {
++            LARGE_INTEGER y0, y1, f;
++            QueryPerformanceCounter(&y0);
++            qemu_mutex_unlock(&d->lock);
++            SwitchToThread();
++            qemu_mutex_lock(&d->lock);
++            QueryPerformanceCounter(&y1);
++            QueryPerformanceFrequency(&f);
++            g_apu_yield_s += (double)(y1.QuadPart - y0.QuadPart) / f.QuadPart;
++        }
+     }
+ 
+     qemu_mutex_unlock(&d->lock);
+diff --git a/src/apu/apu_dsp.c b/src/apu/apu_dsp.c
+index 5f65480..992a50c 100644
+--- a/src/apu/apu_dsp.c
++++ b/src/apu/apu_dsp.c
+@@ -252,6 +252,33 @@ static void dsp_frame_stub(MCPXAPUState *d,
+     g_dbg.ep.cycles = 0;
+ }
+ 
++/* ============================================================
++ * Speaker-bin output (RECOMP_APU_MONITOR=mixbins)
++ * ============================================================
++ *
++ * The DSPs run (DirectSound waits on their command acknowledgements), but
++ * what is heard is the voices' speaker bins straight from the VP: on the
++ * Xbox, bins 0..5 are front left, front right, centre, LFE, surround left
++ * and surround right. Stereo folds centre and surrounds in at -3 dB and
++ * leaves the LFE out, as a Dolby downmix does. The GP's effects (reverb,
++ * fed by the bins above 5) are not heard this way. */
++static int s_speaker_bins;     /* RECOMP_APU_MONITOR=mixbins */
++
++static void speaker_bin_frame(MCPXAPUState *d, float mixbins[NUM_MIXBINS][NUM_SAMPLES_PER_FRAME])
++{
++    int off = (d->ep_frame_div % 8) * NUM_SAMPLES_PER_FRAME;
++    for (int i = 0; i < NUM_SAMPLES_PER_FRAME; i++) {
++        float left = mixbins[0][i] + 0.7071f * (mixbins[2][i] + mixbins[4][i]);
++        float right = mixbins[1][i] + 0.7071f * (mixbins[2][i] + mixbins[5][i]);
++        if (left > 1.0f) left = 1.0f;
++        if (left < -1.0f) left = -1.0f;
++        if (right > 1.0f) right = 1.0f;
++        if (right < -1.0f) right = -1.0f;
++        d->monitor.frame_buf[off + i][0] = (int16_t)(left * 32767.0f);
++        d->monitor.frame_buf[off + i][1] = (int16_t)(right * 32767.0f);
++    }
++}
++
+ /* ============================================================
+  * Real GP/EP DSP56300 pipeline (ported from xemu gp_ep.c)
+  * ============================================================ */
+@@ -344,10 +371,35 @@ static void scatter_gather_rw(MCPXAPUState *d, hwaddr sge_base,
+     }
+ }
+ 
++/* RECOMP_APU_DIAG: DSP DMA transfers since start, by kind (index: GP scratch,
++ * EP scratch, GP fifo read, GP fifo write, EP fifo read, EP fifo write). */
++static unsigned long s_dsp_dma_count[6];
++
++/* RECOMP_APU_SCRATCH_TRACE: the first transfers of each DSP's scratch DMA --
++ * the DSP's scratch offset, length, direction and where its first page
++ * resolves. The GP hands its mix to the EP through scratch memory. */
++static void scratch_trace(MCPXAPUState *d, const char *who, hwaddr sge_base, uint32_t addr, size_t len, bool dir)
++{
++    static int on = -1;
++    static unsigned long n;
++    if (on < 0) on = getenv("RECOMP_APU_SCRATCH_TRACE") != NULL;
++    if (!on || n >= 400) return;
++    {
++        uint32_t prd = ldl_le_phys(address_space_memory, sge_base + (addr / TARGET_PAGE_SIZE) * 8);
++        fprintf(stderr, "[SCRATCH] %s %s off %06X len %5zu -> phys %08X host %p\n", who, dir ? "write" : "read ",
++                addr, len, prd + addr % TARGET_PAGE_SIZE,
++                (void *)dsp_ram_address(prd + addr % TARGET_PAGE_SIZE, 4));
++    }
++    n++;
++    (void)d;
++}
++
+ static void gp_scratch_rw(void *opaque, uint8_t *ptr, uint32_t addr, size_t len,
+                           bool dir)
+ {
++    s_dsp_dma_count[0]++;
+     MCPXAPUState *d = opaque;
++    scratch_trace(d, "GP", d->regs[NV_PAPU_GPSADDR], addr, len, dir);
+     scatter_gather_rw(d, d->regs[NV_PAPU_GPSADDR], d->regs[NV_PAPU_GPSMAXSGE],
+                       ptr, addr, len, dir);
+ }
+@@ -355,7 +407,9 @@ static void gp_scratch_rw(void *opaque, uint8_t *ptr, uint32_t addr, size_t len,
+ static void ep_scratch_rw(void *opaque, uint8_t *ptr, uint32_t addr, size_t len,
+                           bool dir)
+ {
++    s_dsp_dma_count[1]++;
+     MCPXAPUState *d = opaque;
++    scratch_trace(d, "EP", d->regs[NV_PAPU_EPSADDR], addr, len, dir);
+     scatter_gather_rw(d, d->regs[NV_PAPU_EPSADDR], d->regs[NV_PAPU_EPSMAXSGE],
+                       ptr, addr, len, dir);
+ }
+@@ -396,6 +450,7 @@ static uint32_t circular_scatter_gather_rw(MCPXAPUState *d, hwaddr sge_base,
+ static void gp_fifo_rw(void *opaque, uint8_t *ptr, unsigned int index,
+                        size_t len, bool dir)
+ {
++    s_dsp_dma_count[2 + (dir ? 1 : 0)]++;
+     MCPXAPUState *d = opaque;
+     uint32_t base;
+     uint32_t end;
+@@ -448,6 +503,7 @@ static bool ep_sink_samples(MCPXAPUState *d, uint8_t *ptr, size_t len)
+ static void ep_fifo_rw(void *opaque, uint8_t *ptr, unsigned int index,
+                        size_t len, bool dir)
+ {
++    s_dsp_dma_count[4 + (dir ? 1 : 0)]++;
+     MCPXAPUState *d = opaque;
+     uint32_t base;
+     uint32_t end;
+@@ -623,6 +679,25 @@ static void dsp_frame_engine(MCPXAPUState *d,
+                              float mixbins[NUM_MIXBINS][NUM_SAMPLES_PER_FRAME])
+ {
+     static bool logged_gp, logged_ep;
++    if (s_speaker_bins) speaker_bin_frame(d, mixbins);
++    static int diag = -1;
++    static DWORD diag_next;
++    static unsigned long frames, gp_cycles_max, ep_cycles_max;
++
++    /* RECOMP_APU_DIAG: once a second, how often each DSP ran and the EP
++     * handed output over, against the frames the VP made. */
++    if (diag < 0) diag = getenv("RECOMP_APU_DIAG") != NULL;
++    frames++;
++    if (diag && (long)(GetTickCount() - diag_next) >= 0) {
++        fprintf(stderr, "[APU-DSP] frames %lu gp runs %lu (max %lu cycles) ep runs %lu (max %lu cycles) ep sinks %lu\n",
++                frames, mcpx_apu_dsp_gp_runs, gp_cycles_max, mcpx_apu_dsp_ep_runs, ep_cycles_max,
++                mcpx_apu_dsp_ep_sinks);
++        fprintf(stderr, "[APU-DSP]   dma: gp scratch %lu ep scratch %lu gp fifo r %lu w %lu ep fifo r %lu w %lu; "
++                "gp pc %06X ep pc %06X\n", s_dsp_dma_count[0], s_dsp_dma_count[1], s_dsp_dma_count[2],
++                s_dsp_dma_count[3], s_dsp_dma_count[4], s_dsp_dma_count[5], d->gp.dsp->core.pc, d->ep.dsp->core.pc);
++        diag_next = GetTickCount() + 1000;
++        gp_cycles_max = ep_cycles_max = 0;
++    }
+ 
+     /* Write VP results to the GP DSP MIXBUF */
+     for (int mixbin = 0; mixbin < NUM_MIXBINS; mixbin++) {
+@@ -646,6 +721,7 @@ static void dsp_frame_engine(MCPXAPUState *d,
+             dsp_run(d->gp.dsp, 1000);
+         } while (!d->gp.dsp->core.is_idle && d->gp.realtime);
+         g_dbg.gp.cycles = d->gp.dsp->core.cycle_count;
++        if (d->gp.dsp->core.cycle_count > gp_cycles_max) gp_cycles_max = d->gp.dsp->core.cycle_count;
+         mcpx_apu_dsp_gp_runs++;
+         if (!logged_gp) {
+             logged_gp = true;
+@@ -677,6 +753,7 @@ static void dsp_frame_engine(MCPXAPUState *d,
+                 dsp_run(d->ep.dsp, 1000);
+             } while (!d->ep.dsp->core.is_idle && d->ep.realtime);
+             g_dbg.ep.cycles = d->ep.dsp->core.cycle_count;
++            if (d->ep.dsp->core.cycle_count > ep_cycles_max) ep_cycles_max = d->ep.dsp->core.cycle_count;
+             mcpx_apu_dsp_ep_runs++;
+             if (!logged_ep) {
+                 logged_ep = true;
+@@ -734,7 +811,18 @@ void mcpx_apu_update_dsp_preference(MCPXAPUState *d)
+     }
+ 
+     if (preference) {
++        /* RECOMP_APU_MONITOR=gp|ep|vp|gp_or_ep: which stage's output is heard
++         * (xemu's debug monitor point). gp_or_ep by default. */
++        const char *monitor = getenv("RECOMP_APU_MONITOR");
+         d->monitor.point = MCPX_APU_DEBUG_MON_GP_OR_EP;
++        if (monitor && !_stricmp(monitor, "gp")) d->monitor.point = MCPX_APU_DEBUG_MON_GP;
++        else if (monitor && !_stricmp(monitor, "ep")) d->monitor.point = MCPX_APU_DEBUG_MON_EP;
++        else if (monitor && !_stricmp(monitor, "vp")) d->monitor.point = MCPX_APU_DEBUG_MON_VP;
++        else if (monitor && !_stricmp(monitor, "mixbins")) {
++            d->monitor.point = MCPX_APU_DEBUG_MON_AC97;   /* neither DSP writes the output */
++            s_speaker_bins = 1;
++        }
++        if (monitor) fprintf(stderr, "[APU] monitor point %s (%d)\n", monitor, (int)d->monitor.point);
+         d->gp.realtime = true;
+         d->ep.realtime = true;
+     } else {
 diff --git a/src/apu/apu_vp.c b/src/apu/apu_vp.c
-index 7c36737..00fb215 100644
+index 7c36737..46275fa 100644
 --- a/src/apu/apu_vp.c
 +++ b/src/apu/apu_vp.c
 @@ -181,9 +181,25 @@ static void set_hrir_coeff_tar(MCPXAPUState *d, int channel, int coeff_idx,
@@ -87,6 +327,95 @@ index 7c36737..00fb215 100644
      unsigned int selected_handle, list;
  
      switch (method) {
+@@ -1242,6 +1258,88 @@ void mcpx_apu_vp_frame(MCPXAPUState *d,
+             uint16_t v = (uint16_t)d->regs[current];
+             d->regs[next] = voice_get_mask(d, v, NV_PAVS_VOICE_TAR_PITCH_LINK,
+                                NV_PAVS_VOICE_TAR_PITCH_LINK_NEXT_VOICE_HANDLE);
++            /* RECOMP_APU_VOICE_TRACE: each list's voices once a second --
++             * format, stream state, position and pitch. */
++            {
++                static int trace = -1;
++                static DWORD next_report;
++                static int reporting;
++                if (trace < 0) trace = getenv("RECOMP_APU_VOICE_TRACE") != NULL;
++                if (trace && list == 0 && i == 0) {
++                    reporting = (long)(GetTickCount() - next_report) >= 0;
++                    if (reporting) next_report = GetTickCount() + 1000;
++                }
++                if (trace && reporting) {
++                    uint32_t fmt = ldl_le_phys(address_space_memory,
++                                               d->regs[NV_PAPU_VPVADDR] + v * NV_PAVS_SIZE + NV_PAVS_VOICE_CFG_FMT);
++                    fprintf(stderr, "[VOICE] list %d v%u act %u paused %u fmt %08X stream %u cbo %u ebo %u ssl %d/%d/%d pitch %d\n",
++                            list, v,
++                            voice_get_mask(d, v, NV_PAVS_VOICE_PAR_STATE, NV_PAVS_VOICE_PAR_STATE_ACTIVE_VOICE),
++                            voice_get_mask(d, v, NV_PAVS_VOICE_PAR_STATE, NV_PAVS_VOICE_PAR_STATE_PAUSED),
++                            fmt, voice_get_mask(d, v, NV_PAVS_VOICE_CFG_FMT, NV_PAVS_VOICE_CFG_FMT_DATA_TYPE),
++                            voice_get_mask(d, v, NV_PAVS_VOICE_PAR_OFFSET, NV_PAVS_VOICE_PAR_OFFSET_CBO),
++                            voice_get_mask(d, v, NV_PAVS_VOICE_PAR_NEXT, NV_PAVS_VOICE_PAR_NEXT_EBO),
++                            d->vp.ssl[v].ssl_index, d->vp.ssl[v].ssl_seg, d->vp.ssl[v].count[d->vp.ssl[v].ssl_index],
++                            (int16_t)voice_get_mask(d, v, NV_PAVS_VOICE_TAR_PITCH_LINK, NV_PAVS_VOICE_TAR_PITCH_LINK_PITCH));
++                    if (voice_get_mask(d, v, NV_PAVS_VOICE_CFG_FMT, NV_PAVS_VOICE_CFG_FMT_DATA_TYPE) &&
++                            d->vp.ssl[v].count[d->vp.ssl[v].ssl_index]) {
++                        int index = d->vp.ssl[v].ssl_index;
++                        hwaddr entry = d->regs[NV_PAPU_VPSSLADDR] +
++                                       (d->vp.ssl[v].base[index] + d->vp.ssl[v].ssl_seg) * 8;
++                        uint32_t seg = ldl_le_phys(address_space_memory, entry);
++                        uint32_t seglen = ldl_le_phys(address_space_memory, entry + 4);
++                        uint32_t cbo = voice_get_mask(d, v, NV_PAVS_VOICE_PAR_OFFSET, NV_PAVS_VOICE_PAR_OFFSET_CBO);
++                        const int16_t *pcm = (const int16_t *)mcpx_apu_ram_address(seg, 64);
++                        fprintf(stderr, "[VOICE]   v%u segment %08X len %08X (cs %u) at cbo: %d %d %d %d %d %d %d %d\n",
++                                v, seg, seglen, (seglen >> 16) & 3, pcm[cbo % 512 * 2], pcm[cbo % 512 * 2 + 1],
++                                pcm[2], pcm[3], pcm[100], pcm[101], pcm[500], pcm[501]);
++                    }
++                    if (!voice_get_mask(d, v, NV_PAVS_VOICE_CFG_FMT, NV_PAVS_VOICE_CFG_FMT_DATA_TYPE)) {
++                        uint32_t ba = voice_get_mask(d, v, NV_PAVS_VOICE_CUR_PSL_START, NV_PAVS_VOICE_CUR_PSL_START_BA);
++                        hwaddr data = get_data_ptr(d->regs[NV_PAPU_VPSGEADDR], 0xFFFFFFFF, ba);
++                        uint32_t first = ldl_le_phys(address_space_memory, data);
++                        fprintf(stderr, "[VOICE]   v%u ba %06X data phys %08llX host %p first %08X\n", v, ba,
++                                (unsigned long long)data, (void *)mcpx_apu_ram_address(data, 4), first);
++                    }
++                    {
++                        fprintf(stderr, "[VOICE]   v%u vol A %08X B %08X C %08X\n", v,
++                                ldl_le_phys(address_space_memory, d->regs[NV_PAPU_VPVADDR] + v * NV_PAVS_SIZE + NV_PAVS_VOICE_TAR_VOLA),
++                                ldl_le_phys(address_space_memory, d->regs[NV_PAPU_VPVADDR] + v * NV_PAVS_SIZE + NV_PAVS_VOICE_TAR_VOLB),
++                                ldl_le_phys(address_space_memory, d->regs[NV_PAPU_VPVADDR] + v * NV_PAVS_SIZE + NV_PAVS_VOICE_TAR_VOLC));
++                        fprintf(stderr, "[VOICE]   v%u bins %u %u %u %u %u %u %u %u\n", v,
++                                voice_get_mask(d, v, NV_PAVS_VOICE_CFG_VBIN, NV_PAVS_VOICE_CFG_VBIN_V0BIN),
++                                voice_get_mask(d, v, NV_PAVS_VOICE_CFG_VBIN, NV_PAVS_VOICE_CFG_VBIN_V1BIN),
++                                voice_get_mask(d, v, NV_PAVS_VOICE_CFG_VBIN, NV_PAVS_VOICE_CFG_VBIN_V2BIN),
++                                voice_get_mask(d, v, NV_PAVS_VOICE_CFG_VBIN, NV_PAVS_VOICE_CFG_VBIN_V3BIN),
++                                voice_get_mask(d, v, NV_PAVS_VOICE_CFG_VBIN, NV_PAVS_VOICE_CFG_VBIN_V4BIN),
++                                voice_get_mask(d, v, NV_PAVS_VOICE_CFG_VBIN, NV_PAVS_VOICE_CFG_VBIN_V5BIN),
++                                voice_get_mask(d, v, NV_PAVS_VOICE_CFG_FMT, NV_PAVS_VOICE_CFG_FMT_V6BIN),
++                                voice_get_mask(d, v, NV_PAVS_VOICE_CFG_FMT, NV_PAVS_VOICE_CFG_FMT_V7BIN));
++                    }
++                    if (list == 0 && i == 0) {
++                        int f;
++                        for (f = 0; f < 4; f++)
++                            fprintf(stderr, "[VOICE]   GP out fifo %d base %06X end %06X cur %06X\n", f,
++                                    d->regs[NV_PAPU_GPOFBASE0 + 0x10 * f], d->regs[NV_PAPU_GPOFEND0 + 0x10 * f],
++                                    d->regs[NV_PAPU_GPOFCUR0 + 0x10 * f]);
++                        for (f = 0; f < 2; f++)
++                            fprintf(stderr, "[VOICE]   EP in fifo %d base %06X end %06X cur %06X; out fifo %d base %06X end %06X cur %06X\n", f,
++                                    d->regs[NV_PAPU_EPIFBASE0 + 0x10 * f], d->regs[NV_PAPU_EPIFEND0 + 0x10 * f],
++                                    d->regs[NV_PAPU_EPIFCUR0 + 0x10 * f], f,
++                                    d->regs[NV_PAPU_EPOFBASE0 + 0x10 * f], d->regs[NV_PAPU_EPOFEND0 + 0x10 * f],
++                                    d->regs[NV_PAPU_EPOFCUR0 + 0x10 * f]);
++                        fprintf(stderr, "[VOICE]   headroom hrtf %u submix %u %u %u %u %u %u %u %u\n",
++                                d->vp.hrtf_headroom, d->vp.submix_headroom[0], d->vp.submix_headroom[1],
++                                d->vp.submix_headroom[2], d->vp.submix_headroom[3], d->vp.submix_headroom[4],
++                                d->vp.submix_headroom[5], d->vp.submix_headroom[6], d->vp.submix_headroom[7]);
++                        fprintf(stderr, "[VOICE]   EPFADDR %08X first page %08X\n", d->regs[NV_PAPU_EPFADDR],
++                                ldl_le_phys(address_space_memory, d->regs[NV_PAPU_EPFADDR]));
++                        fprintf(stderr, "[VOICE]   GPFADDR %08X first page %08X VPSGEADDR %08X\n",
++                                d->regs[NV_PAPU_GPFADDR], ldl_le_phys(address_space_memory, d->regs[NV_PAPU_GPFADDR]),
++                                d->regs[NV_PAPU_VPSGEADDR]);
++                    }
++                }
++            }
+ 
+             if (!voice_get_mask(d, v, NV_PAVS_VOICE_PAR_STATE,
+                                 NV_PAVS_VOICE_PAR_STATE_ACTIVE_VOICE)) {
 diff --git a/src/input/xinput_device.c b/src/input/xinput_device.c
 index 3c7bdd4..2f1f452 100644
 --- a/src/input/xinput_device.c
