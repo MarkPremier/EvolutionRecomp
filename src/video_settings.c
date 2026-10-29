@@ -771,6 +771,75 @@ static const char *const k_option_entries[] = {"options", "control", "pccontrols
                                                "saveoptions"};
 #define OPTION_STEP 3.6f
 
+/* Options are saved on the way out. The console kept them only when the
+ * player chose SAVE OPTIONS, and anything changed and left unsaved (Invert
+ * Look, say) came back as it was at the next start. SaveOptions' own save --
+ * its controller's "save" link, a MemU. with A 0 and FNAM options, run after
+ * its prompts -- is added to the Options menus' Back. Its 0.1 s delay
+ * becomes the check's 0, or the menu's change of screen would unload it
+ * first. */
+static Node *s_save_options;
+static int is_event(const Node *event, const char *type);
+static int actor_id(const Node *actor);
+static void retarget(Node *event, const char *name, int id);
+
+static Node *link_named(const Node *actor, const char *name)
+{
+    size_t n = strlen(name);
+    uint32_t i;
+    for (i = 0; actor && i < actor->count; i++) {
+        Node *link = actor->children[i];
+        if (!strcmp(link->name, "LINK") && link->value_size == n && !memcmp(link->value, name, n)) return link;
+    }
+    return NULL;
+}
+
+static Node *event_of(const Node *link, const char *type)
+{
+    Node *events = child(link, "EVENTS");
+    uint32_t i;
+    for (i = 0; events && i < events->count; i++)
+        if (is_event(events->children[i], type)) return events->children[i];
+    return NULL;
+}
+
+static void load_save_options(Trees *trees)
+{
+    Buffer file = {0};
+    Node *screen, *deity, *save, *check;
+    uint32_t i;
+    if (!trees_read(trees, SCREENS "saveoptions\\saveoptions.ati", &file)) return;
+    screen = screen_load(&file);
+    deity = actor_named(screen, "DeityNoFade", NULL);
+    save = event_of(link_named(deity, "save"), "MemU.");
+    check = event_of(link_named(deity, "check"), "MemU.");
+    if (save && check && child(check, "ED")) {
+        s_save_options = node_clone(save);
+        for (i = 0; i < s_save_options->count; i++)
+            if (!strcmp(s_save_options->children[i]->name, "ED")) {
+                node_remove(s_save_options, i);
+                node_insert(s_save_options, i, node_clone(child(check, "ED")));
+                break;
+            }
+    }
+    node_free(screen);
+    free(file.data);
+}
+
+static void save_options_on_back(Node *screen)
+{
+    Node *deity = actor_named(screen, "DeityNoFade", NULL);
+    Node *events = child(link_named(deity, "Back"), "EVENTS");
+    Node *save;
+    if (!s_save_options || !events) {
+        fprintf(stderr, "[VIDEO] options menu: no save on Back\n");
+        return;
+    }
+    save = node_clone(s_save_options);
+    retarget(save, "DeityNoFade", actor_id(deity));
+    node_insert(events, 0, save);
+}
+
 static int add_video_entry(Node *screen, const char *page)
 {
     const struct VideoMenu *menu = NULL;
@@ -794,6 +863,7 @@ static int add_video_entry(Node *screen, const char *page)
         position[1] = top[1] - e * OPTION_STEP;
         set_vector(child(entry, "POS"), position);
     }
+    save_options_on_back(screen);
     return 1;
 }
 
@@ -1434,6 +1504,7 @@ static int write_patch(const char *game_dir)
         return 0;
     }
 
+    load_save_options(&trees);
     for (m = 0; m < MENU_COUNT; m++) {
         const struct VideoMenu *menu = &k_menus[m];
         PatchFile *out = &files[5 * m];
@@ -1510,6 +1581,8 @@ done:
     s_pause_screen = NULL;
     node_free(pause_screen);
     free(pause.data);
+    node_free(s_save_options);
+    s_save_options = NULL;
     for (i = 0; i < FILE_COUNT; i++) free(files[i].data.data);
     free(tree.data);
     free(existing.data);

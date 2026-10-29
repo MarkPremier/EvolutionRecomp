@@ -186,6 +186,14 @@ A pad works as on the console. Keyboard and mouse (on by default,
 | Menu select / back | Enter or Space / Esc or Backspace |
 | Menu up / down / left / right | Arrow keys |
 
+### Options are saved when you leave the menu
+
+The game's own options (Control Setup's Invert Look, sound volumes, Game
+Options) are written to its Options save whenever you back out of the
+Options menu, from the front end or the pause menu. On the console they
+were kept only if you chose SAVE OPTIONS, and anything left unsaved came
+back as it was at the next start.
+
 ### PC Controls
 
 **Options > PC Controls** (in the front end and the pause menu, under
