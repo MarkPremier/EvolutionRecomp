@@ -63,7 +63,7 @@ extern void nv2a_gpu_set_msaa(int samples);
  * through its values (shown, and written in turok_settings.ini, as their
  * text). */
 enum { SET_RESOLUTION, SET_ASPECT, SET_DISPLAY, SET_VSYNC, SET_FRAMES, SET_ANISOTROPY, SET_MSAA, SET_DRAW_DISTANCE,
-       SET_BODIES, SET_ICONS,
+       SET_BODIES, SET_DECALS, SET_ICONS,
        SET_MOUSE_LOOK, SET_MOUSE_SPEED, SETTING_COUNT };
 
 typedef struct VideoSetting {
@@ -97,6 +97,7 @@ static const VideoSetting k_settings[SETTING_COUNT] = {
     {"msaa", "msaa", k_msaa, COUNT(k_msaa), 0},
     {"draw_distance", "draw distance", k_distances, COUNT(k_distances), 1},
     {"keep_bodies", "keep bodies", k_switches, COUNT(k_switches), 0},
+    {"keep_decals", "keep decals", k_switches, COUNT(k_switches), 0},
     {"button_icons", "button icons", k_icons, COUNT(k_icons), 0},
     {"mouse_look", "mouse look", k_mouse_looks, COUNT(k_mouse_looks), 1},
     {"mouse_speed", "mouse speed", k_speeds, COUNT(k_speeds), 4},
@@ -1429,7 +1430,7 @@ static void look_not_inverted(Buffer *history)
 
 static int edit_video_screen(Node *screen, const char *unused)
 {
-    PageSpec page = {VIDEO_HST, TEXT_TITLE, SETTING_COUNT, 2.4f, TEXT_SCALE, NULL};
+    PageSpec page = {VIDEO_HST, TEXT_TITLE, SETTING_COUNT, 2.3f, TEXT_SCALE, NULL};
     int s;
     (void)unused;
     for (s = 0; s < SETTING_COUNT; s++) {
@@ -1850,6 +1851,7 @@ static void apply_setting(int setting)
     case SET_MOUSE_LOOK: xbox_KbmSetRawMouse(s_values[SET_MOUSE_LOOK]); break;
     case SET_DRAW_DISTANCE:           /* read each frame */
     case SET_BODIES:
+    case SET_DECALS:
     case SET_MOUSE_SPEED: break;
     }
 }
@@ -1907,6 +1909,14 @@ float video_settings_take_mouse_turn(int axis)
 int video_settings_keep_bodies(void)
 {
     return s_values[SET_BODIES];
+}
+
+/* Keep decals: blood splats, bullet holes, scorch marks and gibs last ten
+ * minutes instead of seconds, from the next level load (recomp_manual.c,
+ * sub_000B0110). */
+int video_settings_keep_decals(void)
+{
+    return s_values[SET_DECALS];
 }
 
 float video_settings_draw_distance(void)

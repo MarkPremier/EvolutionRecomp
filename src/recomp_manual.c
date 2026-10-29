@@ -370,6 +370,77 @@ void sub_0013D000(void)
     sub_0013D000_gen();
 }
 
+/* ── Keep decals (Video Options) ───────────────────────────────
+ *
+ * Blood splats, bullet holes, scorch marks and gibs are particles: each kind
+ * a PARTDEF text (data\particle\...\*.parx) that the particle system
+ * parses (sub_000B0110, this-call: ?, the text, its length, ?) as a level
+ * loads. Its eighth value is the particle's life in seconds -- 3 to 20 for
+ * these -- which the parser stores through sub_000AF2A0 (+0x7C). With Keep
+ * decals on, the definitions whose texture or mesh is a splat, a bullet
+ * hole, a scorch or a gore piece get ten minutes instead; parents and
+ * spawners (num.tga) and every other effect are left alone. A change applies
+ * from the next level load. RECOMP_PARTICLE_TRACE=1 lists the definitions. */
+extern void sub_000B0110_gen(void);
+extern void sub_000AF2A0_gen(void);
+extern int video_settings_keep_decals(void);
+
+#define KEEP_DECAL_SECONDS 600.0f
+static int s_partdef_keep;
+
+static int partdef_is_keepsake(uint32_t text, uint32_t size)
+{
+    static const char *const kinds[] = {"splat", "_bh_", "scortch", "fireb3", "biggib\\", "bird_pieces\\",
+                                        "brain_chunks\\"};
+    const char *body = (const char *)((uintptr_t)text + g_xbox_mem_offset);
+    char name[128];
+    uint32_t i = 0, k;
+    if (!text || size > 65536u) return 0;
+    while (i < size) {
+        uint32_t n = 0;
+        while (i < size && body[i] != '"') i++;
+        i++;
+        while (i < size && body[i] != '"' && n + 1 < sizeof name) {
+            char c = body[i++];
+            name[n++] = (char)(c >= 'A' && c <= 'Z' ? c + 32 : c);
+        }
+        name[n] = 0;
+        i++;
+        if (!strstr(name, ".tga") && !strstr(name, ".mtf")) continue;
+        for (k = 0; k < sizeof kinds / sizeof *kinds; k++)
+            if (strstr(name, kinds[k])) return 1;
+        return 0;   /* the first texture or mesh decides */
+    }
+    return 0;
+}
+
+void sub_000B0110(void)
+{
+    static int trace = -1;
+    uint32_t text = TUROK_MEM32(g_esp + 8), size = TUROK_MEM32(g_esp + 12);
+    if (trace < 0) trace = getenv("RECOMP_PARTICLE_TRACE") != NULL;
+    s_partdef_keep = video_settings_keep_decals() && partdef_is_keepsake(text, size);
+    if (trace) {
+        int keepsake = partdef_is_keepsake(text, size);
+        fprintf(stderr, "[PARTDEF] %u bytes%s\n", size, keepsake ? " (decal or gib)" : "");
+    }
+    sub_000B0110_gen();
+    s_partdef_keep = 0;
+}
+
+void sub_000AF2A0(void)
+{
+    if (s_partdef_keep) {
+        float life = guest_float(g_esp + 4), keep = life < 0 ? -KEEP_DECAL_SECONDS : KEEP_DECAL_SECONDS;
+        if (fabsf(life) < KEEP_DECAL_SECONDS) {
+            uint32_t bits;
+            memcpy(&bits, &keep, 4);
+            TUROK_MEM32(g_esp + 4) = bits;
+        }
+    }
+    sub_000AF2A0_gen();
+}
+
 /* ── Corpse trace (RECOMP_CORPSE_TRACE=1) ──────────────────────
  *
  * Finding what makes bodies vanish: when each actor first runs the Dead
