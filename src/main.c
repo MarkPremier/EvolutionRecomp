@@ -654,6 +654,15 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     if (xbox_Nv2aNativeFencesEnabled()
             && xbox_Nv2aSoftwareMethodHandler(0x0019D840u, 0x001A4350u) < 0)
         fprintf(stderr, "[BOOT] D3D software-method handler not registered\n");
+    /* Push-buffer fixups (types 3 and 4, nearly all of them) run on the
+     * executor itself: recomp_manual.c, turok_software_method_native. */
+    {
+        extern void xbox_Nv2aSetSoftwareMethodNative(int (*)(uint32_t));
+        extern int turok_software_method_native(uint32_t parameter);
+        const char *native = getenv("RECOMP_SWM_NATIVE");
+        if (!native || strcmp(native, "0"))
+            xbox_Nv2aSetSoftwareMethodNative(turok_software_method_native);
+    }
 
     /* Arm the hang watchdog. Does nothing unless RECOMP_WATCHDOG_SECS is set,
      * and must be called from this thread -- the guest registers it samples are

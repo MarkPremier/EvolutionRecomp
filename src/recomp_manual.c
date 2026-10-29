@@ -141,6 +141,57 @@ extern void sub_001984B0_gen(void);
 extern void sub_00198480_gen(void);
 extern void sub_0019D580_gen(void);
 
+/* D3D push-buffer fixups, natively (types 3 and 4 of CMiniport::
+ * SoftwareMethod, sub_0019D840 -> sub_0019D7C0). The parameter's upper bits
+ * (>> 5, | 0x80000000) address a descriptor {fixup list, buffer base, end
+ * offset, resume address}; each fixup {size, offset, bytes} is copied into
+ * the buffer (until a size of -1), then the buffer's end gets an old-style
+ * JUMP to the resume address. Type 3 also loads the resume address into
+ * PFIFO DMA_SUBROUTINE (registers +0x324C) and adds the end offset to the
+ * miniport's counter (+0x818); its trailing write-combine flush
+ * (sub_00198480) is a no-op here. Type 10 (the return from a pushbuffer
+ * call) is done here too. Together they are nearly every software method
+ * D3D issues -- hundreds a frame, each otherwise queued to the timer thread
+ * and waited for. Run here, on the executor, the stream waits for them as
+ * the GPU does. RECOMP_SWM_NATIVE=0 sends them back. */
+#define TUROK_MINIPORT 0x001A4350u
+
+int turok_software_method_native(uint32_t parameter)
+{
+    uint32_t type = parameter & 0x1Fu;
+    uint32_t descriptor, list, base, end, target;
+    if (type == 10) {
+        /* The return from a pushbuffer call: the counter takes the call's
+         * size, DMA_SUBROUTINE the address register 0x401A88 holds. */
+        uint32_t registers = TUROK_MEM32(TUROK_MINIPORT);
+        TUROK_MEM32(TUROK_MINIPORT + 0x818u) += parameter >> 5;
+        TUROK_MEM32(registers + 0x324Cu) = TUROK_MEM32(registers + 0x401A88u);
+        return 1;
+    }
+    if (type != 3 && type != 4) return 0;
+    descriptor = (parameter >> 5) | 0x80000000u;
+    list = TUROK_MEM32(descriptor);
+    base = TUROK_MEM32(descriptor + 4u);
+    if (list) {
+        uint32_t size;
+        while ((size = TUROK_MEM32(list)) != 0xFFFFFFFFu) {
+            uint32_t offset = TUROK_MEM32(list + 4u);
+            memmove((void *)((uintptr_t)(base + offset) + g_xbox_mem_offset),
+                    (const void *)((uintptr_t)(list + 8u) + g_xbox_mem_offset), size);
+            list += 8u + size;
+        }
+    }
+    end = TUROK_MEM32(descriptor + 8u);
+    target = TUROK_MEM32(descriptor + 12u) & 0x0FFFFFFFu;
+    TUROK_MEM32(base + end) = target + 1u;
+    if (type == 3) {
+        TUROK_MEM32(TUROK_MEM32(TUROK_MINIPORT) + 0x324Cu) = target;
+        TUROK_MEM32(TUROK_MINIPORT + 0x818u) += end;
+    }
+    _mm_mfence();
+    return 1;
+}
+
 /* The miniport's vblank handler (sub_0019D580, this = miniport, [this] = the
  * NV2A register base) acknowledges PCRTC_INTR and then spins until PMC_INTR
  * drops its PCRTC bit (0x1000000), which hardware does at once. Here only the
