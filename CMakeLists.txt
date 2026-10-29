@@ -106,6 +106,25 @@ if(MSVC)
     # Whole-program optimisation for Release: the generated functions call
     # each other across hundreds of files, and only link-time code
     # generation can inline the small ones into their callers.
+    # The PC release's icon for the program and its window, taken from the
+    # builder's own Turok4.exe (-DRECOMP_PC_EXE=...): the icon is not in this
+    # repository. Without it the program has the default icon.
+    set(RECOMP_PC_EXE "" CACHE FILEPATH "Turok4.exe of the PC release, whose icon the program takes")
+    if(RECOMP_PC_EXE AND EXISTS "${RECOMP_PC_EXE}")
+        find_package(Python3 COMPONENTS Interpreter)
+        set(icon "${CMAKE_CURRENT_BINARY_DIR}/turok_icon.ico")
+        if(Python3_FOUND)
+            execute_process(COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/extract_icon.py"
+                                    "${RECOMP_PC_EXE}" "${icon}"
+                            RESULT_VARIABLE icon_result)
+        endif()
+        if(Python3_FOUND AND icon_result EQUAL 0)
+            file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/turok_icon.rc" "1 ICON \"${icon}\"\n")
+            target_sources(${PROJECT_NAME} PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/turok_icon.rc")
+        else()
+            message(WARNING "RECOMP_PC_EXE: could not take the icon from ${RECOMP_PC_EXE}")
+        endif()
+    endif()
     option(RECOMP_LTCG "Link-time code generation for Release builds" ON)
     if(RECOMP_LTCG)
         target_compile_options(${PROJECT_NAME} PRIVATE $<$<CONFIG:Release>:/GL>)

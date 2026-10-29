@@ -161,6 +161,10 @@ Recomp/
    cmake --build build --config Release --parallel
    ```
 
+   With the PC release installed, `-DRECOMP_PC_EXE=<path>/Turok4.exe` gives
+   the program and its window that release's icon (taken from your copy at
+   configure time by `tools/extract_icon.py`; it is not in this repository).
+
    Release builds use link-time code generation (`-DRECOMP_LTCG=OFF` turns
    it off): it inlines the generated functions' small callees across files
    and is worth about a quarter more frame rate in busy scenes.
