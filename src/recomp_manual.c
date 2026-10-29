@@ -335,26 +335,32 @@ void sub_0001FD20(void)
 extern void sub_000F21B0_gen(void);
 
 /* Its caller, the shadow pass's actor loop in sub_0017E2D0, holds the actor
- * in esi. The ambient birds -- FlyingIndigenousAI, vtable 0x21A240 (made by
- * sub_0012D370), set dressing circling high over the levels -- cast none:
- * their shadows landed far below them as stray blobs on the ground. Flying
- * enemies (FlyingEnemyAI) still do. RECOMP_SHADOW_BIRDS=1 gives the birds
- * theirs back. */
+ * in esi (position +0x38/+0x3C/+0x40, y up). The ambient birds --
+ * FlyingIndigenousAI, vtable 0x21A240 (made by sub_0012D370) -- cast none
+ * once they are more than RECOMP_SHADOW_BIRD_HEIGHT units (default 10) above
+ * the shadowed area's centre (the manager's target, +0x210, at the player's
+ * height): circling high over the levels as set dressing, their shadows
+ * landed far below them as stray blobs. Birds flushed from the brush near
+ * the player keep theirs until they have climbed away. Flying enemies
+ * (FlyingEnemyAI) always cast. RECOMP_SHADOW_BIRDS=1: every bird does. */
 extern __declspec(thread) uint32_t g_esi;
 #define FLYING_INDIGENOUS_AI_VTABLE 0x0021A240u
 
 void sub_000F21B0(void)
 {
     static int offscreen = -1, birds = -1;
-    uint32_t actor = g_esi;
+    static float bird_height = 10.0f;
+    uint32_t actor = g_esi, manager = g_ecx;
     if (offscreen < 0) {
         const char *text = getenv("RECOMP_SHADOW_OFFSCREEN");
         offscreen = !text || atoi(text) != 0;
         birds = getenv("RECOMP_SHADOW_BIRDS") && atoi(getenv("RECOMP_SHADOW_BIRDS")) != 0;
+        if (getenv("RECOMP_SHADOW_BIRD_HEIGHT")) bird_height = (float)atof(getenv("RECOMP_SHADOW_BIRD_HEIGHT"));
     }
     sub_000F21B0_gen();
     if (offscreen) g_eax = 1;
-    if (!birds && actor && TUROK_MEM32(actor) == FLYING_INDIGENOUS_AI_VTABLE)
+    if (!birds && actor && TUROK_MEM32(actor) == FLYING_INDIGENOUS_AI_VTABLE &&
+            guest_float(actor + 0x3Cu) - guest_float(manager + 0x214u) > bird_height)
         g_eax = 0;
 }
 

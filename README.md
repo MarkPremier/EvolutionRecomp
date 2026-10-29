@@ -31,8 +31,10 @@ CPU-renderer build (about 9 fps on the title screen).
   game drew only those of creatures on screen. `RECOMP_SHADOW_DISTANCE`,
   `RECOMP_SHADOW_AROUND`, `RECOMP_SHADOW_MAP` and `RECOMP_SHADOW_OFFSCREEN`
   change them; 16, 0, 512 and 0 give the original.
-  The ambient birds (FlyingIndigenousAI) cast no shadow; their blobs landed
-  far below them. `RECOMP_SHADOW_BIRDS=1` restores them.
+  The ambient birds (FlyingIndigenousAI) cast no shadow once more than 10
+  units above the player's height (`RECOMP_SHADOW_BIRD_HEIGHT`): their blobs
+  landed far below them. Birds taking off nearby keep theirs.
+  `RECOMP_SHADOW_BIRDS=1` gives every bird one.
 - The window shows frames straight from the GPU through a swap chain, so it
   resizes and maximises freely (the frame stays 4:3, letterboxed), opens at
   the largest multiple of 640x480 that fits the screen, and **Alt+Enter**
