@@ -320,6 +320,9 @@ An environment variable set by hand still wins at start-up.
   (A_NDD where they start to fade, A_MDD where they are gone: 15 to 25 units
   for grass) are drawn that many times further. The fade (`sub_0003C9E0`)
   reads the two from a block at actor +0x1CC; they are scaled while it runs.
+  The update distance (AU_D, actor +0x1D0, tested in `sub_0003B110`), out to
+  which an actor animates and moves, is scaled with it, so butterflies,
+  birds and swaying plants are not drawn frozen.
 - **Keep bodies**: the dead stay where they fell. A dead AI actor's update
   (`sub_0013D000`) counts time since death at +0x52C; past 3.5 s it fades
   the body and sinks it into the ground, and at 5 s removes it. With the

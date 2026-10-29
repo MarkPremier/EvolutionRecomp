@@ -779,6 +779,16 @@ void sub_00020EE0(void)
     sub_00020EE0_gen();
     s_cull_widen--;
 }
+
+/* The camera's other view tests take the cotangent from sub_00020030 too:
+ * a point (sub_00021740) and a sphere's two tests
+ * (sub_00021860, sub_00022590: the models' bounding spheres, sub_00180720). */
+extern void sub_00021740_gen(void);
+extern void sub_00021860_gen(void);
+extern void sub_00022590_gen(void);
+void sub_00021740(void) { s_cull_widen++; sub_00021740_gen(); s_cull_widen--; }
+void sub_00021860(void) { s_cull_widen++; sub_00021860_gen(); s_cull_widen--; }
+void sub_00022590(void) { s_cull_widen++; sub_00022590_gen(); s_cull_widen--; }
 extern __declspec(thread) uint16_t g_fp_control_word;
 
 /* One x87 operation's result as the generated code rounds it: to float
@@ -1035,6 +1045,30 @@ void sub_0003C9E0(void)
     sub_0003C9E0_gen();
     TUROK_MEM32(block) = near_bits;
     TUROK_MEM32(block + 4u) = far_bits;
+}
+
+/* ── Update distance (sub_0003B110) ────────────────────────────
+ *
+ * cdecl (the actor): whether a player is within the actor's AU_D (+0x1D0,
+ * 0 for always), the distance out to which it updates -- its animation, its
+ * flight. Levels set it to match A_MDD, where the actor stops being drawn,
+ * so with the draw distance setting butterflies, birds and swaying plants
+ * were drawn frozen until close. It is scaled with the draw distance. */
+extern void sub_0003B110_gen(void);
+
+void sub_0003B110(void)
+{
+    float scale = video_settings_draw_distance(), reach;
+    uint32_t actor = TUROK_MEM32(g_esp + 4u), bits;
+
+    if (scale == 1.0f || !actor) { sub_0003B110_gen(); return; }
+    bits = TUROK_MEM32(actor + 0x1D0u);
+    memcpy(&reach, &bits, 4);
+    if (!(reach > 0.0f)) { sub_0003B110_gen(); return; }
+    reach *= scale;
+    memcpy((void *)((uintptr_t)(actor + 0x1D0u) + g_xbox_mem_offset), &reach, 4);
+    sub_0003B110_gen();
+    TUROK_MEM32(actor + 0x1D0u) = bits;
 }
 
 /* ── Stick response curve (sub_00142280) ───────────────────────
