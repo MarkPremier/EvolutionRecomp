@@ -4618,7 +4618,7 @@ index e27083f..ae32fae 100644
     if(textureFlags&4)uvw.x=saturate(uvw.x);
     if(textureFlags&8)uvw.y=saturate(uvw.y);
 diff --git a/src/kernel/nv2a_pb_exec.c b/src/kernel/nv2a_pb_exec.c
-index d7c0f20..f421e3c 100644
+index d7c0f20..25de804 100644
 --- a/src/kernel/nv2a_pb_exec.c
 +++ b/src/kernel/nv2a_pb_exec.c
 @@ -117,6 +117,43 @@ static int pb_surf_trace(void)
@@ -4958,14 +4958,17 @@ index d7c0f20..f421e3c 100644
  }
  
  /* Attribute 3 is diffuse colour in every NV2A layout that sets one. Absent it,
-@@ -2598,24 +2846,141 @@ static int gpu_decode_volume_texture(void *context, uint32_t level, uint32_t hor
+@@ -2598,24 +2846,144 @@ static int gpu_decode_volume_texture(void *context, uint32_t level, uint32_t hor
      return sample_texture_bound(&texture, horizontal, vertical, color);
  }
  
 -static uint32_t gpu_vertex_tags[65536], gpu_vertex_offsets[65536], gpu_vertex_keys[65536], gpu_vertex_serial;
-+/* Vertices already appended in this chunk, by index (low 16 bits): one
-+ * entry's tag, full index and offset share a cache line. */
-+static struct { uint32_t tag, key, offset; } gpu_vertex_seen[65536];
++/* Vertices already appended in this chunk, by index (low 13 bits): one
++ * entry's tag, full index and offset share a cache line, and the table
++ * (96 KB) stays in cache -- at 65536 entries every look-up missed. Two
++ * indices that share a slot only cost a vertex appended twice. */
++#define GPU_VERTEX_SEEN 8192u
++static struct { uint32_t tag, key, offset; } gpu_vertex_seen[GPU_VERTEX_SEEN];
 +static uint32_t gpu_vertex_serial;
  static uint32_t gpu_attribute_mask;
  
@@ -5102,7 +5105,7 @@ index d7c0f20..f421e3c 100644
      if ((!frequency.QuadPart && (!QueryPerformanceFrequency(&frequency) || frequency.QuadPart <= 0)) ||
          !QueryPerformanceCounter(&counter)) {
          fprintf(stderr, "[GPU-D3D11] native performance clock failed (win32 %lu)\n", GetLastError());
-@@ -2645,16 +3010,31 @@ static int gpu_append_primitive(Nv2aGpuDraw *state, uint32_t *count, const uint3
+@@ -2645,16 +3013,31 @@ static int gpu_append_primitive(Nv2aGpuDraw *state, uint32_t *count, const uint3
          const VertexAttr *tattr0 = texcoord_attr();
          uint32_t fetch_mask = program ? (gpu_attribute_mask & 0xFFFFu) : 0u;
  
@@ -5123,7 +5126,8 @@ index d7c0f20..f421e3c 100644
 +
          for (vertex = 0; vertex < vertex_count; vertex++) {
              uint32_t index = indices[vertex];
-             uint32_t slot = index & 65535u;
+-            uint32_t slot = index & 65535u;
++            uint32_t slot = index & (GPU_VERTEX_SEEN - 1u);
              Nv2aGpuVertex *destination;
 -            if (gpu_vertex_tags[slot] == gpu_vertex_serial && gpu_vertex_keys[slot] == index) {
 -                gpu_indices[gpu_index_count++] = gpu_vertex_offsets[slot];
@@ -5138,7 +5142,7 @@ index d7c0f20..f421e3c 100644
              gpu_indices[gpu_index_count++] = *count;
              destination = &gpu_vertices[(*count)++];
              s_gpu.gpu_unique_vertices++;
-@@ -2663,16 +3043,20 @@ static int gpu_append_primitive(Nv2aGpuDraw *state, uint32_t *count, const uint3
+@@ -2663,16 +3046,20 @@ static int gpu_append_primitive(Nv2aGpuDraw *state, uint32_t *count, const uint3
                   * it does are overwritten by the fetch below. The named fields
                   * (diffuse/specular/texture/...) are unused on this path, so a
                   * whole-struct memset is pure waste. */
@@ -5168,7 +5172,7 @@ index d7c0f20..f421e3c 100644
                  memcpy(destination->position, destination->attributes[0], sizeof destination->position);
              } else {
                  memset(destination, 0, offsetof(Nv2aGpuVertex, attributes));
-@@ -2769,16 +3153,30 @@ static int gpu_raster_batch(void)
+@@ -2769,16 +3156,30 @@ static int gpu_raster_batch(void)
          gpu_indices = grown; gpu_index_capacity = index_capacity;
      }
      gpu_begin_chunk();
@@ -5206,7 +5210,31 @@ index d7c0f20..f421e3c 100644
      state.stage_program = s_gpu.shader_stage_program; state.combiners = s_gpu.combiners;
      state.shader_clip_mode = s_gpu.shader_clip_mode;
      state.shader_other_stage_input = s_gpu.shader_other_stage_input;
-@@ -2869,6 +3267,45 @@ static int gpu_raster_batch(void)
+@@ -2793,9 +3194,20 @@ static int gpu_raster_batch(void)
+             const char *value = getenv("RECOMP_NV2A_VERTEX_FETCH_ALL");
+             fetch_all = value && *value && strcmp(value, "0") != 0;
+         }
+-        /* Position is retained for the native vertex snapshot even if the program does not read it. */
+-        gpu_attribute_mask = fetch_all ? 0xFFFFu :
+-            nv_cpu_vertex_input_mask(s_gpu.vp_program, s_gpu.vp_valid, s_gpu.vp_start) | 1u;
++        /* Position is retained for the native vertex snapshot even if the program does not read it.
++         * The mask is the program's: worked out again only after a program
++         * word was loaded (vp_words counts them) or the start moved, not for
++         * every batch. */
++        {
++            static uint64_t mask_words = ~0ull;
++            static uint32_t mask_start = ~0u, mask;
++            if (mask_words != (uint64_t)s_gpu.vp_words || mask_start != s_gpu.vp_start) {
++                mask = nv_cpu_vertex_input_mask(s_gpu.vp_program, s_gpu.vp_valid, s_gpu.vp_start) | 1u;
++                mask_words = (uint64_t)s_gpu.vp_words;
++                mask_start = s_gpu.vp_start;
++            }
++            gpu_attribute_mask = fetch_all ? 0xFFFFu : mask;
++        }
+     } else if ((s_gpu.transform_execution_mode & 3u) == 0u && s_gpu.composite_valid == 0xFFFFu) {
+         state.fixed_transform = 1; state.vertex_constants = s_gpu.vp_constants;
+         state.lighting_enable = s_gpu.lighting_enable; state.specular_enable = s_gpu.specular_enable;
+@@ -2869,6 +3281,45 @@ static int gpu_raster_batch(void)
          if (!texture->valid) return gpu_batch_rejected("invalid texture binding");
          if (((texture->raw_format >> 4) & 15u) == 3u)
              binding->depth = 1u << (texture->raw_format >> 28);
@@ -5252,7 +5280,7 @@ index d7c0f20..f421e3c 100644
          if ((mode == 2) != (binding->depth != 0) || (binding->depth && (texture->raw_format & 4u)))
              return gpu_batch_rejected("projective volume texture dimensionality");
          binding->source = memory + texture->offset; binding->width = texture->width; binding->height = texture->height;
-@@ -3008,12 +3445,16 @@ static int gpu_submit_chunk(Nv2aGpuDraw *state, uint32_t *count)
+@@ -3008,12 +3459,16 @@ static int gpu_submit_chunk(Nv2aGpuDraw *state, uint32_t *count)
      }
      s_gpu.gpu_batches++;
      if (state->topology == NV2A_GPU_TOPOLOGY_TRIANGLES) s_gpu.tris_drawn += gpu_index_count / 3;
@@ -5270,7 +5298,7 @@ index d7c0f20..f421e3c 100644
  static void raster_batch(void)
  {
  #ifndef _WIN32
-@@ -3049,6 +3490,153 @@ static void raster_batch(void)
+@@ -3049,6 +3504,153 @@ static void raster_batch(void)
      }
  
  #ifdef _WIN32
@@ -5424,7 +5452,7 @@ index d7c0f20..f421e3c 100644
      double started = gpu_clock_seconds();
      double prior_submit = s_gpu.gpu_submit_seconds;
      int rendered = gpu_raster_batch();
-@@ -3556,6 +4144,40 @@ void nv2a_pb_exec_indices(uint32_t method, const uint32_t *parameters, uint32_t
+@@ -3556,6 +4158,40 @@ void nv2a_pb_exec_indices(uint32_t method, const uint32_t *parameters, uint32_t
      }
  }
  
@@ -5465,7 +5493,7 @@ index d7c0f20..f421e3c 100644
  void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
  {
      static int inited;
-@@ -3615,6 +4237,44 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -3615,6 +4251,44 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
                      subch, method, param);
      }
  
@@ -5510,7 +5538,7 @@ index d7c0f20..f421e3c 100644
      if (xbox_Nv2aNativeFencesEnabled() && subch < 8) {
          if (method == 0) {
              uint32_t instance;
-@@ -3702,8 +4362,34 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -3702,8 +4376,34 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
          extern void xbox_Nv2aAcknowledgeHandshakes(void);
          if (!param)
              return;
@@ -5545,7 +5573,7 @@ index d7c0f20..f421e3c 100644
              /* Deferred: the routine can wait on the GPU (this thread), so the
               * synchronous form deadlocks -- see kernel_bridge. Never dropping it
               * (re-issue until queued, stall on the 0xC-0xE pushbuffer fixups) is
-@@ -3820,6 +4506,7 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -3820,6 +4520,7 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
      if (method == 0x037C) { s_gpu.shade_mode = param; return; }
      if (method == 0x0300) { s_gpu.alpha_enable = param; return; }
      if (method == 0x033C) { s_gpu.alpha_func = param; return; }
@@ -5553,7 +5581,7 @@ index d7c0f20..f421e3c 100644
      if (method == 0x0340) { s_gpu.alpha_ref = param & 255u; return; }
      if (method == 0x034C) { s_gpu.blend_constant = param; return; }
      if (method == 0x0350) { s_gpu.blend_equation = param; return; }
-@@ -4018,26 +4705,8 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -4018,26 +4719,8 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
      #endif
          return;
      }
@@ -5582,7 +5610,7 @@ index d7c0f20..f421e3c 100644
          return;
      }
      if (method >= 0x0A20 && method < 0x0A30) {
-@@ -4253,6 +4922,7 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -4253,6 +4936,7 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
          return;
  
      case NV097_FLIP_STALL:
@@ -5590,7 +5618,7 @@ index d7c0f20..f421e3c 100644
          s_gpu.flush_flip++;
          cloak_marker_idle();
          /* The stall ends when the buffer being read is the one just finished.
-@@ -4276,25 +4946,88 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -4276,25 +4960,88 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
           * per-frame re-decode of render-to-texture surfaces. */
          if (s_gpu.pitch) {
              extern void xbox_FramebufferWindowPresent(uint32_t, uint32_t);
@@ -5813,7 +5841,7 @@ index 341bcaa..070f2b2 100644
      s_get = put_va;
  }
 diff --git a/src/kernel/xbox_memory_layout.c b/src/kernel/xbox_memory_layout.c
-index 4916a66..3c051c4 100644
+index 4916a66..fbacd8e 100644
 --- a/src/kernel/xbox_memory_layout.c
 +++ b/src/kernel/xbox_memory_layout.c
 @@ -1032,6 +1032,11 @@ static void event_signals_tick(void)
@@ -5856,7 +5884,32 @@ index 4916a66..3c051c4 100644
          if (g_nv2a_memory) {
              fprintf(stderr, "  NV2A register aperture: %u MB at Xbox VA "
                      "0x%08X (zeroed, no register semantics)\n",
-@@ -3752,8 +3762,24 @@ static int contig_block_at(uint32_t off, uint32_t *start_off, uint32_t *size)
+@@ -3588,6 +3598,8 @@ static uint32_t g_contig_next = XBOX_CONTIG_BASE + 0x1000u;
+ static struct { uint32_t addr, size; int free; } g_contig_blocks[CONTIG_MAX_BLOCKS];
+ static int g_contig_block_count;
+ static SRWLOCK g_contig_lock = SRWLOCK_INIT;
++/* Bumped by every change to the block table (see xbox_ContigOwnsOffset). */
++static volatile LONG g_contig_generation;
+ 
+ static void contig_insert(int at, uint32_t addr, uint32_t size, int is_free)
+ {
+@@ -3612,6 +3624,7 @@ uint32_t xbox_ContiguousAlloc(uint32_t size, uint32_t alignment)
+      * provenance queries need to tell a genuine contiguous allocation from an
+      * ordinary-RAM numeric collision at all times. */
+     AcquireSRWLockExclusive(&g_contig_lock);
++    InterlockedIncrement(&g_contig_generation);
+     size = (size + 4095u) & ~4095u;
+     if (size == 0) size = 4096;
+ 
+@@ -3672,6 +3685,7 @@ int xbox_ContiguousFree(uint32_t addr)
+     if (!xbox_HeapReclaimEnabled())
+         return 0;
+     AcquireSRWLockExclusive(&g_contig_lock);
++    InterlockedIncrement(&g_contig_generation);
+     for (i = 0; i < g_contig_block_count; i++) {
+         if (g_contig_blocks[i].addr != addr || g_contig_blocks[i].free)
+             continue;
+@@ -3752,8 +3766,24 @@ static int contig_block_at(uint32_t off, uint32_t *start_off, uint32_t *size)
      int i, found = 0;
      int it = 0;
  
@@ -5881,7 +5934,7 @@ index 4916a66..3c051c4 100644
      for (i = 0; i < g_contig_block_count; i++) {
          uint32_t s;
          it++;
-@@ -3764,6 +3790,7 @@ static int contig_block_at(uint32_t off, uint32_t *start_off, uint32_t *size)
+@@ -3764,6 +3794,7 @@ static int contig_block_at(uint32_t off, uint32_t *start_off, uint32_t *size)
              if (start_off) *start_off = s;
              if (size)      *size = g_contig_blocks[i].size;
              found = 1;
@@ -5889,6 +5942,34 @@ index 4916a66..3c051c4 100644
              break;
          }
      }
+@@ -3812,8 +3843,25 @@ int xbox_ContiguousOwnsHead(uint32_t offset)
+ 
+ int xbox_ContigOwnsOffset(uint64_t physical)
+ {
+-    return (physical < CONTIG_ARENA_BYTES)
+-        ? contig_block_at((uint32_t)physical, NULL, NULL) : 0;
++    /* The GPU executor asks this for every vertex array and texture it
++     * binds, mostly about the same few blocks: the last block found, kept
++     * per thread, answers without the lock until any allocation or free
++     * (g_contig_generation) could have changed it. */
++    static __declspec(thread) LONG cached_generation = -1;
++    static __declspec(thread) uint32_t cached_start, cached_end;
++    uint32_t start, size;
++    LONG generation;
++    if (physical >= CONTIG_ARENA_BYTES)
++        return 0;
++    generation = InterlockedCompareExchange(&g_contig_generation, 0, 0);
++    if (generation == cached_generation && (uint32_t)physical >= cached_start && (uint32_t)physical < cached_end)
++        return 1;
++    if (!contig_block_at((uint32_t)physical, &start, &size))
++        return 0;
++    cached_generation = generation;
++    cached_start = start;
++    cached_end = start + size;
++    return 1;
+ }
+ 
+ /* Pages the APU actually wrote through the redirect (clash diagnostic). */
 diff --git a/src/usb/ohci.c b/src/usb/ohci.c
 index d8dc03b..595586d 100644
 --- a/src/usb/ohci.c
