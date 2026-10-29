@@ -1,4 +1,4 @@
-# EvolutionDecomp
+# EvolutionRecomp
 
 A static recompilation of **Turok: Evolution** (Xbox, USA) to native Windows,
 built with the xboxrecomp toolkit
