@@ -4659,10 +4659,18 @@ index e27083f..ae32fae 100644
     if(textureFlags&4)uvw.x=saturate(uvw.x);
     if(textureFlags&8)uvw.y=saturate(uvw.y);
 diff --git a/src/kernel/nv2a_pb_exec.c b/src/kernel/nv2a_pb_exec.c
-index d7c0f20..c403967 100644
+index d7c0f20..4a6c939 100644
 --- a/src/kernel/nv2a_pb_exec.c
 +++ b/src/kernel/nv2a_pb_exec.c
-@@ -117,6 +117,43 @@ static int pb_surf_trace(void)
+@@ -31,6 +31,7 @@
+ #include <stdlib.h>
+ #include <string.h>
+ #include <time.h>
++#include <xmmintrin.h>   /* _mm_prefetch */
+ #include "kernel.h"   /* XBOX_CONTIG_BASE / XBOX_CONTIG_SIZE */
+ #include "xbox_memory_layout.h"   /* xbox_Nv2aFrameCounterFlip */
+ /* The swizzle decoder the D3D8 layer already uses -- one implementation of
+@@ -117,6 +118,43 @@ static int pb_surf_trace(void)
  extern ptrdiff_t xbox_GetMemoryOffset(void);
  extern void xbox_FramebufferWindowSet(uint32_t fb_va, uint32_t pitch);
  extern void xbox_FramebufferWindowStart(void);
@@ -4706,7 +4714,7 @@ index d7c0f20..c403967 100644
  extern uint32_t g_xbox_image_lo, g_xbox_image_hi;
  
  /* Would writing this surface land on the title's own image?
-@@ -437,6 +474,13 @@ static struct {
+@@ -437,6 +475,13 @@ static struct {
       * that has not been drawn yet -- which is how a correctly rendered
       * sequence came out as 12 black BMPs. */
      uint32_t drawn_offset;
@@ -4720,7 +4728,7 @@ index d7c0f20..c403967 100644
      uint64_t pixels;
      uint32_t pixel_max;   /* brightest value any pixel write carried */
      uint32_t clip_x, clip_w, clip_y, clip_h;
-@@ -480,6 +524,7 @@ static struct {
+@@ -480,6 +525,7 @@ static struct {
      uint32_t vp_load, vp_start, constant_load, vp_words, constant_words;
      Nv2aCpuCombiners combiners;
      uint32_t shade_mode, alpha_enable, alpha_func, alpha_ref;
@@ -4728,7 +4736,7 @@ index d7c0f20..c403967 100644
      uint32_t depth_offset, depth_pitch, depth_clear, depth_enable, depth_func, depth_mask, control0;
      uint32_t zmin_max_control, depth_range_valid;
      float depth_clip_min, depth_clip_max;
-@@ -1046,8 +1091,7 @@ static int benign_state_method(uint32_t method)
+@@ -1046,8 +1092,7 @@ static int benign_state_method(uint32_t method)
      case 0x17C4:  /* SET_LIGHT_MODEL_TWO_SIDE_ENABLE  */
      case 0x1D80:  /* UNK1D80                          */
      case 0x1E68:  /* SET_SHADOW_ZSLOPE_THRESHOLD      */
@@ -4738,7 +4746,7 @@ index d7c0f20..c403967 100644
      default:
          return 0;
      }
-@@ -1252,6 +1296,170 @@ static void raster_triangle(const float a[2], const float b[2],
+@@ -1252,6 +1297,170 @@ static void raster_triangle(const float a[2], const float b[2],
                              const float uv[3][2], const Nv2aCpuVertex varying[3]);
  
  #ifdef _WIN32
@@ -4909,7 +4917,7 @@ index d7c0f20..c403967 100644
  static int gpu_clear_surface(uint32_t param)
  {
      static int enabled = -1;
-@@ -1264,13 +1472,36 @@ static int gpu_clear_surface(uint32_t param)
+@@ -1264,13 +1473,36 @@ static int gpu_clear_surface(uint32_t param)
      }
      if (!enabled || s_gpu.clip_x || s_gpu.clip_y || !s_gpu.clip_w || !s_gpu.clip_h)
          return 0;
@@ -4948,7 +4956,7 @@ index d7c0f20..c403967 100644
      if (param & NV097_CLEAR_COLOR_MASK) {
          uint32_t base = dma_resolve(s_gpu.color_offset);
          if (!s_gpu.color_offset || !state.pitch || !state.bytes_per_pixel ||
-@@ -1307,7 +1538,12 @@ static void clear_surface(uint32_t param)
+@@ -1307,7 +1539,12 @@ static void clear_surface(uint32_t param)
  #ifdef _WIN32
      native_clear = gpu_clear_surface(param);
  #endif
@@ -4962,7 +4970,7 @@ index d7c0f20..c403967 100644
  
      if (!native_clear && (param & 3u) && s_gpu.depth_offset && s_gpu.depth_pitch) {
          uint32_t format = (s_gpu.format >> 4) & 15u;
-@@ -1320,7 +1556,7 @@ static void clear_surface(uint32_t param)
+@@ -1320,7 +1557,7 @@ static void clear_surface(uint32_t param)
                  uint8_t *row = mem + base + (size_t)y * s_gpu.depth_pitch;
                  for (x = s_gpu.clip_x; x < s_gpu.clip_x + s_gpu.clip_w; x++) {
                      if (depth_bpp == 2) {
@@ -4971,7 +4979,7 @@ index d7c0f20..c403967 100644
                      } else {
                          uint32_t previous = ((uint32_t *)row)[x];
                          uint32_t mask = ((param & 1u) ? 0xFFFFFF00u : 0u) | ((param & 2u) ? 255u : 0u);
-@@ -1867,6 +2103,18 @@ static void put_pixel(uint8_t *mem, uint32_t bpp, int x, int y, uint32_t argb)
+@@ -1867,6 +2104,18 @@ static void put_pixel(uint8_t *mem, uint32_t bpp, int x, int y, uint32_t argb)
      }
  }
  
@@ -4990,7 +4998,7 @@ index d7c0f20..c403967 100644
  static void present_pvideo_overlay(uint32_t destination)
  {
      const uint8_t *mem = (const uint8_t *)xbox_GetMemoryOffset();
-@@ -2211,7 +2459,7 @@ static void raster_triangle(const float a[2], const float b[2],
+@@ -2211,7 +2460,7 @@ static void raster_triangle(const float a[2], const float b[2],
          }
      }
      s_gpu.tris_drawn++;
@@ -4999,7 +5007,7 @@ index d7c0f20..c403967 100644
  }
  
  /* Attribute 3 is diffuse colour in every NV2A layout that sets one. Absent it,
-@@ -2598,24 +2846,144 @@ static int gpu_decode_volume_texture(void *context, uint32_t level, uint32_t hor
+@@ -2598,24 +2847,144 @@ static int gpu_decode_volume_texture(void *context, uint32_t level, uint32_t hor
      return sample_texture_bound(&texture, horizontal, vertical, color);
  }
  
@@ -5146,7 +5154,7 @@ index d7c0f20..c403967 100644
      if ((!frequency.QuadPart && (!QueryPerformanceFrequency(&frequency) || frequency.QuadPart <= 0)) ||
          !QueryPerformanceCounter(&counter)) {
          fprintf(stderr, "[GPU-D3D11] native performance clock failed (win32 %lu)\n", GetLastError());
-@@ -2645,16 +3013,31 @@ static int gpu_append_primitive(Nv2aGpuDraw *state, uint32_t *count, const uint3
+@@ -2645,16 +3014,39 @@ static int gpu_append_primitive(Nv2aGpuDraw *state, uint32_t *count, const uint3
          const VertexAttr *tattr0 = texcoord_attr();
          uint32_t fetch_mask = program ? (gpu_attribute_mask & 0xFFFFu) : 0u;
  
@@ -5169,6 +5177,14 @@ index d7c0f20..c403967 100644
              uint32_t index = indices[vertex];
 -            uint32_t slot = index & 65535u;
 +            uint32_t slot = index & (GPU_VERTEX_SEEN - 1u);
++            /* The next vertex's attributes, while this one converts: its
++             * index is known, and the fetch otherwise waits on memory. */
++            if (program && vertex + 1 < vertex_count)
++                for (stage = 0; stage < gpu_fetch_count; stage++) {
++                    const FastAttr *f = &gpu_fast_attr[gpu_fetch_stages[stage]];
++                    if (f->mode == FAST_ATTR_MEMORY && indices[vertex + 1] <= f->last_index)
++                        _mm_prefetch((const char *)f->base + (size_t)indices[vertex + 1] * f->stride, _MM_HINT_T0);
++                }
              Nv2aGpuVertex *destination;
 -            if (gpu_vertex_tags[slot] == gpu_vertex_serial && gpu_vertex_keys[slot] == index) {
 -                gpu_indices[gpu_index_count++] = gpu_vertex_offsets[slot];
@@ -5183,7 +5199,7 @@ index d7c0f20..c403967 100644
              gpu_indices[gpu_index_count++] = *count;
              destination = &gpu_vertices[(*count)++];
              s_gpu.gpu_unique_vertices++;
-@@ -2663,16 +3046,20 @@ static int gpu_append_primitive(Nv2aGpuDraw *state, uint32_t *count, const uint3
+@@ -2663,16 +3055,20 @@ static int gpu_append_primitive(Nv2aGpuDraw *state, uint32_t *count, const uint3
                   * it does are overwritten by the fetch below. The named fields
                   * (diffuse/specular/texture/...) are unused on this path, so a
                   * whole-struct memset is pure waste. */
@@ -5213,7 +5229,7 @@ index d7c0f20..c403967 100644
                  memcpy(destination->position, destination->attributes[0], sizeof destination->position);
              } else {
                  memset(destination, 0, offsetof(Nv2aGpuVertex, attributes));
-@@ -2769,16 +3156,30 @@ static int gpu_raster_batch(void)
+@@ -2769,16 +3165,30 @@ static int gpu_raster_batch(void)
          gpu_indices = grown; gpu_index_capacity = index_capacity;
      }
      gpu_begin_chunk();
@@ -5251,7 +5267,7 @@ index d7c0f20..c403967 100644
      state.stage_program = s_gpu.shader_stage_program; state.combiners = s_gpu.combiners;
      state.shader_clip_mode = s_gpu.shader_clip_mode;
      state.shader_other_stage_input = s_gpu.shader_other_stage_input;
-@@ -2793,9 +3194,21 @@ static int gpu_raster_batch(void)
+@@ -2793,9 +3203,21 @@ static int gpu_raster_batch(void)
              const char *value = getenv("RECOMP_NV2A_VERTEX_FETCH_ALL");
              fetch_all = value && *value && strcmp(value, "0") != 0;
          }
@@ -5276,7 +5292,7 @@ index d7c0f20..c403967 100644
      } else if ((s_gpu.transform_execution_mode & 3u) == 0u && s_gpu.composite_valid == 0xFFFFu) {
          state.fixed_transform = 1; state.vertex_constants = s_gpu.vp_constants;
          state.lighting_enable = s_gpu.lighting_enable; state.specular_enable = s_gpu.specular_enable;
-@@ -2869,6 +3282,45 @@ static int gpu_raster_batch(void)
+@@ -2869,6 +3291,45 @@ static int gpu_raster_batch(void)
          if (!texture->valid) return gpu_batch_rejected("invalid texture binding");
          if (((texture->raw_format >> 4) & 15u) == 3u)
              binding->depth = 1u << (texture->raw_format >> 28);
@@ -5322,7 +5338,7 @@ index d7c0f20..c403967 100644
          if ((mode == 2) != (binding->depth != 0) || (binding->depth && (texture->raw_format & 4u)))
              return gpu_batch_rejected("projective volume texture dimensionality");
          binding->source = memory + texture->offset; binding->width = texture->width; binding->height = texture->height;
-@@ -3008,12 +3460,16 @@ static int gpu_submit_chunk(Nv2aGpuDraw *state, uint32_t *count)
+@@ -3008,12 +3469,16 @@ static int gpu_submit_chunk(Nv2aGpuDraw *state, uint32_t *count)
      }
      s_gpu.gpu_batches++;
      if (state->topology == NV2A_GPU_TOPOLOGY_TRIANGLES) s_gpu.tris_drawn += gpu_index_count / 3;
@@ -5340,7 +5356,7 @@ index d7c0f20..c403967 100644
  static void raster_batch(void)
  {
  #ifndef _WIN32
-@@ -3049,6 +3505,153 @@ static void raster_batch(void)
+@@ -3049,6 +3514,153 @@ static void raster_batch(void)
      }
  
  #ifdef _WIN32
@@ -5494,7 +5510,7 @@ index d7c0f20..c403967 100644
      double started = gpu_clock_seconds();
      double prior_submit = s_gpu.gpu_submit_seconds;
      int rendered = gpu_raster_batch();
-@@ -3556,6 +4159,40 @@ void nv2a_pb_exec_indices(uint32_t method, const uint32_t *parameters, uint32_t
+@@ -3556,6 +4168,83 @@ void nv2a_pb_exec_indices(uint32_t method, const uint32_t *parameters, uint32_t
      }
  }
  
@@ -5532,10 +5548,53 @@ index d7c0f20..c403967 100644
 +    }
 +}
 +
++/* A run of a packet's parameters (contiguous words) for nv2a_pb_run: the
++ * ones nv2a_pb_exec_method's fast path would handle -- index lists, vertex-
++ * program and constant uploads, zero no-ops -- in one call. Returns how many
++ * words it took (0: run them one at a time); it stops at the first word it
++ * would not handle. Not while tracing, whose output is per word. */
++uint32_t nv2a_pb_exec_run(uint32_t subch, uint32_t method, int noninc, const uint32_t *words, uint32_t count)
++{
++    static int verbose = -1;
++    uint32_t taken = 0;
++    if (verbose < 0) verbose = pb_verbose_trace();
++    if (subch != 0 || verbose || !count) return 0;
++    if (noninc && (method == NV097_ARRAY_ELEMENT16 || method == NV097_ARRAY_ELEMENT32)) {
++        int sixteen = method == NV097_ARRAY_ELEMENT16;
++        if (!require_index_capacity(count * (sixteen ? 2u : 1u), method)) return 0;
++        for (; taken < count; taken++) {
++            uint32_t word = words[taken];
++            if (sixteen) {
++                append_vertex_index(word & 0xFFFFu);
++                append_vertex_index(word >> 16);
++            } else
++                append_vertex_index(word);
++        }
++        if (sixteen) s_gpu.array16_indices += (uint64_t)count * 2;
++        else {
++            s_gpu.array32_indices += count;
++            s_gpu.batch_array32_count += count;
++        }
++        return taken;
++    }
++    if (method >= 0x0B00 && method < 0x0C00) {
++        for (; taken < count && method >= 0x0B00 && method < 0x0C00; taken++) {
++            vertex_program_upload(method, words[taken]);
++            if (!noninc) method += 4;
++        }
++        return taken;
++    }
++    if (noninc && method == 0x0100) {
++        while (taken < count && !words[taken]) taken++;
++        return taken;
++    }
++    return 0;
++}
++
  void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
  {
      static int inited;
-@@ -3615,6 +4252,44 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -3615,6 +4304,44 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
                      subch, method, param);
      }
  
@@ -5580,7 +5639,7 @@ index d7c0f20..c403967 100644
      if (xbox_Nv2aNativeFencesEnabled() && subch < 8) {
          if (method == 0) {
              uint32_t instance;
-@@ -3702,8 +4377,34 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -3702,8 +4429,34 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
          extern void xbox_Nv2aAcknowledgeHandshakes(void);
          if (!param)
              return;
@@ -5615,7 +5674,7 @@ index d7c0f20..c403967 100644
              /* Deferred: the routine can wait on the GPU (this thread), so the
               * synchronous form deadlocks -- see kernel_bridge. Never dropping it
               * (re-issue until queued, stall on the 0xC-0xE pushbuffer fixups) is
-@@ -3820,6 +4521,7 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -3820,6 +4573,7 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
      if (method == 0x037C) { s_gpu.shade_mode = param; return; }
      if (method == 0x0300) { s_gpu.alpha_enable = param; return; }
      if (method == 0x033C) { s_gpu.alpha_func = param; return; }
@@ -5623,7 +5682,7 @@ index d7c0f20..c403967 100644
      if (method == 0x0340) { s_gpu.alpha_ref = param & 255u; return; }
      if (method == 0x034C) { s_gpu.blend_constant = param; return; }
      if (method == 0x0350) { s_gpu.blend_equation = param; return; }
-@@ -4018,26 +4720,8 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -4018,26 +4772,8 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
      #endif
          return;
      }
@@ -5652,7 +5711,7 @@ index d7c0f20..c403967 100644
          return;
      }
      if (method >= 0x0A20 && method < 0x0A30) {
-@@ -4253,6 +4937,7 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -4253,6 +4989,7 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
          return;
  
      case NV097_FLIP_STALL:
@@ -5660,7 +5719,7 @@ index d7c0f20..c403967 100644
          s_gpu.flush_flip++;
          cloak_marker_idle();
          /* The stall ends when the buffer being read is the one just finished.
-@@ -4276,25 +4961,88 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -4276,25 +5013,88 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
           * per-frame re-decode of render-to-texture surfaces. */
          if (s_gpu.pitch) {
              extern void xbox_FramebufferWindowPresent(uint32_t, uint32_t);
@@ -5758,10 +5817,14 @@ index d7c0f20..c403967 100644
                  nv2a_pb_exec_flush();
              }
 diff --git a/src/kernel/nv2a_pb_scan.c b/src/kernel/nv2a_pb_scan.c
-index 341bcaa..070f2b2 100644
+index 341bcaa..3df5235 100644
 --- a/src/kernel/nv2a_pb_scan.c
 +++ b/src/kernel/nv2a_pb_scan.c
-@@ -69,10 +69,17 @@ extern void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -66,13 +66,21 @@ uint32_t g_pb_current_va;
+ /* Executing is opt-in separately from surveying: a survey is read-only, while
+  * the executor writes to guest memory. */
+ extern void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param);
++extern uint32_t nv2a_pb_exec_run(uint32_t subch, uint32_t method, int noninc, const uint32_t *words, uint32_t count);
  extern void nv2a_pb_exec_report(void);
  static int s_exec_enabled = -1;
  
@@ -5779,7 +5842,7 @@ index 341bcaa..070f2b2 100644
      if (!s_seen_index_ready) {
          memset(s_seen_index, 0xFF, sizeof s_seen_index);
          s_seen_index_ready = 1;
-@@ -265,6 +272,8 @@ void nv2a_pb_scan(uint32_t start_va, uint32_t end_va)
+@@ -265,6 +273,8 @@ void nv2a_pb_scan(uint32_t start_va, uint32_t end_va)
  
      if (s_exec_enabled < 0)
          s_exec_enabled = getenv("RECOMP_PB_EXEC") != NULL;
@@ -5788,7 +5851,7 @@ index 341bcaa..070f2b2 100644
      static int scan = -1;
      if (scan < 0)
          scan = getenv("RECOMP_PB_SCAN") != NULL;
-@@ -307,6 +316,9 @@ void nv2a_pb_run(uint32_t put_va)
+@@ -307,6 +317,9 @@ void nv2a_pb_run(uint32_t put_va)
       * one. A local here lost it, and the RETURN then went nowhere (or worse,
       * took the stale s_get). */
      static uint32_t ret;
@@ -5798,7 +5861,7 @@ index 341bcaa..070f2b2 100644
      uint32_t va;
      uint32_t budget = 0x200000u;
      const uint32_t win_lo = XBOX_CONTIG_BASE;
-@@ -364,6 +376,15 @@ void nv2a_pb_run(uint32_t put_va)
+@@ -364,6 +377,15 @@ void nv2a_pb_run(uint32_t put_va)
      unsigned ret_u_n = 0;
  
      while (va != put_va && budget && !desync) {
@@ -5814,7 +5877,7 @@ index 341bcaa..070f2b2 100644
          if (va < win_lo || va + 4u > win_hi || (va & 3u)) {
              why = "read out of contiguous window";
              desync = 1;
-@@ -385,6 +406,26 @@ void nv2a_pb_run(uint32_t put_va)
+@@ -385,6 +407,43 @@ void nv2a_pb_run(uint32_t put_va)
              }
              if (!st.noninc) st.method += 4;
              st.count--;
@@ -5830,7 +5893,24 @@ index 341bcaa..070f2b2 100644
 +            if (s_exec_enabled && !s_survey && bulk) {
 +                while (st.count && va != put_va && va + 4u <= win_hi && budget &&
 +                       !(call_end && va == call_end)) {
++                    /* As many as can be taken at once (index lists,
++                     * uploads, padding): up to PUT, the window's end or the
++                     * block's end, whichever is first. */
++                    uint32_t run = st.count, taken;
++                    if (put_va > va && (put_va - va) / 4u < run) run = (put_va - va) / 4u;
++                    if ((win_hi - va) / 4u < run) run = (win_hi - va) / 4u;
++                    if (call_end > va && (call_end - va) / 4u < run) run = (call_end - va) / 4u;
++                    if (budget < run) run = budget;
 +                    g_pb_current_va = va;
++                    taken = nv2a_pb_exec_run(st.subch, st.method, st.noninc,
++                                             (const uint32_t *)(mem + va), run);
++                    if (taken) {
++                        va += taken * 4u;
++                        budget -= taken;
++                        if (!st.noninc) st.method += taken * 4u;
++                        st.count -= taken;
++                        continue;
++                    }
 +                    nv2a_pb_exec_method(st.subch, st.method, *(const uint32_t *)(mem + va));
 +                    va += 4;
 +                    budget--;
@@ -5841,7 +5921,7 @@ index 341bcaa..070f2b2 100644
              continue;
          }
  
-@@ -413,10 +454,31 @@ void nv2a_pb_run(uint32_t put_va)
+@@ -413,10 +472,31 @@ void nv2a_pb_run(uint32_t put_va)
          } else if ((w & 3u) == 2u) {                                /* CALL */
              ret = va;                                               /* after CALL */
              off = w & 0x0FFFFFFCu;
@@ -5874,7 +5954,7 @@ index 341bcaa..070f2b2 100644
              continue;
          } else if ((w & 0xE0030003u) == 0u
                  || (w & 0xE0030003u) == 0x40000000u) {              /* method */
-@@ -587,6 +649,7 @@ void nv2a_pb_run(uint32_t put_va)
+@@ -587,6 +667,7 @@ void nv2a_pb_run(uint32_t put_va)
      if (desync || !budget) {
          st.count = 0;
          ret = 0;
