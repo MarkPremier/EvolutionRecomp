@@ -5688,23 +5688,37 @@ index d7c0f20..f421e3c 100644
                  nv2a_pb_exec_flush();
              }
 diff --git a/src/kernel/nv2a_pb_scan.c b/src/kernel/nv2a_pb_scan.c
-index 341bcaa..8cdd030 100644
+index 341bcaa..070f2b2 100644
 --- a/src/kernel/nv2a_pb_scan.c
 +++ b/src/kernel/nv2a_pb_scan.c
-@@ -73,6 +73,12 @@ static void note(uint32_t subch, uint32_t method)
+@@ -69,10 +69,17 @@ extern void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+ extern void nv2a_pb_exec_report(void);
+ static int s_exec_enabled = -1;
+ 
++/* The inventory is only printed under RECOMP_PB_SCAN (nv2a_pb_scan_report),
++ * and counting every word for nothing was a tenth of the executor's time in a
++ * busy Turok Evolution scene. -1 until read. */
++static int s_survey = -1;
++
+ static void note(uint32_t subch, uint32_t method)
  {
      uint32_t sub, m;
      int16_t slot;
-+    /* The inventory is only printed under RECOMP_PB_SCAN (nv2a_pb_scan_report),
-+     * and counting every word for nothing was a tenth of the executor's time
-+     * in a busy Turok Evolution scene. */
-+    static int surveying = -1;
-+    if (surveying < 0) surveying = getenv("RECOMP_PB_SCAN") != NULL;
-+    if (!surveying) return;
++    if (s_survey < 0) s_survey = getenv("RECOMP_PB_SCAN") != NULL;
++    if (!s_survey) return;
      if (!s_seen_index_ready) {
          memset(s_seen_index, 0xFF, sizeof s_seen_index);
          s_seen_index_ready = 1;
-@@ -307,6 +313,9 @@ void nv2a_pb_run(uint32_t put_va)
+@@ -265,6 +272,8 @@ void nv2a_pb_scan(uint32_t start_va, uint32_t end_va)
+ 
+     if (s_exec_enabled < 0)
+         s_exec_enabled = getenv("RECOMP_PB_EXEC") != NULL;
++    if (s_survey < 0)
++        s_survey = getenv("RECOMP_PB_SCAN") != NULL;
+     static int scan = -1;
+     if (scan < 0)
+         scan = getenv("RECOMP_PB_SCAN") != NULL;
+@@ -307,6 +316,9 @@ void nv2a_pb_run(uint32_t put_va)
       * one. A local here lost it, and the RETURN then went nowhere (or worse,
       * took the stale s_get). */
      static uint32_t ret;
@@ -5714,7 +5728,7 @@ index 341bcaa..8cdd030 100644
      uint32_t va;
      uint32_t budget = 0x200000u;
      const uint32_t win_lo = XBOX_CONTIG_BASE;
-@@ -364,6 +373,15 @@ void nv2a_pb_run(uint32_t put_va)
+@@ -364,6 +376,15 @@ void nv2a_pb_run(uint32_t put_va)
      unsigned ret_u_n = 0;
  
      while (va != put_va && budget && !desync) {
@@ -5730,7 +5744,34 @@ index 341bcaa..8cdd030 100644
          if (va < win_lo || va + 4u > win_hi || (va & 3u)) {
              why = "read out of contiguous window";
              desync = 1;
-@@ -413,10 +431,31 @@ void nv2a_pb_run(uint32_t put_va)
+@@ -385,6 +406,26 @@ void nv2a_pb_run(uint32_t put_va)
+             }
+             if (!st.noninc) st.method += 4;
+             st.count--;
++            /* The rest of the packet's parameters, straight through: they
++             * are contiguous, so only PUT, the window, a RunPushBuffer
++             * block's end and the budget can stop them -- the per-word
++             * bookkeeping above is for headers. A packet carries up to
++             * 2047 words and a frame some hundred thousand, mostly index
++             * lists, constants and padding. The diagnostic rings keep each
++             * packet's first word. */
++            static int bulk = -1;
++            if (bulk < 0) bulk = !getenv("RECOMP_PB_BULK") || strcmp(getenv("RECOMP_PB_BULK"), "0") != 0;
++            if (s_exec_enabled && !s_survey && bulk) {
++                while (st.count && va != put_va && va + 4u <= win_hi && budget &&
++                       !(call_end && va == call_end)) {
++                    g_pb_current_va = va;
++                    nv2a_pb_exec_method(st.subch, st.method, *(const uint32_t *)(mem + va));
++                    va += 4;
++                    budget--;
++                    if (!st.noninc) st.method += 4;
++                    st.count--;
++                }
++            }
+             continue;
+         }
+ 
+@@ -413,10 +454,31 @@ void nv2a_pb_run(uint32_t put_va)
          } else if ((w & 3u) == 2u) {                                /* CALL */
              ret = va;                                               /* after CALL */
              off = w & 0x0FFFFFFCu;
@@ -5763,7 +5804,7 @@ index 341bcaa..8cdd030 100644
              continue;
          } else if ((w & 0xE0030003u) == 0u
                  || (w & 0xE0030003u) == 0x40000000u) {              /* method */
-@@ -587,6 +626,7 @@ void nv2a_pb_run(uint32_t put_va)
+@@ -587,6 +649,7 @@ void nv2a_pb_run(uint32_t put_va)
      if (desync || !budget) {
          st.count = 0;
          ret = 0;
