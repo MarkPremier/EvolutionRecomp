@@ -103,6 +103,14 @@ if(MSVC)
     )
     # The generated code files can be very large. Increase object file section limit.
     target_compile_options(${PROJECT_NAME} PRIVATE /bigobj)
+    # Whole-program optimisation for Release: the generated functions call
+    # each other across hundreds of files, and only link-time code
+    # generation can inline the small ones into their callers.
+    option(RECOMP_LTCG "Link-time code generation for Release builds" ON)
+    if(RECOMP_LTCG)
+        target_compile_options(${PROJECT_NAME} PRIVATE $<$<CONFIG:Release>:/GL>)
+        target_link_options(${PROJECT_NAME} PRIVATE $<$<CONFIG:Release>:/LTCG>)
+    endif()
 endif()
 
 # ── Game-specific additions ─────────────────────────────────────

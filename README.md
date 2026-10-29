@@ -161,6 +161,10 @@ Recomp/
    cmake --build build --config Release --parallel
    ```
 
+   Release builds use link-time code generation (`-DRECOMP_LTCG=OFF` turns
+   it off): it inlines the generated functions' small callees across files
+   and is worth about a quarter more frame rate in busy scenes.
+
 5. **Run**
 
    ```
