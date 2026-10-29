@@ -8,13 +8,6 @@ the Xbox kernel, GPU (NV2A) and audio (MCPX APU) are provided by the
 xboxrecomp runtime. **No game code or data is in this repository.** You need
 your own disc image, and the C code is generated from it on your machine.
 
-## Status
-
-- Boots, plays the Acclaim logo and the intro movie, reaches the title screen.
-- Rendering runs on the toolkit's CPU rasterizer: about 9 fps, and the title
-  screen's 3D backdrop flickers. Next step is a Direct3D 11 GPU backend.
-- Controller input is untested.
-
 ## What you need
 
 - An original Xbox disc image of Turok: Evolution (USA), XISO format
