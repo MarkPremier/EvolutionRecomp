@@ -104,6 +104,9 @@ static const VideoSetting k_settings[SETTING_COUNT] = {
 };
 
 static int s_values[SETTING_COUNT];
+/* Mouse look's state (video_settings_mouse_look). */
+static DWORD s_turn_seen;              /* when a turn function last asked (on foot) */
+static int s_mouse_raw = -1;           /* what the input layer was last told */
 
 /* ── PC controls ──────────────────────────────────────────────────
  *
@@ -1858,7 +1861,7 @@ static void apply_setting(int setting)
     case SET_ANISOTROPY: nv2a_gpu_set_anisotropy(1 << s_values[SET_ANISOTROPY]); break;
     case SET_MSAA: nv2a_gpu_set_msaa(1 << s_values[SET_MSAA]); break;
     case SET_ICONS: nv2a_gpu_set_texture_replacements(s_values[SET_ICONS]); break;
-    case SET_MOUSE_LOOK: xbox_KbmSetRawMouse(s_values[SET_MOUSE_LOOK]); break;
+    case SET_MOUSE_LOOK: xbox_KbmSetRawMouse(s_values[SET_MOUSE_LOOK]); s_mouse_raw = s_values[SET_MOUSE_LOOK]; break;
     case SET_DRAW_DISTANCE:           /* read each frame */
     case SET_BODIES:
     case SET_DECALS:
@@ -1890,6 +1893,21 @@ void video_settings_mouse_look(void)
     controls_frame();
     menu_pointer();
     if (s_values[SET_MOUSE_LOOK] != 1) return;
+    /* Raw look works through the on-foot turn functions. When they have not
+     * run for a moment while playing -- flying, a vehicle, a turret: control
+     * the game steers some other way -- the mouse drives the right stick
+     * instead, as Mouse look "stick" does, until they run again. */
+    {
+        int on_foot = s_in_menu || GetTickCount() - s_turn_seen < 300;
+        if (on_foot != s_mouse_raw) {
+            s_mouse_raw = on_foot;
+            xbox_KbmSetRawMouse(on_foot);
+        }
+        if (!on_foot) {
+            s_mouse_turn[0] = s_mouse_turn[1] = 0;
+            return;
+        }
+    }
     xbox_FramebufferMouseDelta(&dx, &dy);
     if (s_in_menu) {
         s_mouse_turn[0] = s_mouse_turn[1] = 0;
@@ -1906,6 +1924,7 @@ void video_settings_mouse_look(void)
 
 float video_settings_take_mouse_turn(int axis)
 {
+    s_turn_seen = GetTickCount();
     float turn = s_mouse_turn[axis & 1];
     s_mouse_turn[axis & 1] = 0;
     return turn;

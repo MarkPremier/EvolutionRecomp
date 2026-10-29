@@ -277,7 +277,7 @@ effect at once and are kept in `turok_settings.ini` beside the exe:
 | Anisotropy | off, 2x, 4x, 8x, 16x (16x by default) | |
 | MSAA | off, 2x, 4x, 8x | |
 | Button icons | xbox, pc | |
-| Mouse look | raw, stick | |
+| Mouse look | raw, stick (raw falls back to stick while the on-foot turning is not running: flying, vehicles, turrets) | |
 | Mouse speed | 1 to 10 (5 by default; each step 1.4x) | |
 | Draw distance | normal, 2x, 4x, 8x (2x by default) | |
 | Keep bodies | off, on (off by default) | |
