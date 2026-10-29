@@ -294,6 +294,125 @@ void sub_000F21B0(void)
     if (offscreen) g_eax = 1;
 }
 
+/* ── Box-in-view test (sub_00021A90) ───────────────────────────
+ *
+ * camera->InView(centre, axes) (this-call, ret 8): 1 if a box is in view,
+ * 0 if not. It first transforms the centre by the camera's view matrix
+ * (rows at +0x58/+0x68/+0x78, translation +0x88) and accepts it if it lies
+ * between the near and far planes (+0xF0/+0xF4) and within the cotangents
+ * of the half fields of view (+0x108/+0x10C, kept by sub_00020030 while
+ * +0x1A8 bit 1 is clear); only otherwise does it test the box's corners
+ * against the six planes. The scene's culling calls it for every object, a
+ * fifth of the game thread in busy views, so both tests are done here
+ * natively with the original's roundings (x87 below); what they do not
+ * settle -- a stale cache, a box across a plane, a NaN -- is left to it. */
+extern void sub_00021A90_gen(void);
+extern __declspec(thread) uint16_t g_fp_control_word;
+
+/* One x87 operation's result as the generated code rounds it: to float
+ * while the control word asks for single precision (as D3D leaves it), else
+ * kept. Out-of-range results (where it rounds more carefully) do not occur
+ * in these tests' inputs; they would at worst send a box the other way at a
+ * plane's exact edge. */
+static double x87(double value)
+{
+    return (g_fp_control_word & 0x300u) ? value : (double)(float)value;
+}
+#define FMUL(a, b) x87((double)(a) * (double)(b))
+#define FADD(a, b) x87((double)(a) + (double)(b))
+
+/* Camera row (x, y, z multipliers at +m, +m+0x10, +m+0x20) applied to a
+ * point as the original orders it: z, plus y, plus x, plus translation. */
+static double view_row(uint32_t camera, uint32_t m, double x, double y, double z)
+{
+    double v = FADD(FMUL(z, guest_float(camera + m + 0x20u)), FMUL(y, guest_float(camera + m + 0x10u)));
+    v = FADD(v, FMUL(x, guest_float(camera + m)));
+    return FADD(v, guest_float(camera + m + 0x30u));
+}
+
+static int in_view(uint32_t camera, uint32_t point, uint32_t axes)
+{
+    double x = guest_float(point), y = guest_float(point + 4u), z = guest_float(point + 8u);
+
+    if (!(TUROK_MEM32(camera + 0x1A8u) & 2u)) {
+        double depth = view_row(camera, 0x60u, x, y, z);
+        if (depth >= guest_float(camera + 0xF0u) && depth <= guest_float(camera + 0xF4u)) {
+            float across = (float)view_row(camera, 0x58u, x, y, z);
+            float up = (float)view_row(camera, 0x5Cu, x, y, z);
+            double limit = (float)depth;
+            double h = FMUL(across, guest_float(camera + 0x108u));
+            double v = FMUL(up, guest_float(camera + 0x10Cu));
+            if (h <= limit && -h <= limit && v <= limit && -v <= limit)
+                return 1;
+        }
+    }
+    /* The plane test: the box is the centre argument as a corner plus three
+     * edges (second argument). Against each of the six planes the camera
+     * keeps (normals +0x144, distances +0x18C; valid while +0x1A8 bit 4 is
+     * clear and the cache is for argument 0, +0x1A4), the corner furthest
+     * along the normal behind it means out of view (0), and the nearest in
+     * front of every plane means wholly in view (1). The original keeps the
+     * far corner in x87 registers and stores the near one as float. A box
+     * across a plane goes on to the original's finer test. */
+    if (!(TUROK_MEM32(camera + 0x1A8u) & 0x10u) && TUROK_MEM32(camera + 0x1A4u) == 0) {
+        uint32_t plane, k;
+        int inside = 0;
+        for (plane = 0; plane < 6; plane++) {
+            uint32_t normal = camera + 0x144u + plane * 12u;
+            double nx = guest_float(normal), ny = guest_float(normal + 4u), nz = guest_float(normal + 8u);
+            double far_x = x, far_y = y, far_z = z, distance = guest_float(camera + 0x18Cu + plane * 4u), d;
+            float near_x = (float)x, near_y = (float)y, near_z = (float)z;
+            for (k = 0; k < 3; k++) {
+                uint32_t edge = axes + k * 12u;
+                double ex = guest_float(edge), ey = guest_float(edge + 4u), ez = guest_float(edge + 8u);
+                if (FADD(FADD(FMUL(ez, nz), FMUL(ey, ny)), FMUL(nx, ex)) > 0.0) {
+                    far_x = FADD(far_x, ex); far_y = FADD(far_y, ey); far_z = FADD(far_z, ez);
+                } else {
+                    near_x = (float)FADD(near_x, ex); near_y = (float)FADD(near_y, ey); near_z = (float)FADD(near_z, ez);
+                }
+            }
+            d = FADD(FADD(FADD(FMUL(far_x, nx), FMUL(far_z, nz)), FMUL(far_y, ny)), distance);
+            if (d < 0.0)
+                return 0;
+            d = FADD(FADD(FADD(FMUL(near_z, nz), FMUL(near_y, ny)), FMUL(near_x, nx)), distance);
+            if (d >= 0.0)
+                inside++;
+        }
+        if (inside == 6)
+            return 1;
+    }
+    return -1;
+}
+
+/* RECOMP_CULL_STATS=1 reports how many tests were settled here;
+ * RECOMP_CULL_VERIFY=1 also runs the original for every one and counts the
+ * answers that differ. */
+void sub_00021A90(void)
+{
+    static int stats = -1, verify;
+    static unsigned long long settled, passed, differ;
+    int answer = in_view(g_ecx, TUROK_MEM32(g_esp + 4), TUROK_MEM32(g_esp + 8));
+
+    if (stats < 0) {
+        verify = getenv("RECOMP_CULL_VERIFY") != NULL;
+        stats = verify || getenv("RECOMP_CULL_STATS") != NULL;
+    }
+    if (stats && settled + passed >= 4000000u) {
+        fprintf(stderr, "[CULL] in-view tests: %llu settled natively, %llu by the original, %llu differ\n",
+                settled, passed, differ);
+        settled = passed = differ = 0;
+    }
+    if (answer < 0 || verify) {
+        sub_00021A90_gen();
+        if (answer < 0) passed++;
+        else { settled++; if ((int)g_eax != answer) differ++; }
+        return;
+    }
+    settled++;
+    g_eax = (uint32_t)answer;
+    g_esp += 12;   /* ret 8 */
+}
+
 /* ── Which screen the game is on (sub_00054A60) ────────────────
  *
  * The screen loader (this-call) builds y:\data\precachelists\autolists\
