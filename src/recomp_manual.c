@@ -380,6 +380,45 @@ static int in_view(uint32_t camera, uint32_t point, uint32_t axes)
         }
         if (inside == 6)
             return 1;
+
+        /* A box across a plane: the original takes its eight corners, and is
+         * out of view if all eight are behind one plane, in view if any is in
+         * front of all six; only then does it test the twelve edges
+         * (sub_000201B0). It orders each corner's sums differently, so here a
+         * corner whose distance is within rounding of a plane leaves the box
+         * to it; every other sign is the original's. */
+        {
+            double corner[8][3];
+            int behind[6] = {0}, in_front[8] = {0}, c, axis;
+            for (c = 0; c < 8; c++) {
+                double p[3] = {x, y, z};
+                for (k = 0; k < 3; k++)
+                    if (c & (1 << k))
+                        for (axis = 0; axis < 3; axis++)
+                            p[axis] = (float)FADD(p[axis], guest_float(axes + k * 12u + axis * 4u));
+                memcpy(corner[c], p, sizeof p);
+            }
+            for (plane = 0; plane < 6; plane++) {
+                uint32_t normal = camera + 0x144u + plane * 12u;
+                double nx = guest_float(normal), ny = guest_float(normal + 4u), nz = guest_float(normal + 8u);
+                double distance = guest_float(camera + 0x18Cu + plane * 4u);
+                for (c = 0; c < 8; c++) {
+                    double tx = corner[c][0] * nx, ty = corner[c][1] * ny, tz = corner[c][2] * nz;
+                    double d = tx + ty + tz + distance;
+                    double margin = 1e-4 * (fabs(tx) + fabs(ty) + fabs(tz) + fabs(distance)) + 1e-6;
+                    if (d != d || fabs(d) <= margin)
+                        return -1;
+                    if (d < 0.0) behind[plane]++;
+                    else in_front[c]++;
+                }
+            }
+            for (plane = 0; plane < 6; plane++)
+                if (behind[plane] == 8)
+                    return 0;
+            for (c = 0; c < 8; c++)
+                if (in_front[c] == 6)
+                    return 1;
+        }
     }
     return -1;
 }

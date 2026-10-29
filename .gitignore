@@ -56,3 +56,4 @@ stdout.txt
 # OS
 Thumbs.db
 .DS_Store
+build_prof/
