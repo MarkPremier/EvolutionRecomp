@@ -334,15 +334,28 @@ void sub_0001FD20(void)
  * manager offers casts its shadow, and the light camera clips the rest. */
 extern void sub_000F21B0_gen(void);
 
+/* Its caller, the shadow pass's actor loop in sub_0017E2D0, holds the actor
+ * in esi. The ambient birds -- FlyingIndigenousAI, vtable 0x21A240 (made by
+ * sub_0012D370), set dressing circling high over the levels -- cast none:
+ * their shadows landed far below them as stray blobs on the ground. Flying
+ * enemies (FlyingEnemyAI) still do. RECOMP_SHADOW_BIRDS=1 gives the birds
+ * theirs back. */
+extern __declspec(thread) uint32_t g_esi;
+#define FLYING_INDIGENOUS_AI_VTABLE 0x0021A240u
+
 void sub_000F21B0(void)
 {
-    static int offscreen = -1;
+    static int offscreen = -1, birds = -1;
+    uint32_t actor = g_esi;
     if (offscreen < 0) {
         const char *text = getenv("RECOMP_SHADOW_OFFSCREEN");
         offscreen = !text || atoi(text) != 0;
+        birds = getenv("RECOMP_SHADOW_BIRDS") && atoi(getenv("RECOMP_SHADOW_BIRDS")) != 0;
     }
     sub_000F21B0_gen();
     if (offscreen) g_eax = 1;
+    if (!birds && actor && TUROK_MEM32(actor) == FLYING_INDIGENOUS_AI_VTABLE)
+        g_eax = 0;
 }
 
 /* ── Keep bodies (Video Options) ───────────────────────────────
