@@ -18,9 +18,9 @@ CPU-renderer build (about 9 fps on the title screen).
 - Boots through the Acclaim logo and the intro movie (full rate, ~59 fps) to
   the title screen and menus.
 - New game reaches Chapter 1: terrain, jungle, weapon and HUD render at about
-  58 fps, without flicker.
-- Controller works (any XInput pad), as controller 1: move, look, jump,
-  fire, weapon switching and pause.
+  58 fps, without flicker. Played through to the pteranodon flying level.
+- Controller works (any XInput pad, tested in play), as controller 1: move,
+  look, jump, fire, weapon switching, pause and rumble.
 - Keyboard and mouse work too, merged onto controller 1 (see Controls).
 - Dinosaurs and Turok cast shadows, with filtered (PCF) edges.
   `RECOMP_SHADOWS=0` turns them off. They reach further than on the Xbox:
