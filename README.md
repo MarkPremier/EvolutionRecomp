@@ -362,5 +362,9 @@ Useful while debugging:
   reads. `RECOMP_SHADER_GENERIC=1` draws everything with the generic pixel
   shader, to check it against the compiled ones. The periodic GPU report
   (`RECOMP_PB_REPORT_MS`) stalls ~0.5 s each time, so it is off by default
+- `RECOMP_FPS_LOG=5` logs the frame rate and the worst frame every 5
+  seconds. Use it to measure speed: a hitch threshold that most frames
+  cross logs a line per frame, and those writes slow the game down
+  considerably (a run that measured 40 fps that way ran at over 100)
 - `RECOMP_DRAW_ONLY=<first>-<last>`, `RECOMP_BATCH_INFO=<s>:<first>-<last>`
   and `RECOMP_DEPTH_DUMP=<s>` isolate, describe and dump GPU batches

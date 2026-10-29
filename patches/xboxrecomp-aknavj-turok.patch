@@ -5479,10 +5479,10 @@ index d1e477d..c43862b 100644
          }
          out[2] |= st->digital;
 diff --git a/src/video/fb_present.c b/src/video/fb_present.c
-index 712b158..c23f169 100644
+index 712b158..0ac7115 100644
 --- a/src/video/fb_present.c
 +++ b/src/video/fb_present.c
-@@ -51,6 +51,109 @@ static uint32_t     *s_present[2];
+@@ -51,6 +51,147 @@ static uint32_t     *s_present[2];
  static volatile LONG s_present_idx = -1;   /* -1 until the first flip */
  static DECLSPEC_ALIGN(8) volatile LONG64 s_present_frame;
  
@@ -5534,6 +5534,44 @@ index 712b158..c23f169 100644
 +                            (long long)s_present_frame, ms, gpu, io);
 +            }
 +            last = now;
++        }
++    }
++    {
++        /* RECOMP_FPS_LOG=<seconds>: one line per period with the frame rate
++         * and the worst frame -- cheap enough to leave on while measuring,
++         * unlike a hitch threshold low enough to log every frame (the
++         * unbuffered writes then cost the flip thread as much as its work). */
++        static double period = -1.0, frequency;
++        static LARGE_INTEGER start, last;
++        static long long frames;
++        static double worst;
++        LARGE_INTEGER now;
++        if (period < 0.0) {
++            const char *e = getenv("RECOMP_FPS_LOG");
++            LARGE_INTEGER f;
++            QueryPerformanceFrequency(&f);
++            frequency = (double)f.QuadPart;
++            period = e ? atof(e) : 0.0;
++        }
++        if (period > 0.0) {
++            QueryPerformanceCounter(&now);
++            if (!start.QuadPart) start = now;
++            if (last.QuadPart) {
++                double ms = (double)(now.QuadPart - last.QuadPart) * 1000.0 / frequency;
++                if (ms > worst) worst = ms;
++            }
++            last = now;
++            frames++;
++            {
++                double seconds = (double)(now.QuadPart - start.QuadPart) / frequency;
++                if (seconds >= period) {
++                    fprintf(stderr, "[FPS] %.1f fps (%lld frames in %.2f s), worst %.1f ms\n",
++                            frames / seconds, frames, seconds, worst);
++                    start = now;
++                    frames = 0;
++                    worst = 0.0;
++                }
++            }
 +        }
 +    }
 +}
@@ -5592,7 +5630,7 @@ index 712b158..c23f169 100644
  void xbox_FramebufferWindowSet(uint32_t fb_va, uint32_t pitch)
  {
      /* RECOMP_FB_VA pins the window to one guest address instead of following
-@@ -73,7 +176,7 @@ void xbox_FramebufferWindowPresent(uint32_t fb_va, uint32_t pitch)
+@@ -73,7 +214,7 @@ void xbox_FramebufferWindowPresent(uint32_t fb_va, uint32_t pitch)
  
      if (!s_fb_running || !fb_va || !pitch)
          return;
@@ -5601,7 +5639,7 @@ index 712b158..c23f169 100644
      if (getenv("RECOMP_FB_VA"))
          return;                       /* pinned: leave the old path alone */
      next = (s_present_idx == 0) ? 1 : 0;
-@@ -91,6 +194,20 @@ void xbox_FramebufferWindowPresent(uint32_t fb_va, uint32_t pitch)
+@@ -91,6 +232,20 @@ void xbox_FramebufferWindowPresent(uint32_t fb_va, uint32_t pitch)
  
          if (bpp == 4) {
              memcpy(dst, row, (size_t)s_fb_width * 4);
@@ -5622,7 +5660,7 @@ index 712b158..c23f169 100644
          } else if (bpp == 2) {
              const uint16_t *p = (const uint16_t *)row;
              for (x = 0; x < s_fb_width; x++) {
-@@ -104,8 +221,52 @@ void xbox_FramebufferWindowPresent(uint32_t fb_va, uint32_t pitch)
+@@ -104,8 +259,52 @@ void xbox_FramebufferWindowPresent(uint32_t fb_va, uint32_t pitch)
              memset(dst, 0, (size_t)s_fb_width * 4);
          }
      }
@@ -5675,7 +5713,7 @@ index 712b158..c23f169 100644
  }
  
  /* Which keys are down, for the pad stand-in in src/input.
-@@ -144,6 +305,22 @@ int xbox_FramebufferKeyDown(int vk)
+@@ -144,6 +343,22 @@ int xbox_FramebufferKeyDown(int vk)
   * place the keyboard model can be driven without the foreground. The file
   * holds whitespace-separated hex VK codes (e.g. "20 57" = Space + W); path is
   * RECOMP_INPUT_FILE (default C:\recomp-input.txt). */
@@ -5698,7 +5736,7 @@ index 712b158..c23f169 100644
  static void fb_inject_poll(void)
  {
      static int enabled = -1;
-@@ -191,12 +368,13 @@ static void fb_inject_poll(void)
+@@ -191,12 +406,13 @@ static void fb_inject_poll(void)
              continue;
          held[i] = next[i];
          s_key_down[i] = next[i];
@@ -5714,7 +5752,7 @@ index 712b158..c23f169 100644
          }
          if (getenv("RECOMP_KEY_TRACE"))
              fprintf(stderr, "  [KEY] inject %s vk=0x%02X\n",
-@@ -217,12 +395,111 @@ static void fb_inject_poll(void)
+@@ -217,12 +433,111 @@ static void fb_inject_poll(void)
   * only by the input thread, one word at a time. A delta seen a frame late is
   * indistinguishable from one made a frame later. */
  static volatile LONG s_mouse_dx, s_mouse_dy, s_mouse_wheel;
@@ -5827,7 +5865,7 @@ index 712b158..c23f169 100644
  int xbox_FramebufferMouseDelta(int *dx, int *dy)
  {
      int x = (int)InterlockedExchange(&s_mouse_dx, 0);
-@@ -234,11 +511,20 @@ int xbox_FramebufferMouseDelta(int *dx, int *dy)
+@@ -234,11 +549,20 @@ int xbox_FramebufferMouseDelta(int *dx, int *dy)
  
  int xbox_FramebufferMouseButton(int which)
  {
@@ -5849,7 +5887,7 @@ index 712b158..c23f169 100644
  int xbox_FramebufferMouseWheel(void)
  {
      return (int)InterlockedExchange(&s_mouse_wheel, 0);
-@@ -254,6 +540,7 @@ void xbox_FramebufferMouseCapture(int on)
+@@ -254,6 +578,7 @@ void xbox_FramebufferMouseCapture(int on)
      if (on == s_mouse_capture)
          return;
      s_mouse_capture = on;
@@ -5857,7 +5895,7 @@ index 712b158..c23f169 100644
      if (on) {
          RECT c, clip;
          POINT tl = { 0, 0 }, br, centre;
-@@ -294,6 +581,115 @@ void xbox_FramebufferMouseCapture(int on)
+@@ -294,6 +619,115 @@ void xbox_FramebufferMouseCapture(int on)
      }
  }
  
@@ -5973,7 +6011,7 @@ index 712b158..c23f169 100644
  /* ---- input recording and replay ------------------------------------------
   *
   * RECOMP_INPUT_RECORD=<path> writes every input edge the window thread sees --
-@@ -418,15 +814,17 @@ static void rep_apply(const struct RecEvent *e)
+@@ -418,15 +852,17 @@ static void rep_apply(const struct RecEvent *e)
          break;
      case 'u':
          memset((void *)s_key_down, 0, sizeof s_key_down);
@@ -5993,7 +6031,7 @@ index 712b158..c23f169 100644
          break;
      case 'w':
          InterlockedExchangeAdd(&s_mouse_wheel, (LONG)e->a);
-@@ -467,14 +865,65 @@ static LRESULT CALLBACK fb_wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
+@@ -467,14 +903,65 @@ static LRESULT CALLBACK fb_wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
          InterlockedExchange(&s_fb_running, 0);
          return 0;
  
@@ -6061,7 +6099,7 @@ index 712b158..c23f169 100644
              return 0;
          }
          /* Alt+Esc releases the mouse so the window can be moved or the desktop
-@@ -561,6 +1010,11 @@ static LRESULT CALLBACK fb_wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
+@@ -561,6 +1048,11 @@ static LRESULT CALLBACK fb_wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
                  }
              }
          } else {
@@ -6073,7 +6111,7 @@ index 712b158..c23f169 100644
              if (s_mouse_have) {
                  if (x != s_mouse_x || y != s_mouse_y)
                      rec_event("m %d %d", x - s_mouse_x, y - s_mouse_y);
-@@ -598,17 +1052,26 @@ static LRESULT CALLBACK fb_wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
+@@ -598,17 +1090,26 @@ static LRESULT CALLBACK fb_wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
  
      case WM_LBUTTONDOWN:
          /* Clicking into the game grabs the mouse for mouse-look; Esc releases
@@ -6104,7 +6142,7 @@ index 712b158..c23f169 100644
  
      case WM_MOUSEWHEEL:
          rec_event("w %d", (int)(GET_WHEEL_DELTA_WPARAM(w) / WHEEL_DELTA));
-@@ -623,7 +1086,7 @@ static LRESULT CALLBACK fb_wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
+@@ -623,7 +1124,7 @@ static LRESULT CALLBACK fb_wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
      case WM_KILLFOCUS:
          rec_event("u");
          memset((void *)s_key_down, 0, sizeof s_key_down);
@@ -6113,7 +6151,7 @@ index 712b158..c23f169 100644
          xbox_FramebufferMouseCapture(0);
          return 0;
  
-@@ -633,6 +1096,8 @@ static LRESULT CALLBACK fb_wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
+@@ -633,6 +1134,8 @@ static LRESULT CALLBACK fb_wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
      case WM_GETMINMAXINFO: {
          MINMAXINFO *mmi = (MINMAXINFO *)l;
          RECT r;
@@ -6122,7 +6160,7 @@ index 712b158..c23f169 100644
          r.left = 0; r.top = 0;
          r.right = (LONG)s_fb_width; r.bottom = (LONG)s_fb_height;
          AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW & ~WS_MAXIMIZEBOX, FALSE);
-@@ -642,12 +1107,12 @@ static LRESULT CALLBACK fb_wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
+@@ -642,12 +1145,12 @@ static LRESULT CALLBACK fb_wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
      }
  
      case WM_SIZE:
@@ -6137,7 +6175,7 @@ index 712b158..c23f169 100644
              return 0;
          break;
      }
-@@ -667,6 +1132,20 @@ static void fb_convert(const uint8_t *src, uint32_t bpp)
+@@ -667,6 +1170,20 @@ static void fb_convert(const uint8_t *src, uint32_t bpp)
  
          if (bpp == 4) {
              memcpy(dst, row, (size_t)s_fb_width * 4);
@@ -6158,7 +6196,7 @@ index 712b158..c23f169 100644
          } else if (bpp == 2) {
              const uint16_t *p = (const uint16_t *)row;
              for (x = 0; x < s_fb_width; x++) {
-@@ -929,6 +1408,7 @@ static DWORD WINAPI fb_thread(LPVOID unused)
+@@ -929,6 +1446,7 @@ static DWORD WINAPI fb_thread(LPVOID unused)
              s_fb_width, s_fb_height);
  
      long last_drawn = -2;
@@ -6166,7 +6204,7 @@ index 712b158..c23f169 100644
      while (InterlockedCompareExchange(&s_fb_running, 1, 1)) {
          MSG msg;
          while (PeekMessageA(&msg, NULL, 0, 0, PM_REMOVE)) {
-@@ -959,7 +1439,15 @@ static DWORD WINAPI fb_thread(LPVOID unused)
+@@ -959,7 +1477,15 @@ static DWORD WINAPI fb_thread(LPVOID unused)
                  title_frame = frame;
              }
          }
@@ -6183,7 +6221,7 @@ index 712b158..c23f169 100644
              /* A finished frame, published by the flip. Copied into s_rgb so
               * the dump path and GDI see one consistent image even if the
               * next flip lands mid-blit. */
-@@ -1029,6 +1517,22 @@ void xbox_FramebufferWindowStart(void) {}
+@@ -1029,6 +1555,22 @@ void xbox_FramebufferWindowStart(void) {}
  int xbox_FramebufferKeyDown(int vk) { (void)vk; return 0; }
  int xbox_FramebufferMouseDelta(int *dx, int *dy) { if (dx) *dx = 0; if (dy) *dy = 0; return 0; }
  int xbox_FramebufferMouseButton(int which) { (void)which; return 0; }
