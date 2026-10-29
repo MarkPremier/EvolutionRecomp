@@ -4540,7 +4540,7 @@ index e27083f..ae32fae 100644
     if(textureFlags&4)uvw.x=saturate(uvw.x);
     if(textureFlags&8)uvw.y=saturate(uvw.y);
 diff --git a/src/kernel/nv2a_pb_exec.c b/src/kernel/nv2a_pb_exec.c
-index d7c0f20..0fe78ed 100644
+index d7c0f20..c782dec 100644
 --- a/src/kernel/nv2a_pb_exec.c
 +++ b/src/kernel/nv2a_pb_exec.c
 @@ -117,6 +117,43 @@ static int pb_surf_trace(void)
@@ -4880,9 +4880,144 @@ index d7c0f20..0fe78ed 100644
  }
  
  /* Attribute 3 is diffuse colour in every NV2A layout that sets one. Absent it,
-@@ -2770,15 +3018,28 @@ static int gpu_raster_batch(void)
+@@ -2601,6 +2849,108 @@ static int gpu_decode_volume_texture(void *context, uint32_t level, uint32_t hor
+ static uint32_t gpu_vertex_tags[65536], gpu_vertex_offsets[65536], gpu_vertex_keys[65536], gpu_vertex_serial;
+ static uint32_t gpu_attribute_mask;
+ 
++/* fetch_attr's per-call work -- which source, where it starts, how far it may
++ * read, what format -- is the same for every vertex of a batch, and a
++ * vertex-program batch fetches every attribute the program reads for every
++ * vertex. Worked out once per batch (gpu_raster_batch clears `ready`), each
++ * fetch is then an index check and a conversion. Anything unusual -- the
++ * immediate path, an unknown format, an index past the extent -- still goes
++ * through fetch_attr, with its checks and diagnostics. */
++enum { FAST_ATTR_SLOW, FAST_ATTR_FIXED, FAST_ATTR_MEMORY };
++typedef struct {
++    int mode;
++    const uint8_t *base;
++    uint32_t stride, type, size, last_index;
++    float fixed[4];
++} FastAttr;
++static FastAttr gpu_fast_attr[16];
++static int gpu_fast_attr_ready;
++
++static void fast_attr_prepare(FastAttr *f, const VertexAttr *a)
++{
++    uint32_t bytes;
++    uint64_t limit, offset = a->offset;
++
++    f->mode = FAST_ATTR_SLOW;
++    if (s_gpu.immediate_active)
++        return;
++    if (!a->size || !a->stride || (!s_gpu.inline_active && !a->offset)) {
++        /* fetch_attr's answer does not depend on the index here. */
++        fetch_attr(a, 0, f->fixed);
++        f->mode = FAST_ATTR_FIXED;
++        return;
++    }
++    bytes = vertex_attribute_bytes(a);
++    if (!bytes)
++        return;
++    if (s_gpu.inline_active) {
++        limit = (uint64_t)s_gpu.inline_count * 4;
++        f->base = (const uint8_t *)s_gpu.inline_buf + (size_t)offset;
++    } else {
++        if (a->offset >= XBOX_CONTIG_BASE && a->offset < XBOX_CONTIG_BASE + XBOX_CONTIG_SIZE)
++            limit = (uint64_t)XBOX_CONTIG_BASE + XBOX_CONTIG_SIZE;
++        else
++            limit = (uint64_t)(g_xbox_map_size ? g_xbox_map_size : g_xbox_total_ram) * (1 + XBOX_NUM_MIRRORS);
++        if (limit > (uint64_t)UINT32_MAX + 1u) limit = (uint64_t)UINT32_MAX + 1u;
++        f->base = (const uint8_t *)xbox_GetMemoryOffset() + (size_t)offset;
++    }
++    if (offset + bytes > limit)
++        return;
++    {
++        uint64_t last = (limit - offset - bytes) / a->stride;
++        f->last_index = last > UINT32_MAX ? UINT32_MAX : (uint32_t)last;
++    }
++    f->stride = a->stride; f->type = a->type; f->size = a->size < 4 ? a->size : 4;
++    f->mode = FAST_ATTR_MEMORY;
++}
++
++static inline void fast_attr_fetch(const FastAttr *f, const VertexAttr *a, uint32_t index, float out[4])
++{
++    const uint8_t *p;
++    uint32_t i;
++
++    if (f->mode == FAST_ATTR_FIXED) {
++        memcpy(out, f->fixed, sizeof f->fixed);
++        return;
++    }
++    if (f->mode != FAST_ATTR_MEMORY || index > f->last_index) {
++        fetch_attr(a, index, out);
++        return;
++    }
++    p = f->base + (size_t)index * f->stride;
++    out[0] = out[1] = out[2] = 0.0f;
++    out[3] = 1.0f;
++    switch (f->type) {
++    case 1:
++        for (i = 0; i < f->size; i++)
++            out[i] = fmaxf(-1.0f, (float)((const int16_t *)p)[i] / 32767.0f);
++        return;
++    case 5:
++        for (i = 0; i < f->size; i++)
++            out[i] = (float)((const int16_t *)p)[i];
++        return;
++    case 6:
++        nv_cpu_unpack_normal(*(const uint32_t *)p, out);
++        return;
++    case 0:
++        out[0] = (float)p[2] / 255.0f;
++        out[1] = (float)p[1] / 255.0f;
++        out[2] = (float)p[0] / 255.0f;
++        out[3] = (float)p[3] / 255.0f;
++        return;
++    case 2:
++        memcpy(out, p, (size_t)f->size * 4);
++        return;
++    case 4:
++        for (i = 0; i < f->size; i++)
++            out[i] = (float)p[i] / 255.0f;
++        return;
++    default:
++        fetch_attr(a, index, out);
++        return;
++    }
++}
++
+ static void gpu_begin_chunk(void)
+ {
+     gpu_index_count = 0;
+@@ -2645,6 +2995,13 @@ static int gpu_append_primitive(Nv2aGpuDraw *state, uint32_t *count, const uint3
+         const VertexAttr *tattr0 = texcoord_attr();
+         uint32_t fetch_mask = program ? (gpu_attribute_mask & 0xFFFFu) : 0u;
+ 
++        if (program && !gpu_fast_attr_ready) {
++            for (stage = 0; stage < 16; stage++)
++                if (fetch_mask & (1u << stage))
++                    fast_attr_prepare(&gpu_fast_attr[stage], &s_gpu.attr[stage]);
++            gpu_fast_attr_ready = 1;
++        }
++
+         for (vertex = 0; vertex < vertex_count; vertex++) {
+             uint32_t index = indices[vertex];
+             uint32_t slot = index & 65535u;
+@@ -2665,7 +3022,8 @@ static int gpu_append_primitive(Nv2aGpuDraw *state, uint32_t *count, const uint3
+                  * whole-struct memset is pure waste. */
+                 for (stage = 0; stage < 16; stage++) {
+                     if (fetch_mask & (1u << stage)) {
+-                        fetch_attr(&s_gpu.attr[stage], index, destination->attributes[stage]);
++                        fast_attr_fetch(&gpu_fast_attr[stage], &s_gpu.attr[stage], index,
++                                        destination->attributes[stage]);
+                         s_gpu.gpu_attribute_fetches++;
+                     } else {
+                         memset(destination->attributes[stage], 0, sizeof destination->attributes[stage]);
+@@ -2769,16 +3127,30 @@ static int gpu_raster_batch(void)
+         gpu_indices = grown; gpu_index_capacity = index_capacity;
      }
      gpu_begin_chunk();
++    gpu_fast_attr_ready = 0;
      if (!s_gpu.combiners_configured) return gpu_batch_rejected("unconfigured combiners");
 -    if (surface_bpp() != 4) return gpu_batch_rejected("surface pixel format");
 +    /* 16-bit colour targets draw depth only (state.color stays NULL). The
@@ -4916,7 +5051,7 @@ index d7c0f20..0fe78ed 100644
      state.stage_program = s_gpu.shader_stage_program; state.combiners = s_gpu.combiners;
      state.shader_clip_mode = s_gpu.shader_clip_mode;
      state.shader_other_stage_input = s_gpu.shader_other_stage_input;
-@@ -2869,6 +3130,45 @@ static int gpu_raster_batch(void)
+@@ -2869,6 +3241,45 @@ static int gpu_raster_batch(void)
          if (!texture->valid) return gpu_batch_rejected("invalid texture binding");
          if (((texture->raw_format >> 4) & 15u) == 3u)
              binding->depth = 1u << (texture->raw_format >> 28);
@@ -4962,7 +5097,7 @@ index d7c0f20..0fe78ed 100644
          if ((mode == 2) != (binding->depth != 0) || (binding->depth && (texture->raw_format & 4u)))
              return gpu_batch_rejected("projective volume texture dimensionality");
          binding->source = memory + texture->offset; binding->width = texture->width; binding->height = texture->height;
-@@ -3008,12 +3308,16 @@ static int gpu_submit_chunk(Nv2aGpuDraw *state, uint32_t *count)
+@@ -3008,12 +3419,16 @@ static int gpu_submit_chunk(Nv2aGpuDraw *state, uint32_t *count)
      }
      s_gpu.gpu_batches++;
      if (state->topology == NV2A_GPU_TOPOLOGY_TRIANGLES) s_gpu.tris_drawn += gpu_index_count / 3;
@@ -4980,7 +5115,7 @@ index d7c0f20..0fe78ed 100644
  static void raster_batch(void)
  {
  #ifndef _WIN32
-@@ -3049,6 +3353,153 @@ static void raster_batch(void)
+@@ -3049,6 +3464,153 @@ static void raster_batch(void)
      }
  
  #ifdef _WIN32
@@ -5134,7 +5269,85 @@ index d7c0f20..0fe78ed 100644
      double started = gpu_clock_seconds();
      double prior_submit = s_gpu.gpu_submit_seconds;
      int rendered = gpu_raster_batch();
-@@ -3820,6 +4271,7 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -3556,6 +4118,32 @@ void nv2a_pb_exec_indices(uint32_t method, const uint32_t *parameters, uint32_t
+     }
+ }
+ 
++/* SET_TRANSFORM_PROGRAM (0x0B00-0x0B7C) and SET_TRANSFORM_CONSTANT
++ * (0x0B80-0x0BFC): one component of the vertex-program slot or constant at
++ * the current load cursor; the fourth advances the cursor. */
++static void vertex_program_upload(uint32_t method, uint32_t param)
++{
++    if (method < 0x0B80) {
++        uint32_t component = ((method - 0x0B00) >> 2) & 3u;
++        if (s_gpu.vp_load < 136) {
++            s_gpu.vp_program[s_gpu.vp_load][component] = param;
++            s_gpu.vp_valid[s_gpu.vp_load] |= 1u << component;
++        }
++        s_gpu.vp_words++;
++        if (component == 3)
++            s_gpu.vp_load++;
++    } else {
++        uint32_t component = ((method - 0x0B80) >> 2) & 3u;
++        if (s_gpu.constant_load < 192)
++            memcpy(&s_gpu.vp_constants[s_gpu.constant_load][component], &param, 4);
++        if (s_gpu.constant_load < 4)
++            s_gpu.composite_valid |= 1u << (s_gpu.constant_load * 4 + component);
++        s_gpu.constant_words++;
++        if (component == 3)
++            s_gpu.constant_load++;
++    }
++}
++
+ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+ {
+     static int inited;
+@@ -3615,6 +4203,44 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+                     subch, method, param);
+     }
+ 
++    /* The bulk of a frame's words, straight to their handlers: index lists,
++     * inline vertices, vertex-program and constant uploads, and the zero
++     * no-ops D3D pads with -- three quarters of all words in Turok
++     * Evolution's levels. Below they would each pass a hundred-odd tests
++     * first; none of those tests claims these methods on subchannel 0, so
++     * this is the same dispatch, earlier. */
++    if (subch == 0 && !verbose) {
++        switch (method) {
++        case 0x0100:   /* NO_OPERATION: only a nonzero one does anything */
++            if (!param) return;
++            break;
++        case NV097_ARRAY_ELEMENT16:
++            if (require_index_capacity(2, method)) {
++                append_vertex_index(param & 0xFFFFu);
++                append_vertex_index(param >> 16);
++                s_gpu.array16_indices += 2;
++            }
++            return;
++        case NV097_ARRAY_ELEMENT32:
++            if (require_index_capacity(1, method)) {
++                append_vertex_index(param);
++                s_gpu.array32_indices++;
++                s_gpu.batch_array32_count++;
++            }
++            return;
++        case NV097_INLINE_ARRAY:
++            if (s_gpu.prim && s_gpu.inline_count < NV_MAX_INLINE)
++                s_gpu.inline_buf[s_gpu.inline_count++] = param;
++            return;
++        default:
++            if (method >= 0x0B00 && method < 0x0C00) {
++                vertex_program_upload(method, param);
++                return;
++            }
++            break;
++        }
++    }
++
+     if (xbox_Nv2aNativeFencesEnabled() && subch < 8) {
+         if (method == 0) {
+             uint32_t instance;
+@@ -3820,6 +4446,7 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
      if (method == 0x037C) { s_gpu.shade_mode = param; return; }
      if (method == 0x0300) { s_gpu.alpha_enable = param; return; }
      if (method == 0x033C) { s_gpu.alpha_func = param; return; }
@@ -5142,7 +5355,36 @@ index d7c0f20..0fe78ed 100644
      if (method == 0x0340) { s_gpu.alpha_ref = param & 255u; return; }
      if (method == 0x034C) { s_gpu.blend_constant = param; return; }
      if (method == 0x0350) { s_gpu.blend_equation = param; return; }
-@@ -4253,6 +4705,7 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -4018,26 +4645,8 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+     #endif
+         return;
+     }
+-    if (method >= 0x0B00 && method < 0x0B80) {
+-        uint32_t component = ((method - 0x0B00) >> 2) & 3u;
+-        if (s_gpu.vp_load < 136) {
+-            s_gpu.vp_program[s_gpu.vp_load][component] = param;
+-            s_gpu.vp_valid[s_gpu.vp_load] |= 1u << component;
+-        }
+-        s_gpu.vp_words++;
+-        if (component == 3)
+-            s_gpu.vp_load++;
+-        return;
+-    }
+-    if (method >= 0x0B80 && method < 0x0C00) {
+-        uint32_t component = ((method - 0x0B80) >> 2) & 3u;
+-        if (s_gpu.constant_load < 192)
+-            memcpy(&s_gpu.vp_constants[s_gpu.constant_load][component], &param, 4);
+-        if (s_gpu.constant_load < 4)
+-            s_gpu.composite_valid |= 1u << (s_gpu.constant_load * 4 + component);
+-        s_gpu.constant_words++;
+-        if (component == 3)
+-            s_gpu.constant_load++;
++    if (method >= 0x0B00 && method < 0x0C00) {
++        vertex_program_upload(method, param);
+         return;
+     }
+     if (method >= 0x0A20 && method < 0x0A30) {
+@@ -4253,6 +4862,7 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
          return;
  
      case NV097_FLIP_STALL:
@@ -5150,7 +5392,7 @@ index d7c0f20..0fe78ed 100644
          s_gpu.flush_flip++;
          cloak_marker_idle();
          /* The stall ends when the buffer being read is the one just finished.
-@@ -4276,25 +4729,88 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -4276,25 +4886,88 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
           * per-frame re-decode of render-to-texture surfaces. */
          if (s_gpu.pitch) {
              extern void xbox_FramebufferWindowPresent(uint32_t, uint32_t);
@@ -5248,10 +5490,23 @@ index d7c0f20..0fe78ed 100644
                  nv2a_pb_exec_flush();
              }
 diff --git a/src/kernel/nv2a_pb_scan.c b/src/kernel/nv2a_pb_scan.c
-index 341bcaa..a8df038 100644
+index 341bcaa..8cdd030 100644
 --- a/src/kernel/nv2a_pb_scan.c
 +++ b/src/kernel/nv2a_pb_scan.c
-@@ -307,6 +307,9 @@ void nv2a_pb_run(uint32_t put_va)
+@@ -73,6 +73,12 @@ static void note(uint32_t subch, uint32_t method)
+ {
+     uint32_t sub, m;
+     int16_t slot;
++    /* The inventory is only printed under RECOMP_PB_SCAN (nv2a_pb_scan_report),
++     * and counting every word for nothing was a tenth of the executor's time
++     * in a busy Turok Evolution scene. */
++    static int surveying = -1;
++    if (surveying < 0) surveying = getenv("RECOMP_PB_SCAN") != NULL;
++    if (!surveying) return;
+     if (!s_seen_index_ready) {
+         memset(s_seen_index, 0xFF, sizeof s_seen_index);
+         s_seen_index_ready = 1;
+@@ -307,6 +313,9 @@ void nv2a_pb_run(uint32_t put_va)
       * one. A local here lost it, and the RETURN then went nowhere (or worse,
       * took the stale s_get). */
      static uint32_t ret;
@@ -5261,7 +5516,7 @@ index 341bcaa..a8df038 100644
      uint32_t va;
      uint32_t budget = 0x200000u;
      const uint32_t win_lo = XBOX_CONTIG_BASE;
-@@ -364,6 +367,15 @@ void nv2a_pb_run(uint32_t put_va)
+@@ -364,6 +373,15 @@ void nv2a_pb_run(uint32_t put_va)
      unsigned ret_u_n = 0;
  
      while (va != put_va && budget && !desync) {
@@ -5277,7 +5532,7 @@ index 341bcaa..a8df038 100644
          if (va < win_lo || va + 4u > win_hi || (va & 3u)) {
              why = "read out of contiguous window";
              desync = 1;
-@@ -413,10 +425,31 @@ void nv2a_pb_run(uint32_t put_va)
+@@ -413,10 +431,31 @@ void nv2a_pb_run(uint32_t put_va)
          } else if ((w & 3u) == 2u) {                                /* CALL */
              ret = va;                                               /* after CALL */
              off = w & 0x0FFFFFFCu;
@@ -5310,7 +5565,7 @@ index 341bcaa..a8df038 100644
              continue;
          } else if ((w & 0xE0030003u) == 0u
                  || (w & 0xE0030003u) == 0x40000000u) {              /* method */
-@@ -587,6 +620,7 @@ void nv2a_pb_run(uint32_t put_va)
+@@ -587,6 +626,7 @@ void nv2a_pb_run(uint32_t put_va)
      if (desync || !budget) {
          st.count = 0;
          ret = 0;
@@ -5319,7 +5574,7 @@ index 341bcaa..a8df038 100644
      s_get = put_va;
  }
 diff --git a/src/kernel/xbox_memory_layout.c b/src/kernel/xbox_memory_layout.c
-index 4916a66..8df0059 100644
+index 4916a66..3c051c4 100644
 --- a/src/kernel/xbox_memory_layout.c
 +++ b/src/kernel/xbox_memory_layout.c
 @@ -1032,6 +1032,11 @@ static void event_signals_tick(void)
@@ -5362,6 +5617,39 @@ index 4916a66..8df0059 100644
          if (g_nv2a_memory) {
              fprintf(stderr, "  NV2A register aperture: %u MB at Xbox VA "
                      "0x%08X (zeroed, no register semantics)\n",
+@@ -3752,8 +3762,24 @@ static int contig_block_at(uint32_t off, uint32_t *start_off, uint32_t *size)
+     int i, found = 0;
+     int it = 0;
+ 
++    /* The GPU executor resolves runs of offsets in the same allocation
++     * (vertex arrays, textures, surfaces): try the block that answered last
++     * before scanning the whole table. Checked against the live table under
++     * the same lock, so a block freed or moved since simply misses. */
++    static volatile LONG last_hit = -1;
++
+     AcquireSRWLockShared(&g_contig_lock);
+     g_cba_calls++;
++    i = (int)last_hit;
++    if (i >= 0 && i < g_contig_block_count && !g_contig_blocks[i].free) {
++        uint32_t s = g_contig_blocks[i].addr - XBOX_CONTIG_BASE;
++        if (off >= s && off < s + g_contig_blocks[i].size) {
++            if (start_off) *start_off = s;
++            if (size)      *size = g_contig_blocks[i].size;
++            ReleaseSRWLockShared(&g_contig_lock);
++            return 1;
++        }
++    }
+     for (i = 0; i < g_contig_block_count; i++) {
+         uint32_t s;
+         it++;
+@@ -3764,6 +3790,7 @@ static int contig_block_at(uint32_t off, uint32_t *start_off, uint32_t *size)
+             if (start_off) *start_off = s;
+             if (size)      *size = g_contig_blocks[i].size;
+             found = 1;
++            InterlockedExchange(&last_hit, i);
+             break;
+         }
+     }
 diff --git a/src/usb/ohci.c b/src/usb/ohci.c
 index d8dc03b..595586d 100644
 --- a/src/usb/ohci.c
