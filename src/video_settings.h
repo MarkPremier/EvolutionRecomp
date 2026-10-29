@@ -27,6 +27,7 @@ void video_settings_cinema(int on);
 float video_settings_draw_distance(void);
 int video_settings_keep_bodies(void);
 int video_settings_keep_decals(void);
+float video_settings_wide_factor(void);
 
 /* After the input mapper each frame: raw mouse look, when set. */
 void video_settings_mouse_look(void);

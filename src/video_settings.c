@@ -1815,9 +1815,19 @@ static float aspect_ratio(void)
     return ratio < 4.0f / 3 ? 4.0f / 3 : ratio;
 }
 
+static float s_wide_factor = 1.0f;
+
 static void apply_aspect(void)
 {
-    nv2a_gpu_set_wide_factor(s_front_end || s_cinema ? 1.0f : aspect_ratio() * 3 / 4);
+    s_wide_factor = s_front_end || s_cinema ? 1.0f : aspect_ratio() * 3 / 4;
+    nv2a_gpu_set_wide_factor(s_wide_factor);
+}
+
+/* How much wider than 4:3 the view now is (1 in the front end and in
+ * cutscenes): the game's culling is widened by it (recomp_manual.c). */
+float video_settings_wide_factor(void)
+{
+    return s_wide_factor;
 }
 
 /* The frame limit is the emulated vertical blank's rate (each flip waits for

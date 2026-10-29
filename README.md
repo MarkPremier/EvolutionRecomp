@@ -273,7 +273,7 @@ effect at once and are kept in `turok_settings.ini` beside the exe:
 | Mouse speed | 1 to 10 (5 by default; each step 1.4x) | |
 | Draw distance | normal, 2x, 4x, 8x (2x by default) | |
 | Keep bodies | off, on (off by default) | |
-| Keep decals | off, on (off by default; from the next level load) | |
+| Keep decals | off, on (off by default) | |
 
 An environment variable set by hand still wins at start-up.
 
@@ -323,7 +323,13 @@ An environment variable set by hand still wins at start-up.
   text the particle system parses as a level loads (`sub_000B0110`); its eighth
   value, the life in seconds, is stored by `sub_000AF2A0`. Definitions whose
   texture or mesh is a splat, bullet hole, scorch or gore piece get the longer
-  life. `RECOMP_PARTICLE_TRACE=1` lists the definitions as they load.
+  life; switching the setting re-applies it at once, and off leaves every
+  life as the game has it. `RECOMP_PARTICLE_TRACE=1` lists the definitions.
+- **Widescreen culling**: the game culls against its 4:3 camera, so blood,
+  bullet holes and other effects past the 4:3 edges vanished while on screen.
+  While the camera's view planes (`sub_00020EE0`) and the in-view test run, the
+  horizontal cotangent `sub_00020030` returns is divided by the widescreen
+  factor; the projection keeps the camera's own.
 - **Press Start** takes any button (the screen's link is given the button mask
   of its own any-button link).
 

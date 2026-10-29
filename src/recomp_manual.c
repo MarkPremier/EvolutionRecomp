@@ -379,14 +379,21 @@ void sub_0013D000(void)
  * these -- which the parser stores through sub_000AF2A0 (+0x7C). With Keep
  * decals on, the definitions whose texture or mesh is a splat, a bullet
  * hole, a scorch or a gore piece get ten minutes instead; parents and
- * spawners (num.tga) and every other effect are left alone. A change applies
- * from the next level load. RECOMP_PARTICLE_TRACE=1 lists the definitions. */
+ * spawners (num.tga) and every other effect are left alone. Off, they keep
+ * the game's own lives. Every such definition is remembered with its own
+ * life, so switching the setting re-applies at once (keep_decals_frame);
+ * particles already out keep the life they were given.
+ * RECOMP_PARTICLE_TRACE=1 lists the definitions. */
 extern void sub_000B0110_gen(void);
 extern void sub_000AF2A0_gen(void);
 extern int video_settings_keep_decals(void);
 
 #define KEEP_DECAL_SECONDS 600.0f
-static int s_partdef_keep;
+#define KEEP_DECAL_DEFS 1024
+static int s_partdef_keepsake;   /* the PARTDEF being parsed is a decal or gib */
+static struct { uint32_t def; float own, set; } s_keep_defs[KEEP_DECAL_DEFS];
+static unsigned s_keep_count;
+static int s_keep_applied = -1;  /* the setting the remembered lives reflect */
 
 static int partdef_is_keepsake(uint32_t text, uint32_t size)
 {
@@ -419,26 +426,55 @@ void sub_000B0110(void)
     static int trace = -1;
     uint32_t text = TUROK_MEM32(g_esp + 8), size = TUROK_MEM32(g_esp + 12);
     if (trace < 0) trace = getenv("RECOMP_PARTICLE_TRACE") != NULL;
-    s_partdef_keep = video_settings_keep_decals() && partdef_is_keepsake(text, size);
-    if (trace) {
-        int keepsake = partdef_is_keepsake(text, size);
-        fprintf(stderr, "[PARTDEF] %u bytes%s\n", size, keepsake ? " (decal or gib)" : "");
-    }
+    s_partdef_keepsake = partdef_is_keepsake(text, size);
+    if (trace)
+        fprintf(stderr, "[PARTDEF] %u bytes%s\n", size, s_partdef_keepsake ? " (decal or gib)" : "");
     sub_000B0110_gen();
-    s_partdef_keep = 0;
+    s_partdef_keepsake = 0;
 }
 
+/* The life sub_000AF2A0 stores at +0x7C is the value's magnitude. */
 void sub_000AF2A0(void)
 {
-    if (s_partdef_keep) {
-        float life = guest_float(g_esp + 4), keep = life < 0 ? -KEEP_DECAL_SECONDS : KEEP_DECAL_SECONDS;
-        if (fabsf(life) < KEEP_DECAL_SECONDS) {
+    uint32_t def = g_ecx;
+    if (s_partdef_keepsake) {
+        float own = fabsf(guest_float(g_esp + 4)), set = own;
+        unsigned i;
+        if (video_settings_keep_decals() && own < KEEP_DECAL_SECONDS) {
             uint32_t bits;
-            memcpy(&bits, &keep, 4);
+            set = KEEP_DECAL_SECONDS;
+            memcpy(&bits, &set, 4);
             TUROK_MEM32(g_esp + 4) = bits;
+        }
+        for (i = 0; i < s_keep_count && s_keep_defs[i].def != def; i++) {}
+        if (i == s_keep_count && s_keep_count < KEEP_DECAL_DEFS) s_keep_count++;
+        if (i < KEEP_DECAL_DEFS) {
+            s_keep_defs[i].def = def;
+            s_keep_defs[i].own = own;
+            s_keep_defs[i].set = set;
         }
     }
     sub_000AF2A0_gen();
+}
+
+/* Once a frame: after the setting changes, each remembered definition gets
+ * its own life back or the long one -- if it still holds what was last
+ * written there (one freed and reused since does not). */
+static void keep_decals_frame(void)
+{
+    int keep = video_settings_keep_decals();
+    unsigned i;
+    if (keep == s_keep_applied) return;
+    s_keep_applied = keep;
+    for (i = 0; i < s_keep_count; i++) {
+        float now = guest_float(s_keep_defs[i].def + 0x7Cu), want;
+        uint32_t bits;
+        if (now != s_keep_defs[i].set) continue;
+        want = keep && s_keep_defs[i].own < KEEP_DECAL_SECONDS ? KEEP_DECAL_SECONDS : s_keep_defs[i].own;
+        memcpy(&bits, &want, 4);
+        TUROK_MEM32(s_keep_defs[i].def + 0x7Cu) = bits;
+        s_keep_defs[i].set = want;
+    }
 }
 
 /* ── Corpse trace (RECOMP_CORPSE_TRACE=1) ──────────────────────
@@ -629,6 +665,7 @@ void sub_00040DB0(void)
 void sub_00104600(void)
 {
     sub_00104600_gen();
+    keep_decals_frame();
     /* RECOMP_DEBUG_KILL=<s>: that long after a level's actors were made,
      * every watched AnimalAI's health (+0x1D0, a float) is set to 0 once --
      * a dinosaur to watch die without a fight. */
@@ -690,6 +727,39 @@ void sub_00093330(void)
  * natively with the original's roundings (x87 below); what they do not
  * settle -- a stale cache, a box across a plane, a NaN -- is left to it. */
 extern void sub_00021A90_gen(void);
+
+/* Widescreen culling. The game culls against its own camera, which stays
+ * 4:3 -- widescreen only widens the projection on the GPU -- so anything past
+ * the 4:3 edges (blood, bullet holes, effects, objects) was culled while in
+ * view. The camera's view planes (sub_00020EE0) and the in-view test take
+ * the horizontal half-angle's cotangent from sub_00020030; while they run it
+ * is divided by the widescreen factor, which widens what they keep to the
+ * screen's width. The projection, which reads the camera's own copy, is left
+ * as it is. */
+extern void sub_00020030_gen(void);
+extern void sub_00020EE0_gen(void);
+extern float video_settings_wide_factor(void);
+static int s_cull_widen;
+
+void sub_00020030(void)
+{
+    uint32_t across = TUROK_MEM32(g_esp + 4);
+    float wide = video_settings_wide_factor();
+    sub_00020030_gen();
+    if (s_cull_widen && wide > 1.001f && across) {
+        float cotangent = guest_float(across) / wide;
+        uint32_t bits;
+        memcpy(&bits, &cotangent, 4);
+        TUROK_MEM32(across) = bits;
+    }
+}
+
+void sub_00020EE0(void)
+{
+    s_cull_widen++;
+    sub_00020EE0_gen();
+    s_cull_widen--;
+}
 extern __declspec(thread) uint16_t g_fp_control_word;
 
 /* One x87 operation's result as the generated code rounds it: to float
@@ -723,7 +793,7 @@ static int in_view(uint32_t camera, uint32_t point, uint32_t axes)
             float across = (float)view_row(camera, 0x58u, x, y, z);
             float up = (float)view_row(camera, 0x5Cu, x, y, z);
             double limit = (float)depth;
-            double h = FMUL(across, guest_float(camera + 0x108u));
+            double h = FMUL(across, (float)(guest_float(camera + 0x108u) / video_settings_wide_factor()));
             double v = FMUL(up, guest_float(camera + 0x10Cu));
             if (h <= limit && -h <= limit && v <= limit && -v <= limit)
                 return 1;
@@ -825,7 +895,9 @@ void sub_00021A90(void)
         settled = passed = differ = 0;
     }
     if (answer < 0 || verify) {
+        s_cull_widen++;
         sub_00021A90_gen();
+        s_cull_widen--;
         if (answer < 0) passed++;
         else { settled++; if ((int)g_eax != answer) differ++; }
         return;
