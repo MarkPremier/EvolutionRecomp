@@ -63,7 +63,7 @@ extern void nv2a_gpu_set_msaa(int samples);
  * through its values (shown, and written in turok_settings.ini, as their
  * text). */
 enum { SET_RESOLUTION, SET_ASPECT, SET_DISPLAY, SET_VSYNC, SET_FRAMES, SET_ANISOTROPY, SET_MSAA, SET_DRAW_DISTANCE,
-       SET_ICONS,
+       SET_BODIES, SET_ICONS,
        SET_MOUSE_LOOK, SET_MOUSE_SPEED, SETTING_COUNT };
 
 typedef struct VideoSetting {
@@ -96,6 +96,7 @@ static const VideoSetting k_settings[SETTING_COUNT] = {
     {"anisotropy", "anisotropy", k_anisotropy, COUNT(k_anisotropy), 4},
     {"msaa", "msaa", k_msaa, COUNT(k_msaa), 0},
     {"draw_distance", "draw distance", k_distances, COUNT(k_distances), 1},
+    {"keep_bodies", "keep bodies", k_switches, COUNT(k_switches), 0},
     {"button_icons", "button icons", k_icons, COUNT(k_icons), 0},
     {"mouse_look", "mouse look", k_mouse_looks, COUNT(k_mouse_looks), 1},
     {"mouse_speed", "mouse speed", k_speeds, COUNT(k_speeds), 4},
@@ -1428,7 +1429,7 @@ static void look_not_inverted(Buffer *history)
 
 static int edit_video_screen(Node *screen, const char *unused)
 {
-    PageSpec page = {VIDEO_HST, TEXT_TITLE, SETTING_COUNT, 2.55f, TEXT_SCALE, NULL};
+    PageSpec page = {VIDEO_HST, TEXT_TITLE, SETTING_COUNT, 2.4f, TEXT_SCALE, NULL};
     int s;
     (void)unused;
     for (s = 0; s < SETTING_COUNT; s++) {
@@ -1848,6 +1849,7 @@ static void apply_setting(int setting)
     case SET_ICONS: nv2a_gpu_set_texture_replacements(s_values[SET_ICONS]); break;
     case SET_MOUSE_LOOK: xbox_KbmSetRawMouse(s_values[SET_MOUSE_LOOK]); break;
     case SET_DRAW_DISTANCE:           /* read each frame */
+    case SET_BODIES:
     case SET_MOUSE_SPEED: break;
     }
 }
@@ -1900,6 +1902,13 @@ float video_settings_take_mouse_turn(int axis)
 /* Draw distance: how much further than the game's own distances (A_NDD
  * where an actor starts to fade, A_MDD where it is gone: grass and plants
  * have 15 to 25) actors with one are drawn. */
+/* Keep bodies: the dead stay where they fell instead of fading and sinking
+ * away after three and a half seconds (recomp_manual.c, sub_0013D000). */
+int video_settings_keep_bodies(void)
+{
+    return s_values[SET_BODIES];
+}
+
 float video_settings_draw_distance(void)
 {
     return (float)(1 << s_values[SET_DRAW_DISTANCE]);

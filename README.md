@@ -272,6 +272,7 @@ effect at once and are kept in `turok_settings.ini` beside the exe:
 | Mouse look | raw, stick | |
 | Mouse speed | 1 to 10 (5 by default; each step 1.4x) | |
 | Draw distance | normal, 2x, 4x, 8x (2x by default) | |
+| Keep bodies | off, on (off by default) | |
 
 An environment variable set by hand still wins at start-up.
 
@@ -310,6 +311,12 @@ An environment variable set by hand still wins at start-up.
   (A_NDD where they start to fade, A_MDD where they are gone: 15 to 25 units
   for grass) are drawn that many times further. The fade (`sub_0003C9E0`)
   reads the two from a block at actor +0x1CC; they are scaled while it runs.
+- **Keep bodies**: the dead stay where they fell. A dead AI actor's update
+  (`sub_0013D000`) counts time since death at +0x52C; past 3.5 s it fades
+  the body and sinks it into the ground, and at 5 s removes it. With the
+  setting on that clock is held at 2 s, except for actors that respawn
+  (+0x5AA). `RECOMP_CORPSE_TRACE=1` logs deaths, fades and actor changes;
+  `RECOMP_DEBUG_KILL=<s>` zeroes the dinosaurs' health that long into a level.
 - **Press Start** takes any button (the screen's link is given the button mask
   of its own any-button link).
 

@@ -345,6 +345,267 @@ void sub_000F21B0(void)
     if (offscreen) g_eax = 1;
 }
 
+/* ── Keep bodies (Video Options) ───────────────────────────────
+ *
+ * A dead AI actor's update (sub_0013D000, this-call, ret 4, the frame's
+ * seconds) counts time since death at +0x52C: past 3.5 s it eases the
+ * body's alpha to nothing and sinks it into the ground (0.3 units a
+ * second), and at 5 s puts it in state 0x3E, gone -- or, for an actor that
+ * respawns (+0x5AA, after a further +0x528 seconds), brings it back. With
+ * Keep bodies on, a body that does not respawn has its clock held at two
+ * seconds, so it stays where it fell for the rest of the level. */
+extern void sub_0013D000_gen(void);
+extern int video_settings_keep_bodies(void);
+
+void sub_0013D000(void)
+{
+    uint32_t self = g_ecx;
+    if (video_settings_keep_bodies() && !(TUROK_MEM32(self + 0x5AAu) & 0xFFu) &&
+            guest_float(self + 0x52Cu) > 2.0f) {
+        float hold = 2.0f;
+        uint32_t bits;
+        memcpy(&bits, &hold, 4);
+        TUROK_MEM32(self + 0x52Cu) = bits;
+    }
+    sub_0013D000_gen();
+}
+
+/* ── Corpse trace (RECOMP_CORPSE_TRACE=1) ──────────────────────
+ *
+ * Finding what makes bodies vanish: when each actor first runs the Dead
+ * physics state (sub_00118AE0, cdecl (actor, ...), the state table's entry
+ * for "Dead"), and every deactivate (sub_00092B60) and activate
+ * (sub_00093330) of an actor (this-call), with the guest caller and, for
+ * an actor seen dead, how long after. */
+#include <time.h>
+extern void sub_00118AE0_gen(void);
+extern void sub_00092B60_gen(void);
+extern void sub_00093330_gen(void);
+
+static int corpse_trace(void)
+{
+    static int on = -1;
+    if (on < 0) on = getenv("RECOMP_CORPSE_TRACE") != NULL;
+    return on;
+}
+
+static struct { uint32_t actor; clock_t at; } s_dead[512];
+static unsigned s_dead_count;
+
+static long dead_for_ms(uint32_t actor)
+{
+    unsigned i;
+    for (i = 0; i < s_dead_count; i++)
+        if (s_dead[i].actor == actor)
+            return (long)((clock() - s_dead[i].at) * 1000 / CLOCKS_PER_SEC);
+    return -1;
+}
+
+void sub_00118AE0(void)
+{
+    if (corpse_trace()) {
+        uint32_t actor = TUROK_MEM32(g_esp + 4);
+        if (dead_for_ms(actor) < 0 && s_dead_count < 512) {
+            s_dead[s_dead_count].actor = actor;
+            s_dead[s_dead_count].at = clock();
+            s_dead_count++;
+            fprintf(stderr, "[CORPSE] actor %08X (vtable %08X) dead at %.1f s\n",
+                    actor, TUROK_MEM32(actor), (double)clock() / CLOCKS_PER_SEC);
+        }
+    }
+    sub_00118AE0_gen();
+}
+
+void sub_00092B60(void)
+{
+    if (corpse_trace()) {
+        long dead = dead_for_ms(g_ecx);
+        fprintf(stderr, "[CORPSE] deactivate %08X (vtable %08X) arg %u from %08X%s",
+                g_ecx, TUROK_MEM32(g_ecx), TUROK_MEM32(g_esp + 4), TUROK_MEM32(g_esp),
+                dead >= 0 ? "" : "\n");
+        if (dead >= 0) fprintf(stderr, ", dead %.1f s\n", dead / 1000.0);
+    }
+    sub_00092B60_gen();
+}
+
+/* The guest return addresses near the top of the stack (values in .text):
+ * enough to name who is destroying an actor. */
+static void corpse_callers(void)
+{
+    uint32_t i, shown = 0;
+    for (i = 0; i < 48 && shown < 8; i++) {
+        uint32_t v = TUROK_MEM32(g_esp + i * 4u);
+        if (v >= 0x00011000u && v < 0x001F0000u) {
+            fprintf(stderr, " %08X", v);
+            shown++;
+        }
+    }
+    fprintf(stderr, "\n");
+}
+
+/* AnimalAI's and HumanAI's deleting destructors (vtable slot 0x154). */
+extern void sub_0012F110_gen(void);
+extern void sub_00136030_gen(void);
+
+static void unwatch_actor(uint32_t actor);
+
+void sub_0012F110(void)
+{
+    unwatch_actor(g_ecx);
+    if (corpse_trace()) {
+        fprintf(stderr, "[CORPSE] delete AnimalAI %08X at %.1f s:", g_ecx, (double)clock() / CLOCKS_PER_SEC);
+        corpse_callers();
+    }
+    sub_0012F110_gen();
+}
+
+void sub_00136030(void)
+{
+    unwatch_actor(g_ecx);
+    if (corpse_trace()) {
+        fprintf(stderr, "[CORPSE] delete HumanAI %08X at %.1f s:", g_ecx, (double)clock() / CLOCKS_PER_SEC);
+        corpse_callers();
+    }
+    sub_00136030_gen();
+}
+
+/* Watching AnimalAI/HumanAI actors for what changes when one dies and when
+ * its body goes: their constructors (sub_0012F130, 0x7CC bytes;
+ * sub_001354C0, 0x8B0) record them, and once a frame (sub_00104600) every
+ * word that has changed at most four times is reported -- flags and states,
+ * not positions or timers. */
+#define WATCH_ACTORS 96
+#define WATCH_WORDS  (0x8B0 / 4)
+static struct {
+    uint32_t actor, words;
+    clock_t born;
+    uint32_t last[WATCH_WORDS];
+    uint8_t changes[WATCH_WORDS];
+} s_watch[WATCH_ACTORS];
+
+extern void sub_0012F130_gen(void);
+extern void sub_001354C0_gen(void);
+extern void sub_00104600_gen(void);
+
+static void watch_actor(uint32_t actor, uint32_t bytes)
+{
+    unsigned i, w;
+    for (i = 0; i < WATCH_ACTORS; i++)
+        if (!s_watch[i].actor || s_watch[i].actor == actor) break;
+    if (i == WATCH_ACTORS) return;
+    s_watch[i].actor = actor;
+    s_watch[i].words = bytes / 4;
+    s_watch[i].born = clock();
+    for (w = 0; w < s_watch[i].words; w++) {
+        s_watch[i].last[w] = TUROK_MEM32(actor + w * 4u);
+        s_watch[i].changes[w] = 0;
+    }
+}
+
+static clock_t s_level_start;   /* RECOMP_DEBUG_KILL's clock: the last level load */
+static int s_level_killed;
+
+void corpse_watch_reset(void)
+{
+    memset(s_watch, 0, sizeof s_watch);
+    s_level_start = clock();
+    s_level_killed = 0;
+}
+
+static void unwatch_actor(uint32_t actor)
+{
+    unsigned i;
+    for (i = 0; i < WATCH_ACTORS; i++)
+        if (s_watch[i].actor == actor) s_watch[i].actor = 0;
+}
+
+void sub_0012F130(void)
+{
+    uint32_t self = g_ecx;
+    sub_0012F130_gen();
+    if (corpse_trace()) watch_actor(self, 0x7CC);
+}
+
+void sub_001354C0(void)
+{
+    uint32_t self = g_ecx;
+    sub_001354C0_gen();
+    if (corpse_trace()) watch_actor(self, 0x8B0);
+}
+
+static int watched(uint32_t actor)
+{
+    unsigned i;
+    for (i = 0; i < WATCH_ACTORS; i++)
+        if (s_watch[i].actor == actor) return 1;
+    return 0;
+}
+
+/* SetAlpha (sub_00040DB0, this-call, float alpha, ret 4): traced for the
+ * watched actors. */
+extern void sub_00040DB0_gen(void);
+
+void sub_00040DB0(void)
+{
+    if (corpse_trace() && watched(g_ecx)) {
+        fprintf(stderr, "[CORPSE] %.2f s SetAlpha %08X %.3f:", (double)clock() / CLOCKS_PER_SEC,
+                g_ecx, guest_float(g_esp + 4));
+        corpse_callers();
+    }
+    sub_00040DB0_gen();
+}
+
+void sub_00104600(void)
+{
+    sub_00104600_gen();
+    /* RECOMP_DEBUG_KILL=<s>: that long after a level's actors were made,
+     * every watched AnimalAI's health (+0x1D0, a float) is set to 0 once --
+     * a dinosaur to watch die without a fight. */
+    {
+        static int kill = -1;
+        if (kill < 0) kill = getenv("RECOMP_DEBUG_KILL") ? atoi(getenv("RECOMP_DEBUG_KILL")) : 0;
+        if (kill > 0) {
+            unsigned i;
+            uint32_t zero = 0;
+            if (s_level_start && !s_level_killed && clock() - s_level_start > kill * CLOCKS_PER_SEC) {
+                s_level_killed = 1;
+                for (i = 0; i < WATCH_ACTORS; i++)
+                    if (s_watch[i].actor && s_watch[i].words == 0x7CC / 4) {
+                        fprintf(stderr, "[CORPSE] %.2f s debug kill %08X (health %.1f)\n",
+                                (double)clock() / CLOCKS_PER_SEC, s_watch[i].actor,
+                                guest_float(s_watch[i].actor + 0x1D0u));
+                        TUROK_MEM32(s_watch[i].actor + 0x1D0u) = zero;
+                    }
+            }
+        }
+    }
+    if (corpse_trace()) {
+        unsigned i, w;
+        clock_t now = clock();
+        for (i = 0; i < WATCH_ACTORS; i++) {
+            if (!s_watch[i].actor) continue;
+            for (w = 0; w < s_watch[i].words; w++) {
+                uint32_t value = TUROK_MEM32(s_watch[i].actor + w * 4u);
+                if (value == s_watch[i].last[w]) continue;
+                if (s_watch[i].changes[w] < 255) s_watch[i].changes[w]++;
+                if (s_watch[i].changes[w] <= 4 && now - s_watch[i].born > 3 * CLOCKS_PER_SEC)
+                    fprintf(stderr, "[WATCH] %.2f s actor %08X +%03X: %08X -> %08X\n",
+                            (double)now / CLOCKS_PER_SEC, s_watch[i].actor, w * 4u,
+                            s_watch[i].last[w], value);
+                s_watch[i].last[w] = value;
+            }
+        }
+    }
+}
+
+void sub_00093330(void)
+{
+    if (corpse_trace() && dead_for_ms(g_ecx) >= 0)
+        fprintf(stderr, "[CORPSE] activate %08X from %08X, dead %.1f s\n",
+                g_ecx, TUROK_MEM32(g_esp), dead_for_ms(g_ecx) / 1000.0);
+    sub_00093330_gen();
+}
+
 /* ── Box-in-view test (sub_00021A90) ───────────────────────────
  *
  * camera->InView(centre, axes) (this-call, ret 8): 1 if a box is in view,
@@ -541,6 +802,10 @@ void sub_00054A60(void)
         fprintf(stderr, "[TUROK] screen %.96s: %s\n", text, kind == 1 ? "front end" : kind ? "pause menu" : "game");
         video_settings_screen(kind == 1, kind == 2);
         video_settings_menu_screen(self, text);
+        if (!strstr(text, "creens\\")) {   /* a level: the actors watched before are gone */
+            extern void corpse_watch_reset(void);
+            corpse_watch_reset();
+        }
     }
     sub_00054A60_gen();
 }
