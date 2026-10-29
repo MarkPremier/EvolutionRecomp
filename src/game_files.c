@@ -9,9 +9,11 @@
  *   - RECOMP_GAME_DIR, if set;
  *   - the folder turok_settings.ini remembers ([paths] game_dir);
  *   - a "game" folder beside the program;
- *   - the folder the build was made with (main.c's YOUR_GAME_DIR);
  *   - a disc image (.iso or .xiso) beside the program, extracted once into
  *     "game";
+ *   - the folder the build was made with (main.c's YOUR_GAME_DIR) -- after
+ *     the image, so a copy of the program put beside an image uses that
+ *     image even on the machine that built it;
  *   - and else the player is asked for the image or the extracted
  *     default.xbe.
  *
@@ -378,9 +380,16 @@ int game_files_locate(const char *build_dir, char *dir, size_t size)
     if (!fresh && *candidate && usable_dir(candidate, 0)) { snprintf(dir, size, "%s", candidate); return 1; }
     snprintf(candidate, sizeof candidate, "%s\\game", s_exe_dir);
     if (usable_dir(candidate, 1)) { snprintf(dir, size, "%s", candidate); return 1; }
-    if (!fresh && build_dir && usable_dir(build_dir, 0)) { snprintf(dir, size, "%s", build_dir); return 1; }
-
-    if (image_beside(chosen, sizeof chosen) || ask(chosen, sizeof chosen)) {
+    {
+        int beside = image_beside(chosen, sizeof chosen);
+        if (!beside && !fresh && build_dir && usable_dir(build_dir, 0)) {
+            snprintf(dir, size, "%s", build_dir);
+            return 1;
+        }
+        if (!beside && !ask(chosen, sizeof chosen))
+            return 0;
+    }
+    {
         for (;;) {
             size_t n = strlen(chosen);
             if (n > 12 && !_stricmp(chosen + n - 12, "\\default.xbe")) {
