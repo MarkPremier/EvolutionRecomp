@@ -23,6 +23,8 @@
 #include <stddef.h>   /* ptrdiff_t */
 #include <stdlib.h>   /* getenv */
 #include <string.h>
+#include <math.h>     /* shadow light camera angle */
+#include <intrin.h>   /* _mm_mfence */
 
 /* ── ICALL trace ring buffer ───────────────────────────────── */
 
@@ -124,6 +126,62 @@ void sub_001B23DD(void)
     sub_001B23DD_gen();
 }
 
+/* ── D3D KickOff without the write-combine handshake ───────────
+ *
+ * Before publishing DMA_PUT, KickOff (sub_001984B0) and its flush helper
+ * (sub_00198480) set PFB 0x100410 bit 16 and spin until the GPU clears it:
+ * the write-combining buffers have drained into memory. Here memory is
+ * coherent and the bit is cleared by the toolkit's GPU thread only between
+ * pushbuffer packets, so the game thread sat out whatever that thread was
+ * doing -- a seventh of the frame in busy levels. The handshake is skipped:
+ * a store barrier orders the pushbuffer before PUT, which is all the flush
+ * guaranteed. KickOff's other cases (the device flag 0x2000 path and the
+ * synchronous-debug wait on [0x1A1AD4]) run the original. */
+extern void sub_001984B0_gen(void);
+extern void sub_00198480_gen(void);
+extern void sub_0019D580_gen(void);
+
+/* The miniport's vblank handler (sub_0019D580, this = miniport, [this] = the
+ * NV2A register base) acknowledges PCRTC_INTR and then spins until PMC_INTR
+ * drops its PCRTC bit (0x1000000), which hardware does at once. Here only the
+ * toolkit's ack thread clears it, between pushbuffer walks, so the DPC -- on
+ * the timer thread, which runs every DPC and timer -- spun for most of a
+ * core while the game waited on events it would have signalled. Its caller
+ * (DPC sub_0019DD40) has already read the bit and chosen to handle the blank,
+ * and the handler does not read it before the spin: drop it first. */
+void sub_0019D580(void)
+{
+    uint32_t regs = TUROK_MEM32(g_ecx);
+    if (regs)
+        TUROK_MEM32(regs + 0x100u) &= ~0x01000000u;
+    sub_0019D580_gen();
+}
+
+void sub_00198480(void)
+{
+    _mm_mfence();
+    g_esp += 4;   /* ret */
+}
+
+void sub_001984B0(void)
+{
+    uint32_t dev = g_ecx;
+    uint32_t flags = TUROK_MEM32(dev + 8u);
+
+    if ((flags & 0x2000u) || TUROK_MEM32(0x001A1AD4u)) {
+        sub_001984B0_gen();
+        return;
+    }
+    {
+        uint32_t put = (flags & 4u) ? TUROK_MEM32(dev + 0x35Cu) : TUROK_MEM32(dev);
+        TUROK_MEM32(dev + 0x2Cu) = put;
+        _mm_mfence();
+        TUROK_MEM32(TUROK_MEM32(dev + 0x23BCu) + 0x40u) = put & 0x0FFFFFFFu;
+        g_eax = 0;
+        g_esp += 4;   /* ret */
+    }
+}
+
 /* ── Shadow manager defaults (sub_0017D5C0) ────────────────── */
 
 /*
@@ -134,10 +192,10 @@ void sub_001B23DD(void)
  * the distance), so a creature further away casts nothing. The XBOX
  * subclass then creates its render target from the size fields.
  *
- * RECOMP_SHADOW_DISTANCE (default 48) and RECOMP_SHADOW_MAP (default 2048,
+ * RECOMP_SHADOW_DISTANCE (default 64) and RECOMP_SHADOW_MAP (default 2048,
  * a power of two from 512 to 4096) replace them; at the defaults shadows
- * reach three times as far and texels are smaller than on the Xbox (2048
- * over 48 units against 512 over 16). Set 16 and 512 for the original.
+ * reach four times as far (see sub_0017DAF0 below for the area around the
+ * player). Set 16 and 512 (and RECOMP_SHADOW_AROUND=0) for the original.
  */
 extern void sub_0017D5C0_gen(void);
 
@@ -146,7 +204,7 @@ void sub_0017D5C0(void)
     uint32_t self = g_ecx;
     const char *distance_text = getenv("RECOMP_SHADOW_DISTANCE");
     const char *map_text = getenv("RECOMP_SHADOW_MAP");
-    float distance = distance_text ? (float)atof(distance_text) : 48.0f;
+    float distance = distance_text ? (float)atof(distance_text) : 64.0f;
     uint32_t map = map_text ? (uint32_t)strtoul(map_text, NULL, 0) : 2048u;
 
     sub_0017D5C0_gen();
@@ -156,6 +214,84 @@ void sub_0017D5C0(void)
         TUROK_MEM32(self + 0x400u) = map;
         TUROK_MEM32(self + 0x404u) = map;
     }
+}
+
+/* ── Shadow area around the player (sub_0017DAF0) ──────────────
+ *
+ * The camera-fitted light camera (light camera at shadow manager +0x10, eye
+ * +0x204, target +0x210) looks at a point half the shadow distance ahead
+ * of the view and is given just the angle that reaches the player
+ * (sub_0001FD20 sets it, radians at camera +0xEC): the shadowed area is a
+ * disc with the player on its rim. Anything beside or behind the player --
+ * and, in widescreen, near the sides of the view -- is off the map and
+ * casts nothing. The angle is widened so the disc also reaches
+ * RECOMP_SHADOW_AROUND units (default 12) past the player. */
+extern void sub_0017DAF0_gen(void);
+extern void sub_0001FD20_gen(void);
+
+static uint32_t s_shadow_fit;   /* the shadow manager while it fits its camera */
+
+static float guest_float(uint32_t va)
+{
+    float value;
+    uint32_t bits = TUROK_MEM32(va);
+    memcpy(&value, &bits, 4);
+    return value;
+}
+
+void sub_0017DAF0(void)
+{
+    s_shadow_fit = g_ecx;
+    sub_0017DAF0_gen();
+    s_shadow_fit = 0;
+}
+
+void sub_0001FD20(void)
+{
+    static float around = -1.0f;
+    uint32_t self = s_shadow_fit;
+
+    if (around < 0) {
+        const char *text = getenv("RECOMP_SHADOW_AROUND");
+        around = text ? (float)atof(text) : 12.0f;
+        if (!(around >= 0 && around < 1000.0f)) around = 0;
+    }
+    if (self && g_ecx == self + 0x10u && around > 0) {
+        float dx = guest_float(self + 0x210u) - guest_float(self + 0x204u);
+        float dy = guest_float(self + 0x214u) - guest_float(self + 0x208u);
+        float dz = guest_float(self + 0x218u) - guest_float(self + 0x20Cu);
+        float range = sqrtf(dx * dx + dy * dy + dz * dz);
+        float angle = guest_float(g_esp + 4);
+        if (range > 0.001f && angle > 0 && angle < 3.0f) {
+            float radius = range * tanf(angle * 0.5f) + around;
+            uint32_t bits;
+            angle = 2.0f * atanf(radius / range);
+            memcpy(&bits, &angle, 4);
+            TUROK_MEM32(g_esp + 4) = bits;
+        }
+    }
+    sub_0001FD20_gen();
+}
+
+/* ── Shadows of models out of view (sub_000F21B0) ──────────────
+ *
+ * Before a model's shadow is drawn the manager asks this whether the model
+ * passed one of its visibility tests (occlusion queries, polled every
+ * fourth frame, sub_00194B40). Only a model drawn on screen issues them, so
+ * one just out of view -- whose shadow may well be in view -- casts none.
+ * RECOMP_SHADOW_OFFSCREEN=0 restores that; otherwise every model the
+ * manager offers casts its shadow, and the light camera clips the rest. */
+extern void sub_000F21B0_gen(void);
+
+void sub_000F21B0(void)
+{
+    static int offscreen = -1;
+    if (offscreen < 0) {
+        const char *text = getenv("RECOMP_SHADOW_OFFSCREEN");
+        offscreen = !text || atoi(text) != 0;
+    }
+    sub_000F21B0_gen();
+    if (offscreen) g_eax = 1;
 }
 
 /* ── Which screen the game is on (sub_00054A60) ────────────────

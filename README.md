@@ -23,10 +23,14 @@ CPU-renderer build (about 9 fps on the title screen).
   fire, weapon switching and pause.
 - Keyboard and mouse work too, merged onto controller 1 (see Controls).
 - Dinosaurs and Turok cast shadows, with filtered (PCF) edges.
-  `RECOMP_SHADOWS=0` turns them off. They reach further and are sharper
-  than on the Xbox: the shadow map covers 48 units ahead of the camera at
-  2048x2048 (the game's own 16 units at 512x512). `RECOMP_SHADOW_DISTANCE`
-  and `RECOMP_SHADOW_MAP` change them; 16 and 512 give the original.
+  `RECOMP_SHADOWS=0` turns them off. They reach further than on the Xbox:
+  the shadow map covers 64 units ahead of the camera and 12 around the
+  player, so creatures beside and behind you (and at the sides of a
+  widescreen view) cast them too, at 2048x2048 (the game's own 16 units
+  ahead at 512x512). A creature out of view still casts its shadow; the
+  game drew only those of creatures on screen. `RECOMP_SHADOW_DISTANCE`,
+  `RECOMP_SHADOW_AROUND`, `RECOMP_SHADOW_MAP` and `RECOMP_SHADOW_OFFSCREEN`
+  change them; 16, 0, 512 and 0 give the original.
 - The window shows frames straight from the GPU through a swap chain, so it
   resizes and maximises freely (the frame stays 4:3, letterboxed), opens at
   the largest multiple of 640x480 that fits the screen, and **Alt+Enter**
@@ -318,7 +322,7 @@ the disc has them. A `patch0.tre` that something else wrote is left alone.
 | `src/main.c` | Host entry point: loads the XBE, sets the runtime defaults below, calls the game's entry point |
 | `src/game_files.c` | Finds the player's USA disc files, checks `default.xbe`, and extracts a disc image (XDVDFS) into `game` |
 | `src/video_settings.c` | The Video Options page: builds `patch0.tre` from the disc's menus (its `.tre` and screen formats are described there), keeps `turok_settings.ini`, and applies the page's values through the history values the menu writes |
-| `src/recomp_manual.c` | Hand-written overrides: D3D's GetVisibilityTestResult (sub_00194B40) completes unfinished tests as visible; DirectSound's idle-voice handler (sub_001B23DD) ignores voices nobody owns (the emulated APU could report one, and quitting a level crashed); the shadow manager's constructor (sub_0017D5C0) takes its shadow distance and map size from `RECOMP_SHADOW_DISTANCE`/`RECOMP_SHADOW_MAP` |
+| `src/recomp_manual.c` | Hand-written overrides: D3D's GetVisibilityTestResult (sub_00194B40) completes unfinished tests as visible; DirectSound's idle-voice handler (sub_001B23DD) ignores voices nobody owns (the emulated APU could report one, and quitting a level crashed); the shadow manager's constructor (sub_0017D5C0) takes its shadow distance and map size from `RECOMP_SHADOW_DISTANCE`/`RECOMP_SHADOW_MAP`; the light camera's fit (sub_0017DAF0, through the camera FOV setter sub_0001FD20) widens to cover the area around the player; the shadow caster check (sub_000F21B0) passes creatures out of view; D3D KickOff (sub_001984B0/sub_00198480) skips the write-combine flush handshake and the vblank handler (sub_0019D580) drops PMC_INTR's PCRTC bit before its acknowledge spin -- both waited on the toolkit's GPU thread |
 | `seeds/manual_seeds.json` | Functions only reached through pointers (XPP init) |
 | `seeds/recomp_extra_seeds.json` | Functions the disassembler misses, found by the upstream recompiler or at runtime (`tools.seed_from_log` on an `[ICALL] Failed to resolve` log). Includes the player-action thunks (`mov eax,[ecx]; mov [ecx+0x3A4],0; jmp [eax+N]`) reached only through runtime-built tables; without them fire, pause and previous weapon did nothing |
 | `patches/xboxrecomp-aknavj-turok.patch` | The toolkit changes as one diff against aknavj 11a8aa1 |
