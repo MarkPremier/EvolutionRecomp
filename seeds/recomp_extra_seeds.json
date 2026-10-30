@@ -178,5 +178,89 @@
  {
   "start": "0x0010DF10",
   "note": "weapon vfunc after an inline jump table (sub_0010DEC0's); the disassembler read through the table into it, so calls failed at runtime and the weapon could not be switched away from"
+ },
+ {
+  "start": "0x000187B0",
+  "note": "code in a .text gap no function covered (gapscan.py); no static reference, seeded in case it is reached through a computed address"
+ },
+ {
+  "start": "0x00019920",
+  "note": "code in a .text gap no function covered (gapscan.py); no static reference, seeded in case it is reached through a computed address"
+ },
+ {
+  "start": "0x0001A630",
+  "note": "code in a .text gap no function covered (gapscan.py); no static reference, seeded in case it is reached through a computed address"
+ },
+ {
+  "start": "0x0001A640",
+  "note": "code in a .text gap no function covered (gapscan.py); no static reference, seeded in case it is reached through a computed address"
+ },
+ {
+  "start": "0x000CBF00",
+  "note": "code in a .text gap no function covered (gapscan.py); no static reference, seeded in case it is reached through a computed address"
+ },
+ {
+  "start": "0x000D38F0",
+  "note": "code in a .text gap no function covered (gapscan.py); no static reference, seeded in case it is reached through a computed address"
+ },
+ {
+  "start": "0x000D41F0",
+  "note": "code in a .text gap no function covered (gapscan.py); no static reference, seeded in case it is reached through a computed address"
+ },
+ {
+  "start": "0x000D4360",
+  "note": "code in a .text gap no function covered (gapscan.py); no static reference, seeded in case it is reached through a computed address"
+ },
+ {
+  "start": "0x000D4950",
+  "note": "code in a .text gap no function covered (gapscan.py); no static reference, seeded in case it is reached through a computed address"
+ },
+ {
+  "start": "0x000D4CD0",
+  "note": "code in a .text gap no function covered (gapscan.py); no static reference, seeded in case it is reached through a computed address"
+ },
+ {
+  "start": "0x0001E7E0",
+  "note": "code in a .text gap no function covered (tools/scan_missed_functions.py); seeded in case it is reached through a computed address"
+ },
+ {
+  "start": "0x00023F40",
+  "note": "code in a .text gap no function covered (tools/scan_missed_functions.py); seeded in case it is reached through a computed address"
+ },
+ {
+  "start": "0x00023F80",
+  "note": "code in a .text gap no function covered (tools/scan_missed_functions.py); seeded in case it is reached through a computed address"
+ },
+ {
+  "start": "0x000240F0",
+  "note": "code in a .text gap no function covered (tools/scan_missed_functions.py); seeded in case it is reached through a computed address"
+ },
+ {
+  "start": "0x00024130",
+  "note": "code in a .text gap no function covered (tools/scan_missed_functions.py); seeded in case it is reached through a computed address"
+ },
+ {
+  "start": "0x00024170",
+  "note": "code in a .text gap no function covered (tools/scan_missed_functions.py); seeded in case it is reached through a computed address"
+ },
+ {
+  "start": "0x000241A0",
+  "note": "code in a .text gap no function covered (tools/scan_missed_functions.py); seeded in case it is reached through a computed address"
+ },
+ {
+  "start": "0x000241E0",
+  "note": "code in a .text gap no function covered (tools/scan_missed_functions.py); seeded in case it is reached through a computed address"
+ },
+ {
+  "start": "0x000242D0",
+  "note": "code in a .text gap no function covered (tools/scan_missed_functions.py); seeded in case it is reached through a computed address"
+ },
+ {
+  "start": "0x000CCCE0",
+  "note": "code in a .text gap no function covered (tools/scan_missed_functions.py); seeded in case it is reached through a computed address"
+ },
+ {
+  "start": "0x000CE2B0",
+  "note": "code in a .text gap no function covered (tools/scan_missed_functions.py); seeded in case it is reached through a computed address"
  }
 ]
