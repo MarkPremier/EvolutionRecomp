@@ -1,5 +1,5 @@
 diff --git a/src/apu/apu_core.c b/src/apu/apu_core.c
-index c5c8a86..ea49116 100644
+index c5c8a86..5f74bc1 100644
 --- a/src/apu/apu_core.c
 +++ b/src/apu/apu_core.c
 @@ -85,9 +85,22 @@ uint8_t *mcpx_apu_ram_address(uint64_t addr, uint32_t bytes)
@@ -28,10 +28,44 @@ index c5c8a86..ea49116 100644
      }
      uint32_t a = (uint32_t)addr & 0x0FFFFFFFu;
      size_t mapped = g_xbox_map_size ? g_xbox_map_size : g_xbox_total_ram;
-@@ -101,6 +114,22 @@ uint8_t *mcpx_apu_ram_address(uint64_t addr, uint32_t bytes)
+@@ -101,6 +114,56 @@ uint8_t *mcpx_apu_ram_address(uint64_t addr, uint32_t bytes)
      return g_apu_ram_ptr + (a & 0x03FFFFFFu);
  }
  
++/* DirectSound's own structures -- the voice array (VPVADDR), the SGE and SSL
++ * tables, the notifiers, the front end's semaphore -- are contiguous
++ * allocations, written by the title through the contiguous window. The
++ * kernel tags each physical page with its latest translation (last writer
++ * wins), and Turok keeps that rule for the voice processor
++ * (RECOMP_APU_NO_REDIR: its music buffers are ordinary RAM sharing page
++ * numbers with contiguous blocks). So an ordinary page given the number of the
++ * voice array's would have the voice processor read that RAM as voices and
++ * write its envelopes and offsets into it. A flying-level soak showed that
++ * pattern after nine clean level restarts -- every voice suddenly garbage
++ * (links to voice 20866, 29-channel ADPCM), then the game crashing in its
++ * heap -- though not yet caught in the act (RECOMP_APU_DS_TRACE reports it).
++ * These structures resolve as the DSPs' scratch does: a live contiguous block
++ * owning the page wins. Sample data keeps the mapper. */
++extern uint8_t *xbox_ApuScratchPointer(uint64_t physical, uint32_t bytes);
++
++uint8_t *mcpx_apu_ds_address(uint64_t addr, uint32_t bytes)
++{
++    uint8_t *pointer = g_state && g_state->physical_mapper ? xbox_ApuScratchPointer(addr, bytes) : NULL;
++    static int trace = -1;   /* RECOMP_APU_DS_TRACE: when the two would differ */
++    if (trace < 0) trace = getenv("RECOMP_APU_DS_TRACE") != NULL;
++    if (trace && pointer && pointer != g_state->physical_mapper(addr, bytes)) {
++        static uint32_t last_page = ~0u;
++        static unsigned int reported;
++        if ((uint32_t)(addr >> 12) != last_page && reported < 64) {
++            last_page = (uint32_t)(addr >> 12);
++            reported++;
++            fprintf(stderr, "[APU-DS] page 0x%llX: an ordinary retag, kept on its contiguous block\n",
++                    (unsigned long long)addr & ~0xFFFull);
++        }
++    }
++    return pointer ? pointer : mcpx_apu_ram_address(addr, bytes);
++}
++
 +/* `bytes` from physical `addr`, a page at a time: consecutive physical pages
 + * need not be stored together here (see xbox_DmaPhysicalPointer), so an
 + * extent across a page boundary is looked up page by page. */
@@ -51,7 +85,7 @@ index c5c8a86..ea49116 100644
  /* The interrupt line, as the frame thread sees it. update_irq used to call
   * pci_irq_assert, which is an empty stub here, so DirectSound's service
   * routine never ran and no voice completion ever reached it. */
-@@ -135,6 +164,8 @@ extern void xbox_worker_stack_free(int slot);
+@@ -135,6 +198,8 @@ extern void xbox_worker_stack_free(int slot);
  extern uint32_t xbox_GetConnectedInterrupt(uint32_t vector);
  extern uint32_t xbox_AllocThreadTib(void);
  extern int xbox_IrqlBlocksInterrupts(void);
@@ -60,7 +94,7 @@ index c5c8a86..ea49116 100644
  extern int xbox_IrqlEnterInterrupt(int level);
  extern void xbox_IrqlLeaveInterrupt(int saved);
  #if defined(_MSC_VER)
-@@ -158,12 +189,15 @@ static void apu_deliver_irq(MCPXAPUState *d)
+@@ -158,12 +223,15 @@ static void apu_deliver_irq(MCPXAPUState *d)
      uint32_t kint, routine, context;
      uint8_t *guest_ram = (uint8_t *)(uintptr_t)xbox_GetMemoryOffset();
      apu_guest_fn fn;
@@ -79,7 +113,7 @@ index c5c8a86..ea49116 100644
      held_off = 0;
      kint = xbox_GetConnectedInterrupt(APU_VECTOR);
      if (!kint)
-@@ -185,7 +219,15 @@ static void apu_deliver_irq(MCPXAPUState *d)
+@@ -185,7 +253,15 @@ static void apu_deliver_irq(MCPXAPUState *d)
          return;
  
      qemu_mutex_unlock(&d->lock);
@@ -95,7 +129,7 @@ index c5c8a86..ea49116 100644
          xbox_worker_stack_free(slot);
          qemu_mutex_lock(&d->lock);
          return;
-@@ -197,6 +239,7 @@ static void apu_deliver_irq(MCPXAPUState *d)
+@@ -197,6 +273,7 @@ static void apu_deliver_irq(MCPXAPUState *d)
      g_esp -= 4; *(uint32_t *)(guest_ram + g_esp) = 0xDEADBEEFu;
      { int _irql = xbox_IrqlEnterInterrupt(16); fn(); xbox_IrqlLeaveInterrupt(_irql); }
      xbox_GuestAudioGuardLeave();
@@ -103,7 +137,16 @@ index c5c8a86..ea49116 100644
      xbox_worker_stack_free(slot);
      qemu_mutex_lock(&d->lock);
  
-@@ -405,8 +448,9 @@ void mcpx_apu_monitor_finalize(MCPXAPUState *d)
+@@ -288,7 +365,7 @@ void mcpx_apu_write(void *opaque, hwaddr addr, uint64_t val,
+         break;
+     case NV_PAPU_FEMEMDATA:
+         /* 'magic write' - value written to FEMEMADDR on notify completion */
+-        stl_le_phys(address_space_memory, d->regs[NV_PAPU_FEMEMADDR], (uint32_t)val);
++        ds_stl(d->regs[NV_PAPU_FEMEMADDR], (uint32_t)val);
+         qatomic_set(&d->regs[addr], (uint32_t)val);
+         break;
+     default:
+@@ -405,8 +482,9 @@ void mcpx_apu_monitor_finalize(MCPXAPUState *d)
  /* Optional raw PCM capture for offline analysis (RECOMP_APU_WAV=<base>):
   * <base>.emu.raw = EP/DSP mixdown before the software mixer,
   * <base>.mix.raw = what is actually submitted to the audio backend. */
@@ -114,7 +157,7 @@ index c5c8a86..ea49116 100644
  
  static void apu_wav_capture(const int16_t (*buf)[2], int n, int mix)
  {
-@@ -419,12 +463,19 @@ static void apu_wav_capture(const int16_t (*buf)[2], int n, int mix)
+@@ -419,12 +497,19 @@ static void apu_wav_capture(const int16_t (*buf)[2], int n, int mix)
              g_wav_emu = fopen(path, "wb");
              snprintf(path, sizeof(path), "%s.mix.raw", base);
              g_wav_mix = fopen(path, "wb");
@@ -134,7 +177,7 @@ index c5c8a86..ea49116 100644
  }
  
  /* Declick: a sound that is cut off abruptly makes the mix step from a large
-@@ -569,8 +620,13 @@ static void throttle(MCPXAPUState *d)
+@@ -569,8 +654,13 @@ static void throttle(MCPXAPUState *d)
  
      int64_t now_us = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
  
@@ -149,16 +192,76 @@ index c5c8a86..ea49116 100644
          d->next_frame_time_us = now_us;
      }
  
-@@ -592,6 +648,8 @@ static void throttle(MCPXAPUState *d)
+@@ -592,6 +682,68 @@ static void throttle(MCPXAPUState *d)
   * se_frame - Process one audio frame (VP -> GP -> EP pipeline)
   * ============================================================ */
  
 +static double g_apu_yield_s;     /* RECOMP_APU_DIAG: time given away to the title */
 +
++/* Containment. The emulated APU walks voice lists, SGE tables and DSP code
++ * that the title is rewriting as it goes, with no lock between them (on
++ * hardware a half-written value only plays a wrong sample); each crash so
++ * far was such a value used as an index or a size. Those found are checked
++ * (out_of_range in apu_vp.c, dsp_out_of_range, fifo_empty_range); a fault
++ * still raised by the voice processor, the DSPs or a register write costs
++ * that frame's or write's sound instead of the game -- none of them takes a
++ * lock of its own, so none is left held. The VEH still logs each fault in
++ * full before it comes here. After 64 the stage is left off: sound stops,
++ * the game goes on (register writes still run, as DirectSound waits on them). */
++static volatile LONG g_apu_faults;
++
++static int apu_fault_filter(unsigned long code)
++{
++    switch (code) {
++    case EXCEPTION_ACCESS_VIOLATION:
++    case EXCEPTION_ARRAY_BOUNDS_EXCEEDED:
++    case EXCEPTION_INT_DIVIDE_BY_ZERO:
++    case EXCEPTION_ILLEGAL_INSTRUCTION:
++        return EXCEPTION_EXECUTE_HANDLER;
++    }
++    return EXCEPTION_CONTINUE_SEARCH;
++}
++
++static bool apu_fault_limit(void)
++{
++    return g_apu_faults >= 64;
++}
++
++static void apu_fault_report(const char *where, unsigned long code)
++{
++    LONG n = InterlockedIncrement(&g_apu_faults);
++    fprintf(stderr, "[APU] fault %08lX in %s contained (%ld so far)%s\n", code, where, n,
++            n == 64 ? ": audio emulation stopped, the game goes on" : "");
++}
++
++static void se_stage(MCPXAPUState *d, float mixbins[NUM_MIXBINS][NUM_SAMPLES_PER_FRAME], bool dsp)
++{
++    unsigned long code = 0;
++    if (apu_fault_limit()) return;
++    __try {
++        if (dsp) mcpx_apu_dsp_frame(d, mixbins);
++        else mcpx_apu_vp_frame(d, mixbins);
++    } __except (apu_fault_filter(code = GetExceptionCode())) {
++        memset(mixbins, 0, sizeof(float) * NUM_MIXBINS * NUM_SAMPLES_PER_FRAME);
++        apu_fault_report(dsp ? "the DSP frame" : "the voice processor", code);
++    }
++}
++
++static void apu_write_guarded(void (*write)(void *, hwaddr, uint64_t, unsigned int),
++                              MCPXAPUState *d, hwaddr addr, uint64_t val, unsigned int size)
++{
++    unsigned long code = 0;
++    __try {   /* not skipped past the limit: DirectSound waits on its writes */
++        write(d, addr, val, size);
++    } __except (apu_fault_filter(code = GetExceptionCode())) {
++        apu_fault_report("a register write", code);
++    }
++}
++
  static void se_frame(MCPXAPUState *d)
  {
      mcpx_apu_update_dsp_preference(d);
-@@ -614,9 +672,31 @@ static void se_frame(MCPXAPUState *d)
+@@ -614,9 +766,31 @@ static void se_frame(MCPXAPUState *d)
      float mixbins[NUM_MIXBINS][NUM_SAMPLES_PER_FRAME];
      memset(mixbins, 0, sizeof(mixbins));
  
@@ -174,9 +277,9 @@ index c5c8a86..ea49116 100644
 +        if (diag < 0) diag = getenv("RECOMP_APU_DIAG") != NULL;
 +        if (!frequency.QuadPart) QueryPerformanceFrequency(&frequency);
 +        QueryPerformanceCounter(&t0);
-+        mcpx_apu_vp_frame(d, mixbins);
++        se_stage(d, mixbins, false);
 +        QueryPerformanceCounter(&t1);
-+        mcpx_apu_dsp_frame(d, mixbins);
++        se_stage(d, mixbins, true);
 +        QueryPerformanceCounter(&t2);
 +        mcpx_apu_monitor_frame(d);
 +        QueryPerformanceCounter(&t3);
@@ -193,7 +296,7 @@ index c5c8a86..ea49116 100644
  
      d->ep_frame_div++;
  
-@@ -695,9 +775,16 @@ static void *mcpx_apu_frame_thread(void *arg)
+@@ -695,9 +869,16 @@ static void *mcpx_apu_frame_thread(void *arg)
           * thread starved there indefinitely: Burnout 3 froze on its vehicle
           * select, blocked in voice_lock at raised IRQL, which in turn held
           * off every USB interrupt. */
@@ -213,8 +316,40 @@ index c5c8a86..ea49116 100644
      }
  
      qemu_mutex_unlock(&d->lock);
+@@ -845,27 +1026,27 @@ void mcpx_apu_dispatch_mmio(MCPXAPUState *d, hwaddr addr, uint64_t val,
+         /* VP region */
+         hwaddr vp_addr = addr - 0x20000;
+         if (is_write) {
+-            mcpx_apu_vp_write(d, vp_addr, val, size);
++            apu_write_guarded(mcpx_apu_vp_write, d, vp_addr, val, size);
+         }
+         /* VP reads handled by caller if needed */
+     } else if (addr >= 0x30000 && addr < 0x40000) {
+         /* GP region */
+         if (is_write) {
+             qemu_mutex_lock(&d->lock);
+-            mcpx_apu_gp_write(d, addr - 0x30000, val, size);
++            apu_write_guarded(mcpx_apu_gp_write, d, addr - 0x30000, val, size);
+             qemu_mutex_unlock(&d->lock);
+         }
+     } else if (addr >= 0x50000 && addr < 0x60000) {
+         /* EP region */
+         if (is_write) {
+             qemu_mutex_lock(&d->lock);
+-            mcpx_apu_ep_write(d, addr - 0x50000, val, size);
++            apu_write_guarded(mcpx_apu_ep_write, d, addr - 0x50000, val, size);
+             qemu_mutex_unlock(&d->lock);
+         }
+     } else if (addr < 0x20000) {
+         /* Main APU registers */
+         if (is_write) {
+-            mcpx_apu_write(d, addr, val, size);
++            apu_write_guarded(mcpx_apu_write, d, addr, val, size);
+         }
+     }
+ }
 diff --git a/src/apu/apu_dsp.c b/src/apu/apu_dsp.c
-index 5f65480..d7880f1 100644
+index 5f65480..8f60a48 100644
 --- a/src/apu/apu_dsp.c
 +++ b/src/apu/apu_dsp.c
 @@ -30,12 +30,14 @@
@@ -409,7 +544,7 @@ index 5f65480..d7880f1 100644
      scatter_gather_rw(d, d->regs[NV_PAPU_GPSADDR], d->regs[NV_PAPU_GPSMAXSGE],
                        ptr, addr, len, dir);
  }
-@@ -355,7 +477,9 @@ static void gp_scratch_rw(void *opaque, uint8_t *ptr, uint32_t addr, size_t len,
+@@ -355,11 +477,32 @@ static void gp_scratch_rw(void *opaque, uint8_t *ptr, uint32_t addr, size_t len,
  static void ep_scratch_rw(void *opaque, uint8_t *ptr, uint32_t addr, size_t len,
                            bool dir)
  {
@@ -419,7 +554,30 @@ index 5f65480..d7880f1 100644
      scatter_gather_rw(d, d->regs[NV_PAPU_EPSADDR], d->regs[NV_PAPU_EPSMAXSGE],
                        ptr, addr, len, dir);
  }
-@@ -396,6 +520,7 @@ static uint32_t circular_scatter_gather_rw(MCPXAPUState *d, hwaddr sge_base,
+ 
++/* A FIFO whose end is not past its base -- a register the title had not
++ * finished writing -- has no room: a transfer through it divided by zero
++ * (cur % (end - base)) or copied nothing forever. It is skipped, a read
++ * seeing silence. */
++static bool fifo_empty_range(MCPXAPUState *d, const char *dsp, bool dir, unsigned int index,
++                             uint32_t base, uint32_t end, uint8_t *ptr, size_t len)
++{
++    static unsigned int reported;
++    (void)d;
++    if (end > base) return false;
++    if (reported < 16) {
++        reported++;
++        fprintf(stderr, "[APU] %s %s FIFO %u has no room (base %06X end %06X): skipped\n",
++                dsp, dir ? "output" : "input", index, base, end);
++    }
++    if (!dir) memset(ptr, 0, len);
++    return true;
++}
++
+ static uint32_t circular_scatter_gather_rw(MCPXAPUState *d, hwaddr sge_base,
+                                            unsigned int max_sge, uint8_t *ptr,
+                                            uint32_t base, uint32_t end,
+@@ -396,6 +539,7 @@ static uint32_t circular_scatter_gather_rw(MCPXAPUState *d, hwaddr sge_base,
  static void gp_fifo_rw(void *opaque, uint8_t *ptr, unsigned int index,
                         size_t len, bool dir)
  {
@@ -427,7 +585,21 @@ index 5f65480..d7880f1 100644
      MCPXAPUState *d = opaque;
      uint32_t base;
      uint32_t end;
-@@ -448,6 +573,7 @@ static bool ep_sink_samples(MCPXAPUState *d, uint8_t *ptr, size_t len)
+@@ -418,8 +562,12 @@ static void gp_fifo_rw(void *opaque, uint8_t *ptr, unsigned int index,
+ 
+     uint32_t cur = GET_MASK(d->regs[cur_reg], NV_PAPU_GPOFCUR0_VALUE);
+ 
++    if (fifo_empty_range(d, "GP", dir, index, base, end, ptr, len)) return;
++
+     /* DSP hangs if current >= end; but forces current >= base */
+-    assert(cur < end);
++    if (cur >= end) {
++        cur = base;
++    }
+     if (cur < base) {
+         cur = base;
+     }
+@@ -448,6 +596,7 @@ static bool ep_sink_samples(MCPXAPUState *d, uint8_t *ptr, size_t len)
  static void ep_fifo_rw(void *opaque, uint8_t *ptr, unsigned int index,
                         size_t len, bool dir)
  {
@@ -435,7 +607,26 @@ index 5f65480..d7880f1 100644
      MCPXAPUState *d = opaque;
      uint32_t base;
      uint32_t end;
-@@ -619,10 +745,52 @@ void mcpx_apu_ep_write(void *opaque, hwaddr addr, uint64_t val, unsigned int siz
+@@ -473,12 +622,15 @@ static void ep_fifo_rw(void *opaque, uint8_t *ptr, unsigned int index,
+     if (dir && index == 0) {
+         bool did_sink = ep_sink_samples(d, ptr, len);
+         if (did_sink) {
+-            /* Since we are sinking, push silence out */
+-            assert(len <= sizeof(ep_silence));
+-            ptr = (uint8_t*)ep_silence;
++            /* Since we are sinking, push silence out (a longer transfer
++             * keeps its own bytes rather than read past the silence) */
++            if (len <= sizeof(ep_silence))
++                ptr = (uint8_t*)ep_silence;
+         }
+     }
+ 
++    if (fifo_empty_range(d, "EP", dir, index, base, end, ptr, len)) return;
++
+     /* DSP hangs if current >= end; but forces current >= base */
+     if (cur >= end) {
+         cur = cur % (end - base);
+@@ -619,10 +771,52 @@ void mcpx_apu_ep_write(void *opaque, hwaddr addr, uint64_t val, unsigned int siz
      }
  }
  
@@ -488,7 +679,7 @@ index 5f65480..d7880f1 100644
  
      /* Write VP results to the GP DSP MIXBUF */
      for (int mixbin = 0; mixbin < NUM_MIXBINS; mixbin++) {
-@@ -642,10 +810,16 @@ static void dsp_frame_engine(MCPXAPUState *d,
+@@ -642,10 +836,16 @@ static void dsp_frame_engine(MCPXAPUState *d,
          dsp_start_frame(d->gp.dsp);
          d->gp.dsp->core.is_idle = false;
          d->gp.dsp->core.cycle_count = 0;
@@ -506,7 +697,7 @@ index 5f65480..d7880f1 100644
          mcpx_apu_dsp_gp_runs++;
          if (!logged_gp) {
              logged_gp = true;
-@@ -675,8 +849,10 @@ static void dsp_frame_engine(MCPXAPUState *d,
+@@ -675,8 +875,10 @@ static void dsp_frame_engine(MCPXAPUState *d,
              d->ep.dsp->core.cycle_count = 0;
              do {
                  dsp_run(d->ep.dsp, 1000);
@@ -518,7 +709,7 @@ index 5f65480..d7880f1 100644
              mcpx_apu_dsp_ep_runs++;
              if (!logged_ep) {
                  logged_ep = true;
-@@ -734,7 +910,18 @@ void mcpx_apu_update_dsp_preference(MCPXAPUState *d)
+@@ -734,7 +936,18 @@ void mcpx_apu_update_dsp_preference(MCPXAPUState *d)
      }
  
      if (preference) {
@@ -538,23 +729,72 @@ index 5f65480..d7880f1 100644
          d->ep.realtime = true;
      } else {
 diff --git a/src/apu/apu_shim.h b/src/apu/apu_shim.h
-index 1d1cbf9..6835ef9 100644
+index 1d1cbf9..6ebb52e 100644
 --- a/src/apu/apu_shim.h
 +++ b/src/apu/apu_shim.h
-@@ -97,6 +97,8 @@ extern uint8_t *g_apu_ram_ptr; /* Set at init to point at Xbox 64MB RAM */
+@@ -97,6 +97,14 @@ extern uint8_t *g_apu_ram_ptr; /* Set at init to point at Xbox 64MB RAM */
  /* Where a physical address the title handed the APU lives. See apu_core.c. */
  uint8_t *mcpx_apu_phys(uint64_t addr);
  uint8_t *mcpx_apu_ram_address(uint64_t addr, uint32_t bytes);
++/* DirectSound's own structures (voices, SGE and SSL tables, notifiers): a
++ * live contiguous block owning the page wins over a later retag. See apu_core.c. */
++uint8_t *mcpx_apu_ds_address(uint64_t addr, uint32_t bytes);
++static inline uint32_t ds_ldl(hwaddr addr) { return *(uint32_t *)mcpx_apu_ds_address(addr, 4); }
++static inline void ds_stl(hwaddr addr, uint32_t val) { *(uint32_t *)mcpx_apu_ds_address(addr, 4) = val; }
++static inline void ds_stb(hwaddr addr, uint8_t val) { *mcpx_apu_ds_address(addr, 1) = val; }
 +/* A copy of `bytes` from physical `addr` that may cross pages. */
 +void mcpx_apu_ram_copy(uint64_t addr, void *destination, uint32_t bytes);
  
  /* Little-endian physical memory reads */
  static inline uint32_t ldl_le_phys(void *as, hwaddr addr) {
 diff --git a/src/apu/apu_vp.c b/src/apu/apu_vp.c
-index 7c36737..eee88b8 100644
+index 7c36737..5888190 100644
 --- a/src/apu/apu_vp.c
 +++ b/src/apu/apu_vp.c
-@@ -93,6 +93,20 @@ static float clampf(float v, float mn, float mx)
+@@ -54,21 +54,39 @@ static void set_notify_status(MCPXAPUState *d, uint32_t v, int notifier,
+                            v * MCPX_HW_NOTIFIER_COUNT + notifier);
+     notify_offset += 15;
+ 
+-    stb_phys(address_space_memory, notify_offset, (uint8_t)status);
+-    stb_phys(address_space_memory, notify_offset - 1, 1);
++    ds_stb(notify_offset, (uint8_t)status);
++    ds_stb(notify_offset - 1, 1);
+ 
+     qatomic_or(&d->regs[NV_PAPU_ISTS],
+                NV_PAPU_ISTS_FEVINTSTS | NV_PAPU_ISTS_FENINTSTS);
+     d->set_irq = true;
+ }
+ 
++/* A voice handle, HRTF entry or size the title wrote -- in a register or in
++ * the voice structures it edits while the voice processor reads them --
++ * checked before it picks an entry of one of the emulator's own tables.
++ * Hardware has no such tables, so a stray value there plays a wrong sample
++ * for a moment; here, with the asserts compiled out of release builds, it
++ * wrote past the table (Turok Evolution's flying level). The access is
++ * dropped instead, and the first few are logged. */
++static bool out_of_range(const char *what, unsigned int value, unsigned int limit)
++{
++    static unsigned int reported;
++    if (value < limit) return false;
++    if (reported < 16) {
++        reported++;
++        fprintf(stderr, "[APU] %s %u is past the last (%u): ignored\n", what, value, limit - 1);
++    }
++    return true;
++}
++
+ /* ============================================================
+  * Filter helpers
+  * ============================================================ */
+ 
+ static void voice_reset_filters(MCPXAPUState *d, uint16_t v)
+ {
+-    assert(v < MCPX_HW_MAX_VOICES);
++    if (out_of_range("voice", v, MCPX_HW_MAX_VOICES)) return;
+     memset(&d->vp.filters[v].svf, 0, sizeof(d->vp.filters[v].svf));
+     hrtf_filter_clear_history(&d->vp.filters[v].hrtf);
+     if (d->vp.filters[v].resampler) {
+@@ -93,6 +111,20 @@ static float clampf(float v, float mn, float mx)
      return v;
  }
  
@@ -575,7 +815,44 @@ index 7c36737..eee88b8 100644
  static float attenuate(uint16_t vol)
  {
      vol &= 0xFFF;
-@@ -140,20 +154,22 @@ static void voice_off(MCPXAPUState *d, uint16_t v)
+@@ -107,7 +139,7 @@ static uint32_t voice_get_mask(MCPXAPUState *d, uint16_t voice_handle,
+                                hwaddr offset, uint32_t mask)
+ {
+     hwaddr voice = d->regs[NV_PAPU_VPVADDR] + voice_handle * NV_PAVS_SIZE;
+-    return (ldl_le_phys(address_space_memory, voice + offset) & mask) >>
++    return (ds_ldl(voice + offset) & mask) >>
+            ctz32(mask);
+ }
+ 
+@@ -115,9 +147,8 @@ static void voice_set_mask(MCPXAPUState *d, uint16_t voice_handle,
+                            hwaddr offset, uint32_t mask, uint32_t val)
+ {
+     hwaddr voice = d->regs[NV_PAPU_VPVADDR] + voice_handle * NV_PAVS_SIZE;
+-    uint32_t v = ldl_le_phys(address_space_memory, voice + offset) & ~mask;
+-    stl_le_phys(address_space_memory, voice + offset,
+-                v | ((val << ctz32(mask)) & mask));
++    uint32_t v = ds_ldl(voice + offset) & ~mask;
++    ds_stl(voice + offset, v | ((val << ctz32(mask)) & mask));
+ }
+ 
+ /* ============================================================
+@@ -126,6 +157,7 @@ static void voice_set_mask(MCPXAPUState *d, uint16_t voice_handle,
+ 
+ static void voice_off(MCPXAPUState *d, uint16_t v)
+ {
++    if (out_of_range("voice", v, MCPX_HW_MAX_VOICES)) return;
+     voice_set_mask(d, v, NV_PAVS_VOICE_PAR_STATE,
+                    NV_PAVS_VOICE_PAR_STATE_ACTIVE_VOICE, 0);
+ 
+@@ -133,32 +165,32 @@ static void voice_off(MCPXAPUState *d, uint16_t v)
+                                  NV_PAVS_VOICE_CFG_FMT_DATA_TYPE) != 0;
+     int notifier = MCPX_HW_NOTIFIER_SSLA_DONE;
+     if (stream) {
+-        assert(v < MCPX_HW_MAX_VOICES);
+-        assert(d->vp.ssl[v].ssl_index <= 1);
+-        notifier += d->vp.ssl[v].ssl_index;
++        notifier += d->vp.ssl[v].ssl_index & 1;
+     }
      set_notify_status(d, v, notifier, NV1BA0_NOTIFICATION_STATUS_DONE_SUCCESS);
  }
  
@@ -587,9 +864,10 @@ index 7c36737..eee88b8 100644
 + * frame time in its busier levels. */
  static void voice_lock(MCPXAPUState *d, uint16_t v, bool lock)
  {
-     assert(v < MCPX_HW_MAX_VOICES);
+-    assert(v < MCPX_HW_MAX_VOICES);
 -    qemu_mutex_lock(&d->lock);
 -
++    if (out_of_range("voice", v, MCPX_HW_MAX_VOICES)) return;
      uint64_t mask = 1ULL << (v % 64);
 +    volatile LONG64 *word = (volatile LONG64 *)&d->vp.voice_locked[v / 64];
      if (lock) {
@@ -605,7 +883,21 @@ index 7c36737..eee88b8 100644
  }
  
  static bool is_voice_locked(MCPXAPUState *d, uint16_t v)
-@@ -181,9 +197,25 @@ static void set_hrir_coeff_tar(MCPXAPUState *d, int channel, int coeff_idx,
+ {
+-    assert(v < MCPX_HW_MAX_VOICES);
++    if (out_of_range("voice", v, MCPX_HW_MAX_VOICES)) return false;
+     uint64_t mask = 1ULL << (v % 64);
+     return (qatomic_read(&d->vp.voice_locked[v / 64]) & mask) != 0;
+ }
+@@ -171,6 +203,7 @@ static void set_hrir_coeff_tar(MCPXAPUState *d, int channel, int coeff_idx,
+                                int8_t value)
+ {
+     int entry = d->vp.hrtf.current_entry;
++    if (out_of_range("HRTF entry", (unsigned int)entry, HRTF_ENTRY_COUNT)) return;
+     d->vp.hrtf.entries[entry].hrir[channel][coeff_idx] = int8_to_float(value);
+ }
+ 
+@@ -181,9 +214,25 @@ static void set_hrir_coeff_tar(MCPXAPUState *d, int channel, int coeff_idx,
  static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
  {
      unsigned int slot;
@@ -634,7 +926,34 @@ index 7c36737..eee88b8 100644
      unsigned int selected_handle, list;
  
      switch (method) {
-@@ -374,6 +406,26 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
+@@ -197,6 +246,7 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
+ 
+     case NV1BA0_PIO_VOICE_ON: {
+         selected_handle = argument & NV1BA0_PIO_VOICE_ON_HANDLE;
++        if (out_of_range("voice", selected_handle, MCPX_HW_MAX_VOICES)) break;
+ 
+         bool locked = is_voice_locked(d, (uint16_t)selected_handle);
+         if (!locked) voice_lock(d, (uint16_t)selected_handle, true);
+@@ -282,6 +332,7 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
+ 
+     case NV1BA0_PIO_VOICE_RELEASE: {
+         selected_handle = argument & NV1BA0_PIO_VOICE_ON_HANDLE;
++        if (out_of_range("voice", selected_handle, MCPX_HW_MAX_VOICES)) break;
+ 
+         bool locked = is_voice_locked(d, (uint16_t)selected_handle);
+         if (!locked) voice_lock(d, (uint16_t)selected_handle, true);
+@@ -362,8 +413,8 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
+                        NV_PAVS_VOICE_CFG_HRTF_TARGET,
+                        NV_PAVS_VOICE_CFG_HRTF_TARGET_HANDLE, handle);
+         if (current_voice < MCPX_HW_MAX_3D_VOICES &&
+-            handle != HRTF_NULL_HANDLE) {
+-            assert(handle < HRTF_ENTRY_COUNT);
++            handle != HRTF_NULL_HANDLE &&
++            !out_of_range("HRTF entry", (unsigned int)handle, HRTF_ENTRY_COUNT)) {
+             hrtf_filter_set_target_params(&d->vp.filters[current_voice].hrtf,
+                                           d->vp.hrtf.entries[handle].hrir,
+                                           d->vp.hrtf.entries[handle].itd);
+@@ -374,6 +425,26 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
      case NV1BA0_PIO_SET_VOICE_TAR_VOLA:
          voice_set_mask(d, (uint16_t)d->regs[NV_PAPU_FECV],
                         NV_PAVS_VOICE_TAR_VOLA, 0xFFFFFFFF, argument);
@@ -661,7 +980,111 @@ index 7c36737..eee88b8 100644
          break;
      case NV1BA0_PIO_SET_VOICE_TAR_VOLB:
          voice_set_mask(d, (uint16_t)d->regs[NV_PAPU_FECV],
-@@ -843,8 +895,7 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
+@@ -429,7 +500,7 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
+     case NV1BA0_PIO_SET_CURRENT_INBUF_SGE_OFFSET: {
+         hwaddr sge_address =
+             d->regs[NV_PAPU_VPSGEADDR] + d->vp.inbuf_sge_handle * 8;
+-        stl_le_phys(address_space_memory, sge_address,
++        ds_stl(sge_address,
+                     argument & NV1BA0_PIO_SET_CURRENT_INBUF_SGE_OFFSET_PARAMETER);
+         break;
+     }
+@@ -442,7 +513,7 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
+     case NV1BA0_PIO_SET_CURRENT_OUTBUF_SGE_OFFSET: {
+         hwaddr sge_address =
+             d->regs[NV_PAPU_VPSGEADDR] + d->vp.outbuf_sge_handle * 8;
+-        stl_le_phys(address_space_memory, sge_address,
++        ds_stl(sge_address,
+                     argument & NV1BA0_PIO_SET_CURRENT_OUTBUF_SGE_OFFSET_PARAMETER);
+         break;
+     }
+@@ -450,7 +521,7 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
+     case NV1BA0_PIO_SET_VOICE_SSL_A: {
+         int ssl = 0;
+         int current_voice = d->regs[NV_PAPU_FECV];
+-        assert(current_voice < MCPX_HW_MAX_VOICES);
++        if (out_of_range("voice", (unsigned int)current_voice, MCPX_HW_MAX_VOICES)) break;
+         d->vp.ssl[current_voice].base[ssl] =
+             GET_MASK(argument, NV1BA0_PIO_SET_VOICE_SSL_A_BASE);
+         d->vp.ssl[current_voice].count[ssl] =
+@@ -460,7 +531,7 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
+     case NV1BA0_PIO_SET_VOICE_SSL_B: {
+         int ssl = 1;
+         int current_voice = d->regs[NV_PAPU_FECV];
+-        assert(current_voice < MCPX_HW_MAX_VOICES);
++        if (out_of_range("voice", (unsigned int)current_voice, MCPX_HW_MAX_VOICES)) break;
+         d->vp.ssl[current_voice].base[ssl] =
+             GET_MASK(argument, NV1BA0_PIO_SET_VOICE_SSL_A_BASE);
+         d->vp.ssl[current_voice].count[ssl] =
+@@ -499,8 +570,7 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
+     default:
+         /* Handle range-based cases that can't use case ranges in MSVC */
+         if (method >= NV1BA0_PIO_SET_HRIR && method < NV1BA0_PIO_SET_HRIR_X) {
+-            assert(d->vp.hrtf.current_entry < HRTF_ENTRY_COUNT);
+-            slot = (method - NV1BA0_PIO_SET_HRIR) / 4;
++            slot = (method - NV1BA0_PIO_SET_HRIR) / 4;   /* set_hrir_coeff_tar checks the entry */
+             int8_t left0 = (int8_t)GET_MASK(argument, NV1BA0_PIO_SET_HRIR_LEFT0);
+             int8_t right0 = (int8_t)GET_MASK(argument, NV1BA0_PIO_SET_HRIR_RIGHT0);
+             int8_t left1 = (int8_t)GET_MASK(argument, NV1BA0_PIO_SET_HRIR_LEFT1);
+@@ -511,7 +581,7 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
+             set_hrir_coeff_tar(d, 0, coeff_idx + 1, left1);
+             set_hrir_coeff_tar(d, 1, coeff_idx + 1, right1);
+         } else if (method == NV1BA0_PIO_SET_HRIR_X) {
+-            assert(d->vp.hrtf.current_entry < HRTF_ENTRY_COUNT);
++            if (out_of_range("HRTF entry", d->vp.hrtf.current_entry, HRTF_ENTRY_COUNT)) break;
+             int8_t left30 = (int8_t)GET_MASK(argument, NV1BA0_PIO_SET_HRIR_X_LEFT30);
+             int8_t right30 = (int8_t)GET_MASK(argument, NV1BA0_PIO_SET_HRIR_X_RIGHT30);
+             int16_t itd = (int16_t)GET_MASK(argument, NV1BA0_PIO_SET_HRIR_X_ITD);
+@@ -524,7 +594,7 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
+             hwaddr addr = d->regs[NV_PAPU_VPSSLADDR]
+                           + (d->vp.ssl_base_page * 8)
+                           + (method - NV1BA0_PIO_SET_SSL_SEGMENT_OFFSET);
+-            stl_le_phys(address_space_memory, addr, argument);
++            ds_stl(addr, argument);
+         } else if (method >= NV1BA0_PIO_SET_SUBMIX_HEADROOM &&
+                    method <= NV1BA0_PIO_SET_SUBMIX_HEADROOM + 4 * (NUM_MIXBINS - 1)) {
+             assert((method & 3) == 0);
+@@ -580,7 +650,7 @@ static hwaddr get_data_ptr(hwaddr sge_base, unsigned int max_sge, uint32_t addr)
+     unsigned int entry = addr / TARGET_PAGE_SIZE;
+     assert(entry <= max_sge);
+     uint32_t prd_address =
+-        ldl_le_phys(address_space_memory, sge_base + entry * 4 * 2);
++        ds_ldl(sge_base + entry * 4 * 2);
+     return prd_address + addr % TARGET_PAGE_SIZE;
+ }
+ 
+@@ -730,7 +800,7 @@ static float voice_step_envelope(MCPXAPUState *d, uint16_t v, uint32_t reg_0,
+ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
+                        int num_samples_requested)
+ {
+-    assert(v < MCPX_HW_MAX_VOICES);
++    if (out_of_range("voice", v, MCPX_HW_MAX_VOICES)) return -1;
+     bool stereo = voice_get_mask(d, (uint16_t)v, NV_PAVS_VOICE_CFG_FMT,
+                                  NV_PAVS_VOICE_CFG_FMT_STEREO) != 0;
+     unsigned int channels = stereo ? 2 : 1;
+@@ -807,8 +877,8 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
+         }
+ 
+         hwaddr addr = d->regs[NV_PAPU_VPSSLADDR] + page * 8;
+-        segment_offset = ldl_le_phys(address_space_memory, addr);
+-        segment_length = ldl_le_phys(address_space_memory, addr + 4);
++        segment_offset = ds_ldl(addr);
++        segment_length = ds_ldl(addr + 4);
+         assert(segment_offset != 0);
+         assert(segment_length != 0);
+         seg_len = (segment_length >> 0) & 0xffff;
+@@ -831,6 +901,10 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
+     } else {
+         block_size = container_size;
+     }
++    /* An ADPCM block is 36 bytes a channel and samples_per_block is the
++     * channel count; adpcm_block holds two. A larger count (a voice read
++     * mid-update) copied up to 1152 bytes over this function's stack. */
++    if (adpcm && out_of_range("ADPCM channel count", samples_per_block, 3)) return -1;
+     block_size *= samples_per_block;
+ 
+     int sample_count = 0;
+@@ -843,8 +917,7 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
                  uint32_t linear_addr = block_index * (uint32_t)block_size;
                  if (stream) {
                      hwaddr addr = segment_offset + linear_addr;
@@ -671,7 +1094,24 @@ index 7c36737..eee88b8 100644
                  } else {
                      linear_addr += ba;
                      for (unsigned int word_index = 0;
-@@ -1022,7 +1073,7 @@ static void voice_process(MCPXAPUState *d,
+@@ -951,7 +1024,6 @@ static long voice_resample_callback(void *cb_data, float **data)
+ {
+     MCPXAPUVoiceFilter *filter = cb_data;
+     uint16_t v = filter->voice;
+-    assert(v < MCPX_HW_MAX_VOICES);
+     MCPXAPUState *d = container_of(filter, MCPXAPUState, vp.filters[v]);
+ 
+     int sample_count = 0;
+@@ -984,7 +1056,7 @@ static long voice_resample_callback(void *cb_data, float **data)
+ static int voice_resample(MCPXAPUState *d, uint16_t v, float samples[][2],
+                           int requested_num, float rate)
+ {
+-    assert(v < MCPX_HW_MAX_VOICES);
++    if (out_of_range("voice", v, MCPX_HW_MAX_VOICES)) return -1;
+     MCPXAPUVoiceFilter *filter = &d->vp.filters[v];
+ 
+     if (filter->resampler == NULL) {
+@@ -1022,7 +1094,7 @@ static void voice_process(MCPXAPUState *d,
                            float sample_buf[NUM_SAMPLES_PER_FRAME][2],
                            uint16_t v, int voice_list)
  {
@@ -680,7 +1120,7 @@ index 7c36737..eee88b8 100644
      bool stereo = voice_get_mask(d, v, NV_PAVS_VOICE_CFG_FMT,
                                   NV_PAVS_VOICE_CFG_FMT_STEREO) != 0;
      unsigned int channels = stereo ? 2 : 1;
-@@ -1172,7 +1223,7 @@ static void voice_process(MCPXAPUState *d,
+@@ -1172,7 +1244,7 @@ static void voice_process(MCPXAPUState *d,
      }
  
      /* HRTF processing for 3D voices */
@@ -689,7 +1129,7 @@ index 7c36737..eee88b8 100644
          uint16_t hrtf_handle =
              (uint16_t)voice_get_mask(d, v, NV_PAVS_VOICE_CFG_HRTF_TARGET,
                                       NV_PAVS_VOICE_CFG_HRTF_TARGET_HANDLE);
-@@ -1240,8 +1291,104 @@ void mcpx_apu_vp_frame(MCPXAPUState *d,
+@@ -1240,8 +1312,104 @@ void mcpx_apu_vp_frame(MCPXAPUState *d,
              }
  
              uint16_t v = (uint16_t)d->regs[current];
@@ -795,7 +1235,7 @@ index 7c36737..eee88b8 100644
              if (!voice_get_mask(d, v, NV_PAVS_VOICE_PAR_STATE,
                                  NV_PAVS_VOICE_PAR_STATE_ACTIVE_VOICE)) {
 diff --git a/src/apu/dsp/dsp_cpu.c b/src/apu/dsp/dsp_cpu.c
-index 6f16f8a..e30d4c7 100644
+index 6f16f8a..22bf9c8 100644
 --- a/src/apu/dsp/dsp_cpu.c
 +++ b/src/apu/dsp/dsp_cpu.c
 @@ -157,12 +157,12 @@ static const OpcodeEntry nonparallel_opcodes[] = {
@@ -947,9 +1387,18 @@ index 6f16f8a..e30d4c7 100644
      /* Disasm current instruction ? (trace mode only) */
      if (tracing) {
          disasm_return = disasm_instruction(dsp, DSP_TRACE_MODE);
-@@ -629,7 +663,11 @@ void dsp56k_execute_instruction(dsp_core_t* dsp)
+@@ -624,12 +658,18 @@ void dsp56k_execute_instruction(dsp_core_t* dsp)
+     }
+ 
+     if (dsp->cur_inst < 0x100000) {
+-        const OpcodeEntry *op = dsp->pram_opcache[dsp->pc];
++        /* The cache covers program memory; code run from past it (see
++         * dsp_out_of_range) is looked up each time. */
++        const OpcodeEntry *op = dsp->pc < DSP_PRAM_SIZE ? dsp->pram_opcache[dsp->pc] : NULL;
+         if (op == NULL) {
              op = lookup_opcode(dsp->cur_inst);
-             dsp->pram_opcache[dsp->pc] = op;
+-            dsp->pram_opcache[dsp->pc] = op;
++            if (dsp->pc < DSP_PRAM_SIZE) dsp->pram_opcache[dsp->pc] = op;
          }
 -        if (op->emu_func) {
 +        if (op == NULL) {
@@ -960,7 +1409,36 @@ index 6f16f8a..e30d4c7 100644
              op->emu_func(dsp);
          } else {
              DPRINTF("%x - %s\n", dsp->cur_inst, op->name);
-@@ -947,7 +985,10 @@ uint32_t dsp56k_read_memory(dsp_core_t* dsp, int space, uint32_t address)
+@@ -917,10 +957,26 @@ static void dsp_postexecute_interrupts(dsp_core_t* dsp)
+  *  Read/Write memory functions
+  **********************************/
+ 
++/* Out-of-range DSP addresses: garbage the title or a stray DMA node left as
++ * code or as a transfer's target (Turok Evolution's flying level ran the GP
++ * on such code). With the asserts compiled out, a write past an array landed
++ * in the rest of the DSP state; it is dropped, and a read past program
++ * memory sees 0, a NOP. The first few are logged. */
++static void dsp_out_of_range(const char *what, uint32_t address)
++{
++    static unsigned int reported;
++    if (reported < 16) {
++        reported++;
++        fprintf(stderr, "[APU-DSP] %s at %06X is past its memory: ignored\n", what, address);
++    }
++}
++
+ static uint32_t read_memory_p(dsp_core_t* dsp, uint32_t address)
+ {
+-    assert((address & 0xFF000000) == 0);
+-    assert(address < DSP_PRAM_SIZE);
++    if (address >= DSP_PRAM_SIZE) {
++        dsp_out_of_range("p read", address);
++        return 0;
++    }
+     uint32_t r = ldl_le_p(&dsp->pram[address]);
+     assert((r & 0xFF000000) == 0);
+     return r;
+@@ -947,7 +1003,10 @@ uint32_t dsp56k_read_memory(dsp_core_t* dsp, int space, uint32_t address)
              }
          }
      } else if (space == DSP_SPACE_Y) {
@@ -972,7 +1450,34 @@ index 6f16f8a..e30d4c7 100644
          return dsp->yram[address];
      } else if (space == DSP_SPACE_P) {
          return read_memory_p(dsp, address);
-@@ -1215,9 +1256,11 @@ static uint16_t dsp_asr56(uint32_t *dest, int n)
+@@ -980,14 +1039,23 @@ static void write_memory_raw(dsp_core_t* dsp, int space, uint32_t address, uint3
+         } else if (address >= 0xc00 && address < 0xc00+DSP_MIXBUFFER_SIZE) {
+             dsp->mixbuffer[address-0xc00] = value;
+         } else {
+-            assert(address < DSP_XRAM_SIZE);
++            if (address >= DSP_XRAM_SIZE) {
++                dsp_out_of_range("x write", address);
++                return;
++            }
+             dsp->xram[address] = value;
+         }
+     } else if (space == DSP_SPACE_Y) {
+-        assert(address < DSP_YRAM_SIZE);
++        if (address >= DSP_YRAM_SIZE) {
++            dsp_out_of_range("y write", address);
++            return;
++        }
+         dsp->yram[address] = value;
+     } else if (space == DSP_SPACE_P) {
+-        assert(address < DSP_PRAM_SIZE);
++        if (address >= DSP_PRAM_SIZE) {
++            dsp_out_of_range("p write", address);
++            return;
++        }
+         stl_le_p(&dsp->pram[address], value);
+         dsp->pram_opcache[address] = NULL;
+     } else {
+@@ -1215,9 +1283,11 @@ static uint16_t dsp_asr56(uint32_t *dest, int n)
  {
      /* Shift right dest n bits: D>>=n */
  
@@ -987,10 +1492,28 @@ index 6f16f8a..e30d4c7 100644
      dest_v >>= n;
      dest[2] = dest_v & BITMASK(24);
 diff --git a/src/apu/dsp/dsp_dma.c b/src/apu/dsp/dsp_dma.c
-index f415bf3..a0f8010 100644
+index f415bf3..b34937d 100644
 --- a/src/apu/dsp/dsp_dma.c
 +++ b/src/apu/dsp/dsp_dma.c
-@@ -201,6 +201,19 @@ static void dsp_dma_run(DSPDMAState *s)
+@@ -105,7 +105,17 @@ static void dsp_dma_run(DSPDMAState *s)
+         return;
+     }
+ 
++    /* A node list the title is still writing can lead back on itself; the
++     * walk would never end, and it runs on the audio thread holding the APU
++     * lock. A frame's list is a handful of nodes. */
++    unsigned int nodes = 0;
+     while (!(s->next_block & NODE_POINTER_EOL)) {
++        if (++nodes > 4096) {
++            static unsigned int reported;
++            if (reported++ < 16)
++                fprintf(stderr, "[APU-DSP] DMA node list runs past 4096 nodes: stopped\n");
++            break;
++        }
+         uint32_t addr = s->next_block & NODE_POINTER_VAL;
+         uint32_t block_addr = 0;
+         int block_space = DSP_SPACE_X;
+@@ -201,6 +211,19 @@ static void dsp_dma_run(DSPDMAState *s)
  
          size_t transfer_size = count * item_size;
  
