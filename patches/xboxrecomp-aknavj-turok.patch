@@ -4722,7 +4722,7 @@ index f031faf..d151cf6 100644
          std::fprintf(stderr, "[GPU-D3D11] constant buffer offsetting: %s\n",
                       context1 ? "supported" : "unavailable, using per-draw Map");
 diff --git a/src/kernel/nv2a_gpu_shader.h b/src/kernel/nv2a_gpu_shader.h
-index e27083f..ae32fae 100644
+index e27083f..9d7e4eb 100644
 --- a/src/kernel/nv2a_gpu_shader.h
 +++ b/src/kernel/nv2a_gpu_shader.h
 @@ -93,6 +93,13 @@ float4 guest_multiply(float4 left,float4 right) {
@@ -4758,7 +4758,32 @@ index e27083f..ae32fae 100644
    result.depthSlope=slope;
    if(misc.w!=0) {result.diffuse=vertices[2].diffuse;result.specular=vertices[2].specular;}
    stream.Append(result);
-@@ -471,8 +488,36 @@ PixelOutput ps_main(Pixel input,bool frontFacing:SV_IsFrontFace) {
+@@ -343,7 +360,11 @@ PixelOutput finish_pixel(float4 color,Pixel input,bool frontFacing) {
+  output.color=color;
+  float depth=NV_W_DEPTH?input.depthW:input.depthZ;
+  if(NV_W_DEPTH && (!(depth>0) || !isfinite(depth)))depth=3.402823466e38;
+- else if((frontFacing?depthOffset.z:depthOffset.w)!=0) {
++ /* The depth range clips the primitive as it is; polygon offset comes
++    after and is only clamped. Clipping the offset depth threw away decals
++    seen at a grazing angle -- their slope term is large -- whole. */
++ float clipDepth=depth;
++ if(!(NV_W_DEPTH && depth==3.402823466e38) && (frontFacing?depthOffset.z:depthOffset.w)!=0) {
+   float slopeOffset=0;
+   if(depthOffset.x!=0) {
+    slopeOffset=depthOffset.x*input.depthSlope;
+@@ -353,9 +374,8 @@ PixelOutput finish_pixel(float4 color,Pixel input,bool frontFacing) {
+   depth+=slopeOffset;
+   if(NV_W_DEPTH && isnan(depth))depth=3.402823466e38;
+  }
+- if(depthRange.z==0) {
+-  if(depth<depthRange.x || depth>depthRange.y)discard;
+- } else depth=clamp(depth,depthRange.x,depthRange.y);
++ if(depthRange.z==0 && (clipDepth<depthRange.x || clipDepth>depthRange.y))discard;
++ depth=clamp(depth,depthRange.x,depthRange.y);
+ #if defined(NV_DEPTH_ENABLED) && !NV_DEPTH_ENABLED
+  output.depth=0;
+ #else
+@@ -471,8 +491,36 @@ PixelOutput ps_main(Pixel input,bool frontFacing:SV_IsFrontFace) {
    default:value=cube3.Sample(sampler3,direction);break;
     }
    }
@@ -4798,7 +4823,7 @@ index e27083f..ae32fae 100644
     if(textureFlags&4)uvw.x=saturate(uvw.x);
     if(textureFlags&8)uvw.y=saturate(uvw.y);
 diff --git a/src/kernel/nv2a_pb_exec.c b/src/kernel/nv2a_pb_exec.c
-index d7c0f20..2cd07fe 100644
+index d7c0f20..81a2b1b 100644
 --- a/src/kernel/nv2a_pb_exec.c
 +++ b/src/kernel/nv2a_pb_exec.c
 @@ -31,6 +31,7 @@
@@ -4853,7 +4878,31 @@ index d7c0f20..2cd07fe 100644
  extern uint32_t g_xbox_image_lo, g_xbox_image_hi;
  
  /* Would writing this surface land on the title's own image?
-@@ -437,6 +475,13 @@ static struct {
+@@ -382,7 +420,13 @@ typedef struct {
+ 
+ #define NV_VERTEX_ATTRS 16
+ #define NV_VERTEX_CACHE_SIZE 4096
+-#define NV_MAX_INLINE   4096            /* dwords of INLINE_ARRAY per batch */
++/* Dwords of INLINE_ARRAY per batch. The NV2A has no such limit: at 4096 a
++ * batch of particle quads stopped at 682 vertices and the rest were dropped
++ * unseen -- Turok's blood splats, which Keep decals lets pile up, vanished
++ * by where the camera looked. 1 MB holds 43690 such vertices, within the
++ * backend's NV2A_GPU_MAX_VERTICES. */
++#define NV_MAX_INLINE   (1u << 18)
++#define NV_MAX_IMMEDIATE 4096          /* dwords of immediate-mode vertices per batch */
+ 
+ /* Texture stage 0, decoded from what the title programmed.
+  *
+@@ -425,7 +469,7 @@ static struct {
+     uint32_t   imm_diffuse;
+     float      imm_tex[2];
+     uint32_t   imm_count;
+-    float      imm_attributes[NV_MAX_INLINE / IMM_VERTEX_DWORDS][NV_VERTEX_ATTRS][4];
++    float      imm_attributes[NV_MAX_IMMEDIATE / IMM_VERTEX_DWORDS][NV_VERTEX_ATTRS][4];
+     int        immediate_active;
+     int        inline_active;
+     uint32_t   draws, verts, nonzero_draws;
+@@ -437,6 +481,13 @@ static struct {
       * that has not been drawn yet -- which is how a correctly rendered
       * sequence came out as 12 black BMPs. */
      uint32_t drawn_offset;
@@ -4867,7 +4916,7 @@ index d7c0f20..2cd07fe 100644
      uint64_t pixels;
      uint32_t pixel_max;   /* brightest value any pixel write carried */
      uint32_t clip_x, clip_w, clip_y, clip_h;
-@@ -480,6 +525,7 @@ static struct {
+@@ -480,6 +531,7 @@ static struct {
      uint32_t vp_load, vp_start, constant_load, vp_words, constant_words;
      Nv2aCpuCombiners combiners;
      uint32_t shade_mode, alpha_enable, alpha_func, alpha_ref;
@@ -4875,7 +4924,7 @@ index d7c0f20..2cd07fe 100644
      uint32_t depth_offset, depth_pitch, depth_clear, depth_enable, depth_func, depth_mask, control0;
      uint32_t zmin_max_control, depth_range_valid;
      float depth_clip_min, depth_clip_max;
-@@ -1046,8 +1092,7 @@ static int benign_state_method(uint32_t method)
+@@ -1046,8 +1098,7 @@ static int benign_state_method(uint32_t method)
      case 0x17C4:  /* SET_LIGHT_MODEL_TWO_SIDE_ENABLE  */
      case 0x1D80:  /* UNK1D80                          */
      case 0x1E68:  /* SET_SHADOW_ZSLOPE_THRESHOLD      */
@@ -4885,7 +4934,7 @@ index d7c0f20..2cd07fe 100644
      default:
          return 0;
      }
-@@ -1252,6 +1297,170 @@ static void raster_triangle(const float a[2], const float b[2],
+@@ -1252,6 +1303,170 @@ static void raster_triangle(const float a[2], const float b[2],
                              const float uv[3][2], const Nv2aCpuVertex varying[3]);
  
  #ifdef _WIN32
@@ -5056,7 +5105,7 @@ index d7c0f20..2cd07fe 100644
  static int gpu_clear_surface(uint32_t param)
  {
      static int enabled = -1;
-@@ -1264,13 +1473,36 @@ static int gpu_clear_surface(uint32_t param)
+@@ -1264,13 +1479,36 @@ static int gpu_clear_surface(uint32_t param)
      }
      if (!enabled || s_gpu.clip_x || s_gpu.clip_y || !s_gpu.clip_w || !s_gpu.clip_h)
          return 0;
@@ -5095,7 +5144,7 @@ index d7c0f20..2cd07fe 100644
      if (param & NV097_CLEAR_COLOR_MASK) {
          uint32_t base = dma_resolve(s_gpu.color_offset);
          if (!s_gpu.color_offset || !state.pitch || !state.bytes_per_pixel ||
-@@ -1307,7 +1539,12 @@ static void clear_surface(uint32_t param)
+@@ -1307,7 +1545,12 @@ static void clear_surface(uint32_t param)
  #ifdef _WIN32
      native_clear = gpu_clear_surface(param);
  #endif
@@ -5109,7 +5158,7 @@ index d7c0f20..2cd07fe 100644
  
      if (!native_clear && (param & 3u) && s_gpu.depth_offset && s_gpu.depth_pitch) {
          uint32_t format = (s_gpu.format >> 4) & 15u;
-@@ -1320,7 +1557,7 @@ static void clear_surface(uint32_t param)
+@@ -1320,7 +1563,7 @@ static void clear_surface(uint32_t param)
                  uint8_t *row = mem + base + (size_t)y * s_gpu.depth_pitch;
                  for (x = s_gpu.clip_x; x < s_gpu.clip_x + s_gpu.clip_w; x++) {
                      if (depth_bpp == 2) {
@@ -5118,7 +5167,7 @@ index d7c0f20..2cd07fe 100644
                      } else {
                          uint32_t previous = ((uint32_t *)row)[x];
                          uint32_t mask = ((param & 1u) ? 0xFFFFFF00u : 0u) | ((param & 2u) ? 255u : 0u);
-@@ -1867,6 +2104,18 @@ static void put_pixel(uint8_t *mem, uint32_t bpp, int x, int y, uint32_t argb)
+@@ -1867,6 +2110,18 @@ static void put_pixel(uint8_t *mem, uint32_t bpp, int x, int y, uint32_t argb)
      }
  }
  
@@ -5137,7 +5186,7 @@ index d7c0f20..2cd07fe 100644
  static void present_pvideo_overlay(uint32_t destination)
  {
      const uint8_t *mem = (const uint8_t *)xbox_GetMemoryOffset();
-@@ -2211,7 +2460,7 @@ static void raster_triangle(const float a[2], const float b[2],
+@@ -2211,7 +2466,7 @@ static void raster_triangle(const float a[2], const float b[2],
          }
      }
      s_gpu.tris_drawn++;
@@ -5146,7 +5195,7 @@ index d7c0f20..2cd07fe 100644
  }
  
  /* Attribute 3 is diffuse colour in every NV2A layout that sets one. Absent it,
-@@ -2598,24 +2847,144 @@ static int gpu_decode_volume_texture(void *context, uint32_t level, uint32_t hor
+@@ -2598,24 +2853,144 @@ static int gpu_decode_volume_texture(void *context, uint32_t level, uint32_t hor
      return sample_texture_bound(&texture, horizontal, vertical, color);
  }
  
@@ -5293,7 +5342,7 @@ index d7c0f20..2cd07fe 100644
      if ((!frequency.QuadPart && (!QueryPerformanceFrequency(&frequency) || frequency.QuadPart <= 0)) ||
          !QueryPerformanceCounter(&counter)) {
          fprintf(stderr, "[GPU-D3D11] native performance clock failed (win32 %lu)\n", GetLastError());
-@@ -2645,16 +3014,39 @@ static int gpu_append_primitive(Nv2aGpuDraw *state, uint32_t *count, const uint3
+@@ -2645,16 +3020,39 @@ static int gpu_append_primitive(Nv2aGpuDraw *state, uint32_t *count, const uint3
          const VertexAttr *tattr0 = texcoord_attr();
          uint32_t fetch_mask = program ? (gpu_attribute_mask & 0xFFFFu) : 0u;
  
@@ -5338,7 +5387,7 @@ index d7c0f20..2cd07fe 100644
              gpu_indices[gpu_index_count++] = *count;
              destination = &gpu_vertices[(*count)++];
              s_gpu.gpu_unique_vertices++;
-@@ -2663,16 +3055,20 @@ static int gpu_append_primitive(Nv2aGpuDraw *state, uint32_t *count, const uint3
+@@ -2663,16 +3061,20 @@ static int gpu_append_primitive(Nv2aGpuDraw *state, uint32_t *count, const uint3
                   * it does are overwritten by the fetch below. The named fields
                   * (diffuse/specular/texture/...) are unused on this path, so a
                   * whole-struct memset is pure waste. */
@@ -5368,7 +5417,7 @@ index d7c0f20..2cd07fe 100644
                  memcpy(destination->position, destination->attributes[0], sizeof destination->position);
              } else {
                  memset(destination, 0, offsetof(Nv2aGpuVertex, attributes));
-@@ -2745,6 +3141,31 @@ static int gpu_batch_rejected(const char *reason)
+@@ -2745,6 +3147,31 @@ static int gpu_batch_rejected(const char *reason)
      return 0;
  }
  
@@ -5400,7 +5449,7 @@ index d7c0f20..2cd07fe 100644
  static int gpu_raster_batch(void)
  {
      uint8_t *memory = (uint8_t *)xbox_GetMemoryOffset();
-@@ -2769,16 +3190,30 @@ static int gpu_raster_batch(void)
+@@ -2769,16 +3196,30 @@ static int gpu_raster_batch(void)
          gpu_indices = grown; gpu_index_capacity = index_capacity;
      }
      gpu_begin_chunk();
@@ -5438,7 +5487,7 @@ index d7c0f20..2cd07fe 100644
      state.stage_program = s_gpu.shader_stage_program; state.combiners = s_gpu.combiners;
      state.shader_clip_mode = s_gpu.shader_clip_mode;
      state.shader_other_stage_input = s_gpu.shader_other_stage_input;
-@@ -2793,9 +3228,21 @@ static int gpu_raster_batch(void)
+@@ -2793,9 +3234,21 @@ static int gpu_raster_batch(void)
              const char *value = getenv("RECOMP_NV2A_VERTEX_FETCH_ALL");
              fetch_all = value && *value && strcmp(value, "0") != 0;
          }
@@ -5463,7 +5512,7 @@ index d7c0f20..2cd07fe 100644
      } else if ((s_gpu.transform_execution_mode & 3u) == 0u && s_gpu.composite_valid == 0xFFFFu) {
          state.fixed_transform = 1; state.vertex_constants = s_gpu.vp_constants;
          state.lighting_enable = s_gpu.lighting_enable; state.specular_enable = s_gpu.specular_enable;
-@@ -2869,6 +3316,45 @@ static int gpu_raster_batch(void)
+@@ -2869,6 +3322,45 @@ static int gpu_raster_batch(void)
          if (!texture->valid) return gpu_batch_rejected("invalid texture binding");
          if (((texture->raw_format >> 4) & 15u) == 3u)
              binding->depth = 1u << (texture->raw_format >> 28);
@@ -5509,7 +5558,7 @@ index d7c0f20..2cd07fe 100644
          if ((mode == 2) != (binding->depth != 0) || (binding->depth && (texture->raw_format & 4u)))
              return gpu_batch_rejected("projective volume texture dimensionality");
          binding->source = memory + texture->offset; binding->width = texture->width; binding->height = texture->height;
-@@ -3008,12 +3494,16 @@ static int gpu_submit_chunk(Nv2aGpuDraw *state, uint32_t *count)
+@@ -3008,12 +3500,16 @@ static int gpu_submit_chunk(Nv2aGpuDraw *state, uint32_t *count)
      }
      s_gpu.gpu_batches++;
      if (state->topology == NV2A_GPU_TOPOLOGY_TRIANGLES) s_gpu.tris_drawn += gpu_index_count / 3;
@@ -5527,7 +5576,7 @@ index d7c0f20..2cd07fe 100644
  static void raster_batch(void)
  {
  #ifndef _WIN32
-@@ -3049,6 +3539,153 @@ static void raster_batch(void)
+@@ -3049,6 +3545,153 @@ static void raster_batch(void)
      }
  
  #ifdef _WIN32
@@ -5681,7 +5730,16 @@ index d7c0f20..2cd07fe 100644
      double started = gpu_clock_seconds();
      double prior_submit = s_gpu.gpu_submit_seconds;
      int rendered = gpu_raster_batch();
-@@ -3556,6 +4193,83 @@ void nv2a_pb_exec_indices(uint32_t method, const uint32_t *parameters, uint32_t
+@@ -3365,7 +4008,7 @@ static void imm_emit_vertex(void)
+ {
+     uint32_t at = s_gpu.imm_count * IMM_VERTEX_DWORDS;
+ 
+-    if (!s_gpu.prim || at + IMM_VERTEX_DWORDS > NV_MAX_INLINE)
++    if (!s_gpu.prim || at + IMM_VERTEX_DWORDS > NV_MAX_IMMEDIATE)
+         return;
+     for (uint32_t attribute = 0; attribute < NV_VERTEX_ATTRS; attribute++) {
+         float *value = s_gpu.imm_attributes[s_gpu.imm_count][attribute];
+@@ -3556,6 +4199,83 @@ void nv2a_pb_exec_indices(uint32_t method, const uint32_t *parameters, uint32_t
      }
  }
  
@@ -5765,7 +5823,7 @@ index d7c0f20..2cd07fe 100644
  void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
  {
      static int inited;
-@@ -3615,6 +4329,44 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -3615,6 +4335,44 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
                      subch, method, param);
      }
  
@@ -5810,7 +5868,7 @@ index d7c0f20..2cd07fe 100644
      if (xbox_Nv2aNativeFencesEnabled() && subch < 8) {
          if (method == 0) {
              uint32_t instance;
-@@ -3702,8 +4454,34 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -3702,8 +4460,34 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
          extern void xbox_Nv2aAcknowledgeHandshakes(void);
          if (!param)
              return;
@@ -5845,7 +5903,7 @@ index d7c0f20..2cd07fe 100644
              /* Deferred: the routine can wait on the GPU (this thread), so the
               * synchronous form deadlocks -- see kernel_bridge. Never dropping it
               * (re-issue until queued, stall on the 0xC-0xE pushbuffer fixups) is
-@@ -3820,6 +4598,7 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -3820,6 +4604,7 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
      if (method == 0x037C) { s_gpu.shade_mode = param; return; }
      if (method == 0x0300) { s_gpu.alpha_enable = param; return; }
      if (method == 0x033C) { s_gpu.alpha_func = param; return; }
@@ -5853,7 +5911,7 @@ index d7c0f20..2cd07fe 100644
      if (method == 0x0340) { s_gpu.alpha_ref = param & 255u; return; }
      if (method == 0x034C) { s_gpu.blend_constant = param; return; }
      if (method == 0x0350) { s_gpu.blend_equation = param; return; }
-@@ -4018,26 +4797,8 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -4018,26 +4803,8 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
      #endif
          return;
      }
@@ -5882,7 +5940,7 @@ index d7c0f20..2cd07fe 100644
          return;
      }
      if (method >= 0x0A20 && method < 0x0A30) {
-@@ -4253,6 +5014,7 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -4253,6 +5020,7 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
          return;
  
      case NV097_FLIP_STALL:
@@ -5890,7 +5948,7 @@ index d7c0f20..2cd07fe 100644
          s_gpu.flush_flip++;
          cloak_marker_idle();
          /* The stall ends when the buffer being read is the one just finished.
-@@ -4276,25 +5038,88 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -4276,25 +5044,88 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
           * per-frame re-decode of render-to-texture surfaces. */
          if (s_gpu.pitch) {
              extern void xbox_FramebufferWindowPresent(uint32_t, uint32_t);

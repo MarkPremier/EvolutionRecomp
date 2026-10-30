@@ -340,11 +340,59 @@ extern void sub_000F21B0_gen(void);
  * once they are more than RECOMP_SHADOW_BIRD_HEIGHT units (default 10) above
  * the shadowed area's centre (the manager's target, +0x210, at the player's
  * height): circling high over the levels as set dressing, their shadows
- * landed far below them as stray blobs. Birds flushed from the brush near
- * the player keep theirs until they have climbed away. Flying enemies
- * (FlyingEnemyAI) always cast. RECOMP_SHADOW_BIRDS=1: every bird does. */
+ * landed far below them as stray blobs. Birds flushed from the brush (the
+ * birds that burst up at the start of the first level) always cast theirs,
+ * however high they climb. Flying enemies (FlyingEnemyAI) always cast.
+ * RECOMP_SHADOW_BIRDS=1: every bird does. */
 extern __declspec(thread) uint32_t g_esi;
 #define FLYING_INDIGENOUS_AI_VTABLE 0x0021A240u
+
+/* A bird sitting in the brush is a "Ground" type (BirdForm +0x7F0 0, its
+ * flying type in AlternateType +0x7EC). Flushed, it is replaced
+ * (sub_0012C9D0) by a new actor of the flying type, made by sub_0003DC30 --
+ * the same type as the set-dressing birds overhead. The actors made there
+ * are remembered as flushed for the rest of the level. */
+extern void sub_0012C9D0_gen(void);
+extern void sub_0003DC30_gen(void);
+#define FLUSHED_BIRDS 64
+static uint32_t s_flushed[FLUSHED_BIRDS];
+static unsigned s_flushed_next;
+static int s_flushing;
+
+void flushed_birds_reset(void)
+{
+    memset(s_flushed, 0, sizeof s_flushed);
+    s_flushed_next = 0;
+}
+
+static int bird_was_flushed(uint32_t actor)
+{
+    unsigned i;
+    for (i = 0; i < FLUSHED_BIRDS; i++)
+        if (s_flushed[i] == actor) return 1;
+    return 0;
+}
+
+void sub_0012C9D0(void)
+{
+    s_flushing++;
+    sub_0012C9D0_gen();
+    s_flushing--;
+}
+
+void sub_0003DC30(void)
+{
+    sub_0003DC30_gen();
+    if (s_flushing && g_eax) {
+        static unsigned reported;
+        if (reported < 16) {
+            reported++;
+            fprintf(stderr, "[BIRD] flushed from the brush: %08X keeps its shadow\n", g_eax);
+        }
+        s_flushed[s_flushed_next] = g_eax;
+        s_flushed_next = (s_flushed_next + 1) % FLUSHED_BIRDS;
+    }
+}
 
 void sub_000F21B0(void)
 {
@@ -360,7 +408,8 @@ void sub_000F21B0(void)
     sub_000F21B0_gen();
     if (offscreen) g_eax = 1;
     if (!birds && actor && TUROK_MEM32(actor) == FLYING_INDIGENOUS_AI_VTABLE &&
-            guest_float(actor + 0x3Cu) - guest_float(manager + 0x214u) > bird_height)
+            guest_float(actor + 0x3Cu) - guest_float(manager + 0x214u) > bird_height &&
+            !bird_was_flushed(actor))
         g_eax = 0;
 }
 
@@ -780,6 +829,80 @@ void sub_00020EE0(void)
     s_cull_widen--;
 }
 
+/* Particles -- blood, bullet holes, scorches, sparks -- are culled by the
+ * particle manager against planes of its own (sub_000BA820: the near plane,
+ * then the sides and the top and bottom; sub_0008A0E0 tests each particle as
+ * a sphere). The side planes (sub_000BA200) take the camera's horizontal
+ * field of view from sub_0001FE00, 4:3's, so a splat whose centre passed the
+ * 4:3 edge vanished while on screen: at 21:9 only the middle 56% of the
+ * width kept them. While they are built the angle is the widened view's,
+ * 2 atan(wide tan(fov / 2)). Its other callers -- the scene walk's and the
+ * meshes' level of detail -- keep 4:3's, as Hor+ leaves sizes on screen as
+ * they were.
+ *
+ * The sphere a particle is tested as is far smaller than a blood pool or a
+ * splat lying on the ground, so one went as soon as its centre passed an
+ * edge, half of it still on screen (look up from a pool and it vanishes; the
+ * original does it too). The side planes (sub_000BA200) and the top and
+ * bottom ones (sub_000BA3B0) take an angle added to the field of view as
+ * their first argument; each gets RECOMP_PARTICLE_MARGIN degrees more
+ * (default 40), so a particle is dropped only well off the screen. The
+ * widened horizontal angle and its margin stay under 170 degrees. */
+extern void sub_0001FE00_gen(void);
+extern void sub_000BA200_gen(void);
+extern void sub_000BA3B0_gen(void);
+static int s_fov_widen;
+static float s_fov_margin;   /* the angle sub_000BA200 adds to the field of view */
+
+static float particle_margin(void)
+{
+    static float margin = -1.0f;
+    if (margin < 0.0f) {
+        const char *value = getenv("RECOMP_PARTICLE_MARGIN");
+        margin = (value && *value ? (float)atof(value) : 40.0f) * 3.14159265f / 180.0f;
+        if (!(margin >= 0.0f) || margin > 1.4f) margin = 0.0f;
+    }
+    return margin;
+}
+
+static void add_to_float_arg(uint32_t address, float amount)
+{
+    float value = guest_float(address) + amount;
+    uint32_t bits;
+    memcpy(&bits, &value, 4);
+    TUROK_MEM32(address) = bits;
+}
+
+void sub_0001FE00(void)
+{
+    uint32_t out = TUROK_MEM32(g_esp + 4);
+    float wide = video_settings_wide_factor();
+    sub_0001FE00_gen();
+    if (s_fov_widen && out) {
+        float fov = guest_float(out), limit = 2.967f - s_fov_margin;   /* 170 degrees */
+        uint32_t bits;
+        if (wide > 1.001f) fov = 2.0f * atanf(wide * tanf(fov * 0.5f));
+        if (fov > limit) fov = limit;
+        memcpy(&bits, &fov, 4);
+        TUROK_MEM32(out) = bits;
+    }
+}
+
+void sub_000BA200(void)
+{
+    add_to_float_arg(g_esp + 4, particle_margin());
+    s_fov_margin = guest_float(g_esp + 4);
+    s_fov_widen++;
+    sub_000BA200_gen();
+    s_fov_widen--;
+}
+
+void sub_000BA3B0(void)
+{
+    add_to_float_arg(g_esp + 4, particle_margin());
+    sub_000BA3B0_gen();
+}
+
 /* The camera's other view tests take the cotangent from sub_00020030 too:
  * a point (sub_00021740) and a sphere's two tests
  * (sub_00021860, sub_00022590: the models' bounding spheres, sub_00180720). */
@@ -977,6 +1100,7 @@ void sub_00054A60(void)
         if (!strstr(text, "creens\\")) {   /* a level: the actors watched before are gone */
             extern void corpse_watch_reset(void);
             corpse_watch_reset();
+            flushed_birds_reset();
         }
     }
     sub_00054A60_gen();
