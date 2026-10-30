@@ -289,8 +289,7 @@ effect at once and are kept in `turok_settings.ini` beside the exe:
 | Mouse look | raw, stick (raw falls back to stick while the on-foot turning is not running: flying, vehicles, turrets) | |
 | Mouse speed | 1 to 10 (5 by default; each step 1.4x) | |
 | Draw distance | normal, 2x, 4x, 8x (2x by default) | |
-| Keep bodies | off, on (off by default) | |
-| Keep decals | off, on (off by default) | |
+| Keep bodies | off, on (off by default; also keeps decals) | |
 
 An environment variable set by hand still wins at start-up.
 
@@ -342,7 +341,7 @@ An environment variable set by hand still wins at start-up.
   setting on that clock is held at 2 s, except for actors that respawn
   (+0x5AA). `RECOMP_CORPSE_TRACE=1` logs deaths, fades and actor changes;
   `RECOMP_DEBUG_KILL=<s>` zeroes the dinosaurs' health that long into a level.
-- **Keep decals**: blood splats, bullet holes, scorch marks and gibs last ten
+- The same setting keeps decals: blood splats, bullet holes, scorch marks and gibs last ten
   minutes instead of 3 to 20 seconds. They are particles, each kind a PARTDEF
   text the particle system parses as a level loads (`sub_000B0110`); its eighth
   value, the life in seconds, is stored by `sub_000AF2A0`. Definitions whose
