@@ -551,7 +551,7 @@ index 1d1cbf9..6835ef9 100644
  /* Little-endian physical memory reads */
  static inline uint32_t ldl_le_phys(void *as, hwaddr addr) {
 diff --git a/src/apu/apu_vp.c b/src/apu/apu_vp.c
-index 7c36737..e0292fe 100644
+index 7c36737..eee88b8 100644
 --- a/src/apu/apu_vp.c
 +++ b/src/apu/apu_vp.c
 @@ -93,6 +93,20 @@ static float clampf(float v, float mn, float mx)
@@ -671,6 +671,15 @@ index 7c36737..e0292fe 100644
                  } else {
                      linear_addr += ba;
                      for (unsigned int word_index = 0;
+@@ -1022,7 +1073,7 @@ static void voice_process(MCPXAPUState *d,
+                           float sample_buf[NUM_SAMPLES_PER_FRAME][2],
+                           uint16_t v, int voice_list)
+ {
+-    assert(v < MCPX_HW_MAX_VOICES);
++    if (v >= MCPX_HW_MAX_VOICES) return;
+     bool stereo = voice_get_mask(d, v, NV_PAVS_VOICE_CFG_FMT,
+                                  NV_PAVS_VOICE_CFG_FMT_STEREO) != 0;
+     unsigned int channels = stereo ? 2 : 1;
 @@ -1172,7 +1223,7 @@ static void voice_process(MCPXAPUState *d,
      }
  
@@ -680,8 +689,24 @@ index 7c36737..e0292fe 100644
          uint16_t hrtf_handle =
              (uint16_t)voice_get_mask(d, v, NV_PAVS_VOICE_CFG_HRTF_TARGET,
                                       NV_PAVS_VOICE_CFG_HRTF_TARGET_HANDLE);
-@@ -1242,6 +1293,88 @@ void mcpx_apu_vp_frame(MCPXAPUState *d,
+@@ -1240,8 +1291,104 @@ void mcpx_apu_vp_frame(MCPXAPUState *d,
+             }
+ 
              uint16_t v = (uint16_t)d->regs[current];
++            /* DirectSound relinks its lists while this walk runs (it does not
++             * take d->lock), so a link read mid-update can name a voice that
++             * does not exist. Following it indexed the per-voice tables out of
++             * bounds -- a crash in Turok Evolution's flying level. End the list
++             * for this frame instead; the next frame walks it whole again. */
++            if (v >= MCPX_HW_MAX_VOICES) {
++                static unsigned reported;
++                if (reported < 16) {
++                    reported++;
++                    fprintf(stderr, "[APU] voice list %d links to voice %u: list ends here this frame\n",
++                            list, v);
++                }
++                break;
++            }
              d->regs[next] = voice_get_mask(d, v, NV_PAVS_VOICE_TAR_PITCH_LINK,
                                 NV_PAVS_VOICE_TAR_PITCH_LINK_NEXT_VOICE_HANDLE);
 +            /* RECOMP_APU_VOICE_TRACE: each list's voices once a second --
