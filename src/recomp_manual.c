@@ -465,7 +465,11 @@ static int s_keep_applied = -1;  /* the setting the remembered lives reflect */
 
 static int partdef_is_keepsake(uint32_t text, uint32_t size)
 {
-    static const char *const kinds[] = {"splat", "_bh_", "scortch", "fireb3", "biggib\\", "bird_pieces\\",
+    /* Not explosions\1txt_fireb3_.tga: those are explosion fireballs, which
+     * play their texture over their life -- ten minutes of it left the
+     * explosions barely there, and their lingering took the room of new
+     * effects such as the rockets' smoke trails. */
+    static const char *const kinds[] = {"splat", "_bh_", "scortch", "biggib\\", "bird_pieces\\",
                                         "brain_chunks\\"};
     const char *body = (const char *)((uintptr_t)text + g_xbox_mem_offset);
     char name[128];
@@ -1100,6 +1104,7 @@ void sub_00054A60(void)
         if (!strstr(text, "creens\\")) {   /* a level: 4:3 and held until sub_000FFF20 */
             s_level_loading = 1;
             video_settings_loading(1);
+            video_settings_level(text);
         }
         video_settings_screen(kind == 1, kind == 2);
         video_settings_menu_screen(self, text);

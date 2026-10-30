@@ -29,6 +29,7 @@ void video_settings_loading(int on);
 
 /* The draw distance setting: a factor on actors' fade distances. */
 float video_settings_draw_distance(void);
+void video_settings_level(const char *path);
 int video_settings_keep_bodies(void);
 int video_settings_keep_decals(void);
 float video_settings_wide_factor(void);

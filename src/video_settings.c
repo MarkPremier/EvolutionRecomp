@@ -1939,15 +1939,33 @@ float video_settings_take_mouse_turn(int axis)
  *
  * decals: blood splats, bullet holes, scorch marks and gibs last ten minutes
  * instead of seconds, from the next level load (recomp_manual.c,
- * sub_000B0110). */
+ * sub_000B0110).
+ *
+ * Not in the flying levels (the pod-02/09/13/17 "flight" chapters): there
+ * what is shot down falls out of sight, and its gibs, kept, only crowd the
+ * particles the fighting needs. */
+static int s_flying_level;
+
+void video_settings_level(const char *path)
+{
+    char lower[160];
+    size_t n;
+    for (n = 0; n + 1 < sizeof lower && path[n]; n++)
+        lower[n] = (char)(path[n] >= 'A' && path[n] <= 'Z' ? path[n] + 32 : path[n]);
+    lower[n] = 0;
+    s_flying_level = strstr(lower, "-flight") != NULL;
+    if (s_flying_level && s_values[SET_BODIES])
+        fprintf(stderr, "[VIDEO] flying level: keep bodies is off here\n");
+}
+
 int video_settings_keep_bodies(void)
 {
-    return s_values[SET_BODIES];
+    return s_values[SET_BODIES] && !s_flying_level;
 }
 
 int video_settings_keep_decals(void)
 {
-    return s_values[SET_BODIES];
+    return s_values[SET_BODIES] && !s_flying_level;
 }
 
 float video_settings_draw_distance(void)

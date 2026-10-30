@@ -289,7 +289,7 @@ effect at once and are kept in `turok_settings.ini` beside the exe:
 | Mouse look | raw, stick (raw falls back to stick while the on-foot turning is not running: flying, vehicles, turrets) | |
 | Mouse speed | 1 to 10 (5 by default; each step 1.4x) | |
 | Draw distance | normal, 2x, 4x, 8x (2x by default) | |
-| Keep bodies | off, on (off by default; also keeps decals) | |
+| Keep bodies | off, on (off by default; also keeps decals; always off in the flying levels) | |
 
 An environment variable set by hand still wins at start-up.
 
@@ -348,6 +348,11 @@ An environment variable set by hand still wins at start-up.
   texture or mesh is a splat, bullet hole, scorch or gore piece get the longer
   life; switching the setting re-applies it at once, and off leaves every
   life as the game has it. `RECOMP_PARTICLE_TRACE=1` lists the definitions.
+  Explosion fireballs (`1txt_fireB3_.tga`) are not kept: they play their
+  texture over their life, so ten minutes of it hid the explosions and their
+  build-up crowded out new effects such as rocket smoke trails. In the flying
+  levels (the "flight" chapters, pod 02, 09, 13 and 17) neither bodies nor
+  decals are kept.
 - **Widescreen culling**: the game culls against its 4:3 camera, so blood,
   bullet holes and other effects past the 4:3 edges vanished while on screen.
   While the camera's view planes (`sub_00020EE0`) and the in-view test run, the
