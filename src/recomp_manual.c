@@ -1087,6 +1087,8 @@ static int is_front_end_screen(const char *name)
     return strncmp(screens + 9, "ingame", 6) != 0;
 }
 
+static int s_level_loading;   /* a level, not a front end screen, is loading */
+
 void sub_00054A60(void)
 {
     uint32_t self = g_ecx;
@@ -1095,6 +1097,10 @@ void sub_00054A60(void)
         const char *text = (const char *)((uintptr_t)name + g_xbox_mem_offset);
         int kind = is_front_end_screen(text);
         fprintf(stderr, "[TUROK] screen %.96s: %s\n", text, kind == 1 ? "front end" : kind ? "pause menu" : "game");
+        if (!strstr(text, "creens\\")) {   /* a level: 4:3 and held until sub_000FFF20 */
+            s_level_loading = 1;
+            video_settings_loading(1);
+        }
         video_settings_screen(kind == 1, kind == 2);
         video_settings_menu_screen(self, text);
         if (!strstr(text, "creens\\")) {   /* a level: the actors watched before are gone */
@@ -1104,6 +1110,70 @@ void sub_00054A60(void)
         }
     }
     sub_00054A60_gen();
+}
+
+/* ── The loading screen (game object vtable 0x209D60) ──────────
+ *
+ * The game object's this-calls at +0x2C (sub_000FFA00) put the loading
+ * screen up -- the picture, title and text the level's LoadingScreen event
+ * left at [0x257E14]+0x1CC.., and the spinner, in 0x257E28..0x257E40 -- +0x30
+ * (sub_000FFDE0) is the loading tick, which draws and presents a frame each
+ * time its timer comes round, and +0x38 (sub_000FFF20) takes it down as the
+ * level begins; +0xB0 says it is up. Loads here take a fraction of the Xbox's
+ * time, so a level's flashed past: it now stays at least
+ * RECOMP_LOADING_HOLD_MS (default 3000) by ticking on before it comes down
+ * (not the front end's own loads, such as its backdrop at boot).
+ * The level stays 4:3 from its load (sub_00054A60) until then. */
+extern void sub_000FFA00_gen(void), sub_000FFF20_gen(void), sub_000FFDE0(void);
+extern __declspec(thread) uint32_t g_edx;
+__declspec(dllimport) void __stdcall Sleep(unsigned long milliseconds);
+static clock_t s_loading_since;     /* when the screen went up; 0 when down */
+
+static long loading_hold_ms(void)
+{
+    static long ms = -1;
+    if (ms < 0) {
+        const char *value = getenv("RECOMP_LOADING_HOLD_MS");
+        ms = value && *value ? atol(value) : 3000;
+        if (ms < 0) ms = 0;
+    }
+    return ms;
+}
+
+static long loading_shown_ms(void)
+{
+    return (long)((clock() - s_loading_since) * 1000 / CLOCKS_PER_SEC);
+}
+
+void sub_000FFA00(void)
+{
+    if (!*(volatile uint8_t *)((uintptr_t)g_ecx + 0xB0u + g_xbox_mem_offset))
+        s_loading_since = clock() | 1;
+    sub_000FFA00_gen();
+}
+
+void sub_000FFF20(void)
+{
+    uint32_t self = g_ecx;
+    if (s_level_loading && s_loading_since &&
+            *(volatile uint8_t *)((uintptr_t)self + 0xB0u + g_xbox_mem_offset)) {
+        fprintf(stderr, "[TUROK] level loaded in %ld ms; loading screen held to %ld ms\n",
+                loading_shown_ms(), loading_hold_ms());
+        while (loading_shown_ms() < loading_hold_ms()) {
+            uint32_t eax = g_eax, edx = g_edx, esp = g_esp;
+            g_esp -= 4;
+            TUROK_MEM32(g_esp) = 0;   /* return address */
+            g_ecx = self;
+            sub_000FFDE0();
+            g_eax = eax; g_edx = edx; g_esp = esp;
+            Sleep(1);
+        }
+    }
+    s_loading_since = 0;
+    s_level_loading = 0;
+    g_ecx = self;
+    sub_000FFF20_gen();
+    video_settings_loading(0);
 }
 
 /* ── In-engine cutscenes (StartCinema / EndCinema) ─────────────

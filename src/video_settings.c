@@ -178,6 +178,7 @@ static char s_ini_path[MAX_PATH];
 static volatile int s_front_end = 1;     /* the title is in its 4:3 front end */
 static volatile int s_pause_menu;        /* on the pause menu's first screen */
 static volatile int s_cinema;            /* an in-engine cutscene is playing */
+static volatile int s_loading;           /* a level is loading: its loading screen is up */
 static volatile int s_in_menu = 1;       /* FrontEnd.hst's FE Flag: not in play */
 
 static int clamp(int value, int low, int high)
@@ -1822,7 +1823,7 @@ static float s_wide_factor = 1.0f;
 
 static void apply_aspect(void)
 {
-    s_wide_factor = s_front_end || s_cinema ? 1.0f : aspect_ratio() * 3 / 4;
+    s_wide_factor = s_front_end || s_cinema || s_loading ? 1.0f : aspect_ratio() * 3 / 4;
     nv2a_gpu_set_wide_factor(s_wide_factor);
 }
 
@@ -1968,6 +1969,14 @@ void video_settings_cinema(int on)
     if (on == s_cinema) return;
     s_cinema = on;
     fprintf(stderr, "[VIDEO] cutscene %s\n", on ? "begins: 4:3" : "ends");
+    apply_aspect();
+}
+
+void video_settings_loading(int on)
+{
+    if (on == s_loading) return;
+    s_loading = on;
+    fprintf(stderr, "[VIDEO] level %s\n", on ? "loading: 4:3" : "begins");
     apply_aspect();
 }
 

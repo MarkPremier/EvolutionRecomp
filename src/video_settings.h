@@ -23,6 +23,10 @@ void video_settings_menu_screen(uint32_t screen, const char *name);
 /* An in-engine cutscene began (1) or ended (0): shown 4:3, as it was framed. */
 void video_settings_cinema(int on);
 
+/* A level is loading (1) or has begun (0): its loading screen is a 4:3
+ * picture, shown 4:3 until the level's first frame. */
+void video_settings_loading(int on);
+
 /* The draw distance setting: a factor on actors' fade distances. */
 float video_settings_draw_distance(void);
 int video_settings_keep_bodies(void);

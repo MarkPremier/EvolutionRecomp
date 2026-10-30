@@ -300,8 +300,12 @@ An environment variable set by hand still wins at start-up.
   they reach the screen's edge (fades, the damage flash), so the HUD keeps its
   shape. The front end, movies, loading screens and in-engine cutscenes (framed
   for 4:3, with their own bars; StartCinema/EndCinema, `sub_00164230`/
-  `sub_001642A0`) stay 4:3. The window opens
-  at the chosen shape.
+  `sub_001642A0`) stay 4:3. A level is 4:3 from its load until its loading
+  screen comes down (`sub_000FFF20`), so that screen holds one size. The window
+  opens at the chosen shape.
+- **Loading screens** stay up at least 3 seconds (`RECOMP_LOADING_HOLD_MS`,
+  0 for none): levels load here in under a second, so the chapter picture
+  and its text otherwise flash past.
 - **Frame limit**: the game steps by a measured clock (`sub_00028B40`), so it
   runs at the right speed at any rate. The front end stays at 60, as its
   movies are paced by the vertical blank.
