@@ -1052,8 +1052,11 @@ void sub_0003C9E0(void)
  * cdecl (the actor): whether a player is within the actor's AU_D (+0x1D0,
  * 0 for always), the distance out to which it updates -- its animation, its
  * flight. Levels set it to match A_MDD, where the actor stops being drawn,
- * so with the draw distance setting butterflies, birds and swaying plants
- * were drawn frozen until close. It is scaled with the draw distance. */
+ * so with the draw distance setting butterflies were drawn hanging frozen
+ * until close. Theirs is scaled with the draw distance; everything else
+ * keeps the original's, as more actors updating costs frame rate.
+ * Butterflies are the FlyingIndigenousAI (vtable 0x21A240) with
+ * FlyingPerturb (+0x7F8) 3: no bird, dragonfly or pteranodon has it. */
 extern void sub_0003B110_gen(void);
 
 void sub_0003B110(void)
@@ -1061,7 +1064,11 @@ void sub_0003B110(void)
     float scale = video_settings_draw_distance(), reach;
     uint32_t actor = TUROK_MEM32(g_esp + 4u), bits;
 
-    if (scale == 1.0f || !actor) { sub_0003B110_gen(); return; }
+    if (scale == 1.0f || !actor || TUROK_MEM32(actor) != FLYING_INDIGENOUS_AI_VTABLE ||
+        TUROK_MEM32(actor + 0x7F8u) != 3u) {
+        sub_0003B110_gen();
+        return;
+    }
     bits = TUROK_MEM32(actor + 0x1D0u);
     memcpy(&reach, &bits, 4);
     if (!(reach > 0.0f)) { sub_0003B110_gen(); return; }

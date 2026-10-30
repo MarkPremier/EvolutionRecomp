@@ -1,8 +1,57 @@
 diff --git a/src/apu/apu_core.c b/src/apu/apu_core.c
-index c5c8a86..c5febed 100644
+index c5c8a86..ea49116 100644
 --- a/src/apu/apu_core.c
 +++ b/src/apu/apu_core.c
-@@ -135,6 +135,8 @@ extern void xbox_worker_stack_free(int slot);
+@@ -85,9 +85,22 @@ uint8_t *mcpx_apu_ram_address(uint64_t addr, uint32_t bytes)
+         uint8_t *pointer = g_state->physical_mapper(addr, bytes);
+         if (pointer)
+             return pointer;
+-        fprintf(stderr, "[APU] unmapped DMA address 0x%llX + %u\n",
+-                (unsigned long long)addr, bytes);
+-        abort();
++        /* An address the mapper cannot place costs that access, not the
++         * game: reads see silence, writes go nowhere. (It used to abort,
++         * which took the whole program down for one bad audio fetch.) */
++        static uint8_t junk[65536];
++        static unsigned reported;
++        if (reported < 16) {
++            reported++;
++            fprintf(stderr, "[APU] unmapped DMA address 0x%llX + %u: silence\n",
++                    (unsigned long long)addr, bytes);
++        }
++        if (bytes > sizeof junk) {
++            fprintf(stderr, "[APU] unmapped DMA extent too large to stand in for\n");
++            abort();
++        }
++        memset(junk, 0, bytes);
++        return junk;
+     }
+     uint32_t a = (uint32_t)addr & 0x0FFFFFFFu;
+     size_t mapped = g_xbox_map_size ? g_xbox_map_size : g_xbox_total_ram;
+@@ -101,6 +114,22 @@ uint8_t *mcpx_apu_ram_address(uint64_t addr, uint32_t bytes)
+     return g_apu_ram_ptr + (a & 0x03FFFFFFu);
+ }
+ 
++/* `bytes` from physical `addr`, a page at a time: consecutive physical pages
++ * need not be stored together here (see xbox_DmaPhysicalPointer), so an
++ * extent across a page boundary is looked up page by page. */
++void mcpx_apu_ram_copy(uint64_t addr, void *destination, uint32_t bytes)
++{
++    uint8_t *out = (uint8_t *)destination;
++    while (bytes) {
++        uint32_t chunk = 4096u - (uint32_t)(addr & 4095u);
++        if (chunk > bytes) chunk = bytes;
++        memcpy(out, mcpx_apu_ram_address(addr, chunk), chunk);
++        out += chunk;
++        addr += chunk;
++        bytes -= chunk;
++    }
++}
++
+ /* The interrupt line, as the frame thread sees it. update_irq used to call
+  * pci_irq_assert, which is an empty stub here, so DirectSound's service
+  * routine never ran and no voice completion ever reached it. */
+@@ -135,6 +164,8 @@ extern void xbox_worker_stack_free(int slot);
  extern uint32_t xbox_GetConnectedInterrupt(uint32_t vector);
  extern uint32_t xbox_AllocThreadTib(void);
  extern int xbox_IrqlBlocksInterrupts(void);
@@ -11,7 +60,7 @@ index c5c8a86..c5febed 100644
  extern int xbox_IrqlEnterInterrupt(int level);
  extern void xbox_IrqlLeaveInterrupt(int saved);
  #if defined(_MSC_VER)
-@@ -158,12 +160,15 @@ static void apu_deliver_irq(MCPXAPUState *d)
+@@ -158,12 +189,15 @@ static void apu_deliver_irq(MCPXAPUState *d)
      uint32_t kint, routine, context;
      uint8_t *guest_ram = (uint8_t *)(uintptr_t)xbox_GetMemoryOffset();
      apu_guest_fn fn;
@@ -30,7 +79,7 @@ index c5c8a86..c5febed 100644
      held_off = 0;
      kint = xbox_GetConnectedInterrupt(APU_VECTOR);
      if (!kint)
-@@ -185,7 +190,15 @@ static void apu_deliver_irq(MCPXAPUState *d)
+@@ -185,7 +219,15 @@ static void apu_deliver_irq(MCPXAPUState *d)
          return;
  
      qemu_mutex_unlock(&d->lock);
@@ -46,7 +95,7 @@ index c5c8a86..c5febed 100644
          xbox_worker_stack_free(slot);
          qemu_mutex_lock(&d->lock);
          return;
-@@ -197,6 +210,7 @@ static void apu_deliver_irq(MCPXAPUState *d)
+@@ -197,6 +239,7 @@ static void apu_deliver_irq(MCPXAPUState *d)
      g_esp -= 4; *(uint32_t *)(guest_ram + g_esp) = 0xDEADBEEFu;
      { int _irql = xbox_IrqlEnterInterrupt(16); fn(); xbox_IrqlLeaveInterrupt(_irql); }
      xbox_GuestAudioGuardLeave();
@@ -54,7 +103,7 @@ index c5c8a86..c5febed 100644
      xbox_worker_stack_free(slot);
      qemu_mutex_lock(&d->lock);
  
-@@ -405,8 +419,9 @@ void mcpx_apu_monitor_finalize(MCPXAPUState *d)
+@@ -405,8 +448,9 @@ void mcpx_apu_monitor_finalize(MCPXAPUState *d)
  /* Optional raw PCM capture for offline analysis (RECOMP_APU_WAV=<base>):
   * <base>.emu.raw = EP/DSP mixdown before the software mixer,
   * <base>.mix.raw = what is actually submitted to the audio backend. */
@@ -65,7 +114,7 @@ index c5c8a86..c5febed 100644
  
  static void apu_wav_capture(const int16_t (*buf)[2], int n, int mix)
  {
-@@ -419,12 +434,19 @@ static void apu_wav_capture(const int16_t (*buf)[2], int n, int mix)
+@@ -419,12 +463,19 @@ static void apu_wav_capture(const int16_t (*buf)[2], int n, int mix)
              g_wav_emu = fopen(path, "wb");
              snprintf(path, sizeof(path), "%s.mix.raw", base);
              g_wav_mix = fopen(path, "wb");
@@ -85,7 +134,7 @@ index c5c8a86..c5febed 100644
  }
  
  /* Declick: a sound that is cut off abruptly makes the mix step from a large
-@@ -569,8 +591,13 @@ static void throttle(MCPXAPUState *d)
+@@ -569,8 +620,13 @@ static void throttle(MCPXAPUState *d)
  
      int64_t now_us = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
  
@@ -100,7 +149,7 @@ index c5c8a86..c5febed 100644
          d->next_frame_time_us = now_us;
      }
  
-@@ -592,6 +619,8 @@ static void throttle(MCPXAPUState *d)
+@@ -592,6 +648,8 @@ static void throttle(MCPXAPUState *d)
   * se_frame - Process one audio frame (VP -> GP -> EP pipeline)
   * ============================================================ */
  
@@ -109,7 +158,7 @@ index c5c8a86..c5febed 100644
  static void se_frame(MCPXAPUState *d)
  {
      mcpx_apu_update_dsp_preference(d);
-@@ -614,9 +643,31 @@ static void se_frame(MCPXAPUState *d)
+@@ -614,9 +672,31 @@ static void se_frame(MCPXAPUState *d)
      float mixbins[NUM_MIXBINS][NUM_SAMPLES_PER_FRAME];
      memset(mixbins, 0, sizeof(mixbins));
  
@@ -144,7 +193,7 @@ index c5c8a86..c5febed 100644
  
      d->ep_frame_div++;
  
-@@ -695,9 +746,16 @@ static void *mcpx_apu_frame_thread(void *arg)
+@@ -695,9 +775,16 @@ static void *mcpx_apu_frame_thread(void *arg)
           * thread starved there indefinitely: Burnout 3 froze on its vehicle
           * select, blocked in voice_lock at raised IRQL, which in turn held
           * off every USB interrupt. */
@@ -488,8 +537,21 @@ index 5f65480..d7880f1 100644
          d->gp.realtime = true;
          d->ep.realtime = true;
      } else {
+diff --git a/src/apu/apu_shim.h b/src/apu/apu_shim.h
+index 1d1cbf9..6835ef9 100644
+--- a/src/apu/apu_shim.h
++++ b/src/apu/apu_shim.h
+@@ -97,6 +97,8 @@ extern uint8_t *g_apu_ram_ptr; /* Set at init to point at Xbox 64MB RAM */
+ /* Where a physical address the title handed the APU lives. See apu_core.c. */
+ uint8_t *mcpx_apu_phys(uint64_t addr);
+ uint8_t *mcpx_apu_ram_address(uint64_t addr, uint32_t bytes);
++/* A copy of `bytes` from physical `addr` that may cross pages. */
++void mcpx_apu_ram_copy(uint64_t addr, void *destination, uint32_t bytes);
+ 
+ /* Little-endian physical memory reads */
+ static inline uint32_t ldl_le_phys(void *as, hwaddr addr) {
 diff --git a/src/apu/apu_vp.c b/src/apu/apu_vp.c
-index 7c36737..949b1f2 100644
+index 7c36737..e0292fe 100644
 --- a/src/apu/apu_vp.c
 +++ b/src/apu/apu_vp.c
 @@ -93,6 +93,20 @@ static float clampf(float v, float mn, float mx)
@@ -599,7 +661,17 @@ index 7c36737..949b1f2 100644
          break;
      case NV1BA0_PIO_SET_VOICE_TAR_VOLB:
          voice_set_mask(d, (uint16_t)d->regs[NV_PAPU_FECV],
-@@ -1172,7 +1224,7 @@ static void voice_process(MCPXAPUState *d,
+@@ -843,8 +895,7 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
+                 uint32_t linear_addr = block_index * (uint32_t)block_size;
+                 if (stream) {
+                     hwaddr addr = segment_offset + linear_addr;
+-                    memcpy(adpcm_block, mcpx_apu_ram_address(addr, (uint32_t)block_size),
+-                           block_size);
++                    mcpx_apu_ram_copy(addr, adpcm_block, (uint32_t)block_size);
+                 } else {
+                     linear_addr += ba;
+                     for (unsigned int word_index = 0;
+@@ -1172,7 +1223,7 @@ static void voice_process(MCPXAPUState *d,
      }
  
      /* HRTF processing for 3D voices */
@@ -608,7 +680,7 @@ index 7c36737..949b1f2 100644
          uint16_t hrtf_handle =
              (uint16_t)voice_get_mask(d, v, NV_PAVS_VOICE_CFG_HRTF_TARGET,
                                       NV_PAVS_VOICE_CFG_HRTF_TARGET_HANDLE);
-@@ -1242,6 +1294,88 @@ void mcpx_apu_vp_frame(MCPXAPUState *d,
+@@ -1242,6 +1293,88 @@ void mcpx_apu_vp_frame(MCPXAPUState *d,
              uint16_t v = (uint16_t)d->regs[current];
              d->regs[next] = voice_get_mask(d, v, NV_PAVS_VOICE_TAR_PITCH_LINK,
                                 NV_PAVS_VOICE_TAR_PITCH_LINK_NEXT_VOICE_HANDLE);

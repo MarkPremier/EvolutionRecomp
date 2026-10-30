@@ -390,6 +390,85 @@ static LONG CALLBACK veh_handler(PEXCEPTION_POINTERS ep)
     return EXCEPTION_CONTINUE_SEARCH;
 }
 
+/* ── Crash log ─────────────────────────────────────────────────
+ *
+ * Started from Explorer the program has no stderr, and a crash left nothing
+ * to report. Unless stderr is already redirected, it goes to turok_log.txt
+ * beside the program; the run before is kept as turok_log.prev.txt, so
+ * starting again after a crash does not lose it. abort() -- the emulation's
+ * own checks, an uncaught C++ exception, an invalid CRT argument -- was a
+ * silent fail-fast (0xC0000409): it is now logged and the program exits. */
+#include <io.h>
+#include <signal.h>
+
+static void open_log(void)
+{
+    char dir[MAX_PATH], log[MAX_PATH + 32], prev[MAX_PATH + 32];
+    char *slash;
+    int fd = _fileno(stderr);
+
+    if (fd >= 0 && _get_osfhandle(fd) != -1 && _get_osfhandle(fd) != -2)
+        return;
+    if (!GetModuleFileNameA(NULL, dir, sizeof dir)) return;
+    slash = strrchr(dir, '\\');
+    if (!slash) return;
+    *slash = 0;
+    snprintf(log, sizeof log, "%s\\turok_log.txt", dir);
+    snprintf(prev, sizeof prev, "%s\\turok_log.prev.txt", dir);
+    MoveFileExA(log, prev, MOVEFILE_REPLACE_EXISTING);
+    freopen(log, "w", stderr);
+}
+
+static void log_fatal(const char *what)
+{
+    SYSTEMTIME now;
+    GetLocalTime(&now);
+    fprintf(stderr, "[FATAL] %s at %02u:%02u:%02u -- the lines above say what led to it\n",
+            what, now.wHour, now.wMinute, now.wSecond);
+    fflush(stderr);
+}
+
+static void on_abort(int signal_number)
+{
+    (void)signal_number;
+    log_fatal("abort()");
+    _exit(3);
+}
+
+static void on_invalid_parameter(const wchar_t *expression, const wchar_t *function,
+                                 const wchar_t *file, unsigned line, uintptr_t reserved)
+{
+    (void)expression; (void)function; (void)file; (void)line; (void)reserved;
+    log_fatal("invalid argument to a C runtime function");
+    _exit(3);
+}
+
+static void on_purecall(void)
+{
+    log_fatal("pure virtual call");
+    _exit(3);
+}
+
+static LONG WINAPI on_unhandled(EXCEPTION_POINTERS *ep)
+{
+    char what[96];
+    snprintf(what, sizeof what, "unhandled exception 0x%08lX at RIP=0x%llX",
+             (unsigned long)ep->ExceptionRecord->ExceptionCode,
+             (unsigned long long)ep->ContextRecord->Rip);
+    log_fatal(what);
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+static void install_crash_log(void)
+{
+    open_log();
+    signal(SIGABRT, on_abort);
+    _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
+    _set_invalid_parameter_handler(on_invalid_parameter);
+    _set_purecall_handler(on_purecall);
+    SetUnhandledExceptionFilter(on_unhandled);
+}
+
 /* ── WinMain ───────────────────────────────────────────────── */
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
@@ -403,6 +482,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     (void)lpCmdLine;
     (void)nCmdShow;
 
+    install_crash_log();
     /* Unbuffered output for immediate visibility during debugging */
     setvbuf(stdout, NULL, _IONBF, 0);
     setvbuf(stderr, NULL, _IONBF, 0);
