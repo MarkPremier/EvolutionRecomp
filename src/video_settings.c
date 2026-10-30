@@ -2566,13 +2566,25 @@ static void menu_pointer(void)
     }
 }
 
-/* The PC release's arrow, its tip the hot spot. */
+/* The PC release's arrow, its tip the hot spot: from the PC install when one
+ * is named, else the copy the build took from it (resource PC_CURSOR,
+ * CMakeLists.txt with RECOMP_PC_EXE), so players without the PC release have
+ * it too. */
 static void load_pc_cursor(void)
 {
     char directory[MAX_PATH];
-    uint32_t width, height, *pixels;
-    if (!pc_game_dir(directory, sizeof directory)) return;
-    if (!(pixels = pc_texture(directory, "cursor.dds", &width, &height))) return;
+    uint32_t width, height, *pixels = NULL;
+    const char *source = "the PC install";
+    if (pc_game_dir(directory, sizeof directory)) pixels = pc_texture(directory, "cursor.dds", &width, &height);
+    if (!pixels) {
+        HRSRC found = FindResourceA(NULL, "PC_CURSOR", (LPCSTR)RT_RCDATA);
+        HGLOBAL loaded = found ? LoadResource(NULL, found) : NULL;
+        const uint8_t *data = loaded ? (const uint8_t *)LockResource(loaded) : NULL;
+        if (data) pixels = dds_decode(data, SizeofResource(NULL, found), &width, &height);
+        source = "the build";
+    }
+    fprintf(stderr, "[VIDEO] menu arrow: %s\n", pixels ? source : "Windows'");
+    if (!pixels) return;
     xbox_FramebufferSetCursorImage(pixels, (int)width, (int)height, (int)(34 * width / 256), (int)(6 * height / 256));
     free(pixels);
 }

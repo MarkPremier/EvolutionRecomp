@@ -171,10 +171,11 @@ Recomp/
    ```
 
    With the PC release installed, `-DRECOMP_PC_EXE=<path>/Turok4.exe` gives
-   the program and its window that release's icon (taken from your copy at
-   configure time by `tools/extract_icon.py`; it is not in this repository).
-   Such a build is for your own use: `py tools/strip_icon.py <exe>` removes
-   the icon from a copy before it is shared.
+   the program and its window that release's icon, and the menus its mouse
+   arrow (taken from your copy at configure time, the icon by
+   `tools/extract_icon.py`; neither is in this repository).
+   `py tools/strip_icon.py <exe>` removes the icon from a copy before it is
+   shared; the arrow stays.
 
    Release builds use link-time code generation (`-DRECOMP_LTCG=OFF` turns
    it off): it inlines the generated functions' small callees across files
@@ -254,7 +255,8 @@ as a pointer, as in the PC release:
 Leaving the menu for play takes the mouse back for look. The arrow shows once
 the mouse moves and hides again when the keys or a pad move the highlight. It
 is the PC release's `cursor.dds`, read from the PC install named by
-`pc_game_dir` (see Button icons below); without one it is Windows' own.
+`pc_game_dir` (see Button icons below), or else the copy a build made with
+`RECOMP_PC_EXE` carries; without either it is Windows' own.
 
 How it works: the screen loader's `this` (`sub_00054A60`) is the screen; its
 actors are a tree from +0x9C (walked as `sub_0009C1C0` does), each widget's
