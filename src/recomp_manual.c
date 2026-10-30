@@ -1129,7 +1129,9 @@ void sub_00054A60(void)
  * RECOMP_LOADING_HOLD_MS (default 3000) by ticking on before it comes down
  * (not the front end's own loads, such as its backdrop at boot).
  * The level stays 4:3 from its load (sub_00054A60) until then. */
-extern void sub_000FFA00_gen(void), sub_000FFF20_gen(void), sub_000FFDE0(void);
+extern void sub_000FFA00_gen(void);
+extern void sub_000FFF20_gen(void);
+extern void sub_000FFDE0(void);
 extern __declspec(thread) uint32_t g_edx;
 __declspec(dllimport) void __stdcall Sleep(unsigned long milliseconds);
 static clock_t s_loading_since;     /* when the screen went up; 0 when down */

@@ -174,5 +174,9 @@
  {
   "start": "0x00143060",
   "note": "player action thunk (mov eax,[ecx]; clear +0x3A4; jmp [eax+N]) reached only through runtime-built tables; fire/pause failed without them"
+ },
+ {
+  "start": "0x0010DF10",
+  "note": "weapon vfunc after an inline jump table (sub_0010DEC0's); the disassembler read through the table into it, so calls failed at runtime and the weapon could not be switched away from"
  }
 ]
