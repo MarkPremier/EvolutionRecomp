@@ -24,9 +24,12 @@ CPU-renderer build (about 9 fps on the title screen).
 - PlayStation controllers work natively too (DualSense, DualSense Edge,
   DualShock 4; USB or Bluetooth, with rumble), read through HID with no
   Steam Input or DS4Windows: cross is A, circle B, square X, triangle Y,
-  options Start, create/share Back. An XInput pad, if present, keeps
-  controller 1 and the PlayStation pad takes the next. `RECOMP_SONY=0` turns
-  this off. Not yet tested with a real pad.
+  options Start, create/share Back. So does the Switch 2 Pro Controller over
+  USB (with Steam closed: Steam holds its USB interface), its buttons placed
+  by position as on an Xbox pad (the bottom one is A), plus Start, minus
+  Back. An XInput pad, if present, keeps controller 1 and the other pad
+  takes the next. `RECOMP_HID_PADS=0` turns this off. The DualSense is
+  tested; the Switch 2 Pro Controller not yet.
 - Keyboard and mouse work too, merged onto controller 1 (see Controls).
 - Dinosaurs and Turok cast shadows, with filtered (PCF) edges.
   `RECOMP_SHADOWS=0` turns them off. They reach further than on the Xbox:
