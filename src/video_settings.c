@@ -1949,6 +1949,10 @@ float video_settings_take_mouse_turn(int axis)
  * what is shot down falls out of sight, and its gibs, kept, only crowd the
  * particles the fighting needs. */
 static int s_flying_level;
+/* Indoors (the base interiors of pods 05 and 06, Sleg City's pods 10-12): a
+ * room under a roof is all in shadow, so the shadow map's edge beside the
+ * player shows there (recomp_manual.c, sub_0001FD20). */
+static int s_indoor_level;
 
 void video_settings_level(const char *path)
 {
@@ -1958,8 +1962,15 @@ void video_settings_level(const char *path)
         lower[n] = (char)(path[n] >= 'A' && path[n] <= 'Z' ? path[n] + 32 : path[n]);
     lower[n] = 0;
     s_flying_level = strstr(lower, "-flight") != NULL;
+    s_indoor_level = strstr(lower, "\\pod-05-") || strstr(lower, "\\pod-06-") || strstr(lower, "-s-city-");
+    if (s_indoor_level) fprintf(stderr, "[VIDEO] indoor level: shadows reach further around the player\n");
     if (s_flying_level && s_values[SET_BODIES])
         fprintf(stderr, "[VIDEO] flying level: keep bodies is off here\n");
+}
+
+int video_settings_indoor_level(void)
+{
+    return s_indoor_level;
 }
 
 int video_settings_keep_bodies(void)

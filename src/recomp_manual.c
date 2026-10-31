@@ -314,9 +314,14 @@ void sub_0017D5C0(void)
  * disc with the player on its rim. Anything beside or behind the player --
  * and, in widescreen, near the sides of the view -- is off the map and
  * casts nothing. The angle is widened so the disc also reaches
- * RECOMP_SHADOW_AROUND units (default 12) past the player. */
+ * RECOMP_SHADOW_AROUND units past the player: 12 outdoors, 32 in the
+ * indoor levels (video_settings_indoor_level) -- under a roof, where the
+ * whole room is in shadow, the disc's rim shows as a straight lit edge, and
+ * at 21:9 one 12 units out was in view at the sides. Outdoors the smaller
+ * disc keeps the map's detail. RECOMP_SHADOW_AROUND sets both. */
 extern void sub_0017DAF0_gen(void);
 extern void sub_0001FD20_gen(void);
+extern int video_settings_indoor_level(void);
 
 static uint32_t s_shadow_fit;   /* the shadow manager while it fits its camera */
 
@@ -337,14 +342,16 @@ void sub_0017DAF0(void)
 
 void sub_0001FD20(void)
 {
-    static float around = -1.0f;
+    static float set = -2.0f;   /* RECOMP_SHADOW_AROUND, or -1 for the defaults */
     uint32_t self = s_shadow_fit;
+    float around;
 
-    if (around < 0) {
+    if (set < -1.5f) {
         const char *text = getenv("RECOMP_SHADOW_AROUND");
-        around = text ? (float)atof(text) : 12.0f;
-        if (!(around >= 0 && around < 1000.0f)) around = 0;
+        set = text ? (float)atof(text) : -1.0f;
+        if (text && !(set >= 0 && set < 1000.0f)) set = 0;
     }
+    around = set >= 0 ? set : video_settings_indoor_level() ? 32.0f : 12.0f;
     if (self && g_ecx == self + 0x10u && around > 0) {
         float dx = guest_float(self + 0x210u) - guest_float(self + 0x204u);
         float dy = guest_float(self + 0x214u) - guest_float(self + 0x208u);

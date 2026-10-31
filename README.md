@@ -25,7 +25,9 @@ CPU-renderer build (about 9 fps on the title screen).
 - Dinosaurs and Turok cast shadows, with filtered (PCF) edges.
   `RECOMP_SHADOWS=0` turns them off. They reach further than on the Xbox:
   the shadow map covers 64 units ahead of the camera and 12 around the
-  player, so creatures beside and behind you (and at the sides of a
+  player (32 in the indoor levels, pods 05, 06 and 10-12, where the map's
+  edge beside you showed as a straight lit line on shadowed walls), so
+  creatures beside and behind you (and at the sides of a
   widescreen view) cast them too, at 2048x2048 (the game's own 16 units
   ahead at 512x512). A creature out of view still casts its shadow; the
   game drew only those of creatures on screen. `RECOMP_SHADOW_DISTANCE`,
