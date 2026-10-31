@@ -353,6 +353,14 @@ An environment variable set by hand still wins at start-up.
   build-up crowded out new effects such as rocket smoke trails. In the flying
   levels (the "flight" chapters, pod 02, 09, 13 and 17) neither bodies nor
   decals are kept.
+- **Particle limit**: a level's particle manager holds at least
+  `RECOMP_PARTICLES` particles (default 4000, 1000 to 20000; the game asks
+  for 1000). Before an effect is emitted (`sub_000B9700`) the game drops it
+  by chance once the particles out pass its priority's share (40 to 70% of
+  the limit), so kept decals used to stop new effects, such as the blood from
+  a severed neck. Now, as an effect nears its share, the oldest kept decals
+  and gibs are removed first (`sub_000B98D0` stamps each particle as it is
+  added). The log reports removals and refusals at most every ten seconds.
 - **Widescreen culling**: the game culls against its 4:3 camera, so blood,
   bullet holes and other effects past the 4:3 edges vanished while on screen.
   While the camera's view planes (`sub_00020EE0`) and the in-view test run, the

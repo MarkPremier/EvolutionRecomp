@@ -549,6 +549,190 @@ static void keep_decals_frame(void)
     }
 }
 
+/* ── Particle limit (sub_00096EE0, sub_000B98D0, sub_000B9700) ──
+ *
+ * A level makes one particle manager (sub_000B9D40) for at most the larger
+ * of 1000 particles and its own setting (level +0x90), about 540 bytes of
+ * budget each (sub_000B7010). The particles out (+0x24) sit in a list per
+ * priority, 0 to 4, oldest first: sub_000B98D0 adds each before the tail
+ * node (+0xCC4 + priority * 0x1BC, or +0x1570 for the other kind), after
+ * the head node (+0x1E1C + ..., or +0x26C8), linked through +0x1A4 and
+ * back through +0x1A8. Before an effect is emitted, sub_000B9700
+ * (this-call: priority, count) refuses it -- returns 1 -- by chance once the
+ * particles out pass that priority's share of the capacity (+0x2F74 +
+ * priority * 4: 70, 60, 50 and 40% for priorities 1 to 4, less under
+ * load), and always about 5% past it.
+ *
+ * With Keep bodies on, blood, bullet holes and gibs stay out for ten
+ * minutes, so a long fight filled those shares and new effects -- the blood
+ * from a severed neck among them -- stopped appearing. Now, as an effect
+ * comes within 1% of its share, the oldest kept particles are removed (by
+ * their own kill, vfunc +0x1C, as the game's make-room sub_000B97D0 does)
+ * to bring the count 3% under it; each particle is stamped as it is added
+ * to tell the oldest across the lists. The capacity is also at least
+ * RECOMP_PARTICLES (default 4000; this build maps 128 MB, so the extra
+ * 1.6 MB is room the console never had to give), so more stay before any
+ * go. Removals and refusals are logged, at most once every ten seconds. */
+#include <time.h>
+extern void sub_00096EE0_gen(void);
+extern void sub_000B98D0_gen(void);
+extern void sub_000B9700_gen(void);
+extern __declspec(thread) uint32_t g_edx;
+recomp_func_t recomp_lookup(uint32_t xbox_va);
+recomp_func_t recomp_lookup_manual(uint32_t xbox_va);
+
+#define PARTICLE_STAMPS 65536u
+static struct { uint32_t particle, stamp; } s_particle_stamps[PARTICLE_STAMPS];
+static uint32_t s_particle_stamp, s_particle_manager;
+static unsigned s_particles_removed, s_particles_refused;
+
+static int32_t particle_capacity(void)
+{
+    static int32_t capacity;
+    if (!capacity) {
+        const char *value = getenv("RECOMP_PARTICLES");
+        capacity = value && *value ? atoi(value) : 4000;
+        if (capacity < 1000) capacity = 1000;
+        if (capacity > 20000) capacity = 20000;
+    }
+    return capacity;
+}
+
+void sub_00096EE0(void)
+{
+    static int32_t logged;
+    uint32_t level = TUROK_MEM32(g_ecx), asked = TUROK_MEM32(level + 0x90u);
+    int32_t capacity = particle_capacity();
+    if ((int32_t)asked < capacity) TUROK_MEM32(level + 0x90u) = (uint32_t)capacity;
+    else capacity = (int32_t)asked;
+    if (capacity != logged) {
+        logged = capacity;
+        fprintf(stderr, "[PARTICLES] capacity %d (the level asks for %d)\n", capacity, (int32_t)asked);
+    }
+    sub_00096EE0_gen();
+    TUROK_MEM32(level + 0x90u) = asked;
+}
+
+/* The stamp a particle got when it was added, or a new slot for it. */
+static uint32_t *particle_stamp(uint32_t particle)
+{
+    uint32_t at = (particle >> 2) * 2654435761u >> 16, tries;
+    for (tries = 0; tries < 64u; tries++, at = (at + 1u) & (PARTICLE_STAMPS - 1u)) {
+        if (s_particle_stamps[at].particle == particle) return &s_particle_stamps[at].stamp;
+        if (!s_particle_stamps[at].particle) {
+            s_particle_stamps[at].particle = particle;
+            s_particle_stamps[at].stamp = 0;
+            return &s_particle_stamps[at].stamp;
+        }
+    }
+    return NULL;
+}
+
+void sub_000B98D0(void)
+{
+    uint32_t *stamp;
+    if (g_ecx != s_particle_manager) {
+        memset(s_particle_stamps, 0, sizeof s_particle_stamps);
+        s_particle_manager = g_ecx;
+    }
+    stamp = particle_stamp(TUROK_MEM32(g_esp + 4u));
+    if (stamp) *stamp = ++s_particle_stamp;
+    sub_000B98D0_gen();
+}
+
+/* A particle Keep bodies made long-lived: its definition (+0x48) has the
+ * long life, and the game has not marked it never to be culled. */
+static int particle_kept(uint32_t particle)
+{
+    uint32_t def = TUROK_MEM32(particle + 0x48u);
+    return def && !(TUROK_MEM32(particle + 0xCu) & 0x400000u) &&
+           guest_float(def + 0x7Cu) >= KEEP_DECAL_SECONDS;
+}
+
+static void particle_kill(uint32_t particle)
+{
+    uint32_t va = TUROK_MEM32(TUROK_MEM32(particle) + 0x1Cu);
+    uint32_t eax = g_eax, ecx = g_ecx, edx = g_edx, esp = g_esp;
+    recomp_func_t fn = recomp_lookup_manual(va);
+    if (!fn) fn = recomp_lookup(va);
+    if (!fn) return;
+    g_esp -= 4;
+    TUROK_MEM32(g_esp) = 0;   /* return address */
+    g_ecx = particle;
+    fn();
+    g_eax = eax; g_ecx = ecx; g_edx = edx; g_esp = esp;
+}
+
+typedef struct { uint32_t stamp, particle; } KeptParticle;
+
+static int kept_older(const void *a, const void *b)
+{
+    uint32_t x = ((const KeptParticle *)a)->stamp, y = ((const KeptParticle *)b)->stamp;
+    return x < y ? -1 : x > y;
+}
+
+/* Remove up to `count` kept particles, the oldest first. */
+static void particle_trim(uint32_t self, int32_t count)
+{
+    static KeptParticle *kept;
+    static unsigned room;
+    unsigned n = 0, i, priority, kind;
+    for (priority = 0; priority < 5u; priority++)
+        for (kind = 0; kind < 2u; kind++) {
+            uint32_t head = self + (kind ? 0x26C8u : 0x1E1Cu) + priority * 0x1BCu;
+            uint32_t tail = self + (kind ? 0x1570u : 0xCC4u) + priority * 0x1BCu;
+            uint32_t at = TUROK_MEM32(head + 0x1A4u), walked = 0;
+            for (; at && at != tail && walked < 65536u; at = TUROK_MEM32(at + 0x1A4u), walked++) {
+                uint32_t *stamp;
+                if (!particle_kept(at)) continue;
+                if (n == room) {
+                    KeptParticle *more = realloc(kept, (room + 1024u) * sizeof *kept);
+                    if (!more) break;
+                    kept = more;
+                    room += 1024u;
+                }
+                stamp = particle_stamp(at);
+                kept[n].stamp = stamp ? *stamp : 0;
+                kept[n].particle = at;
+                n++;
+            }
+        }
+    if (!n) return;
+    qsort(kept, n, sizeof *kept, kept_older);
+    for (i = 0; i < n && count > 0; i++) {
+        uint32_t at = kept[i].particle;
+        /* still out (removing one may have taken others with it) */
+        if (TUROK_MEM32(TUROK_MEM32(at + 0x1A8u) + 0x1A4u) != at || !particle_kept(at)) continue;
+        particle_kill(at);
+        count--;
+        s_particles_removed++;
+    }
+}
+
+void sub_000B9700(void)
+{
+    static clock_t reported;
+    uint32_t self = g_ecx, priority = TUROK_MEM32(g_esp + 4u);
+    int32_t count = (int32_t)TUROK_MEM32(g_esp + 8u);
+    if (priority < 5u && video_settings_keep_decals()) {
+        int32_t capacity = (int32_t)TUROK_MEM32(self + 0x18u), out = (int32_t)TUROK_MEM32(self + 0x24u);
+        int32_t share = (int32_t)TUROK_MEM32(self + 0x2F74u + priority * 4u), margin = capacity / 100;
+        if (share < capacity && out + count > share - margin)
+            particle_trim(self, out + count - (share - 3 * margin));
+    }
+    g_ecx = self;
+    sub_000B9700_gen();
+    if (g_eax) s_particles_refused++;
+    if ((s_particles_removed || s_particles_refused) &&
+            (!reported || clock() - reported > 10 * CLOCKS_PER_SEC)) {
+        fprintf(stderr, "[PARTICLES] %d of %d out; %u oldest kept removed, %u effects refused\n",
+                (int32_t)TUROK_MEM32(self + 0x24u), (int32_t)TUROK_MEM32(self + 0x18u),
+                s_particles_removed, s_particles_refused);
+        s_particles_removed = s_particles_refused = 0;
+        reported = clock();
+    }
+}
+
 /* ── Corpse trace (RECOMP_CORPSE_TRACE=1) ──────────────────────
  *
  * Finding what makes bodies vanish: when each actor first runs the Dead
