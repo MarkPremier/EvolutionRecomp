@@ -21,6 +21,12 @@ CPU-renderer build (about 9 fps on the title screen).
   58 fps, without flicker. Played through to the pteranodon flying level.
 - Controller works (any XInput pad, tested in play), as controller 1: move,
   look, jump, fire, weapon switching, pause and rumble.
+- PlayStation controllers work natively too (DualSense, DualSense Edge,
+  DualShock 4; USB or Bluetooth, with rumble), read through HID with no
+  Steam Input or DS4Windows: cross is A, circle B, square X, triangle Y,
+  options Start, create/share Back. An XInput pad, if present, keeps
+  controller 1 and the PlayStation pad takes the next. `RECOMP_SONY=0` turns
+  this off. Not yet tested with a real pad.
 - Keyboard and mouse work too, merged onto controller 1 (see Controls).
 - Dinosaurs and Turok cast shadows, with filtered (PCF) edges.
   `RECOMP_SHADOWS=0` turns them off. They reach further than on the Xbox:
