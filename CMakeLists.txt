@@ -137,6 +137,19 @@ if(MSVC)
             target_sources(${PROJECT_NAME} PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/turok_icon.rc")
         endif()
     endif()
+    # Microsoft's HLSL compiler beside the program as d3dcompiler_ms.dll
+    # (the renderer prefers it): Proton's own d3dcompiler_47 rejects the
+    # shaders, and under that name Wine cannot substitute its builtin. The
+    # Windows SDK's redistributable copy, when the SDK is installed.
+    set(RECOMP_D3DCOMPILER "$ENV{ProgramFiles\(x86\)}/Windows Kits/10/Redist/D3D/x64/d3dcompiler_47.dll"
+        CACHE FILEPATH "Redistributable d3dcompiler_47.dll to ship beside the program as d3dcompiler_ms.dll")
+    if(EXISTS "${RECOMP_D3DCOMPILER}")
+        add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+                           COMMAND ${CMAKE_COMMAND} -E copy_if_different "${RECOMP_D3DCOMPILER}"
+                                   "$<TARGET_FILE_DIR:${PROJECT_NAME}>/d3dcompiler_ms.dll")
+    else()
+        message(WARNING "RECOMP_D3DCOMPILER: ${RECOMP_D3DCOMPILER} not found; Proton (Steam Deck) will not draw")
+    endif()
     option(RECOMP_LTCG "Link-time code generation for Release builds" ON)
     if(RECOMP_LTCG)
         target_compile_options(${PROJECT_NAME} PRIVATE $<$<CONFIG:Release>:/GL>)
