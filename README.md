@@ -294,6 +294,8 @@ effect at once and are kept in `turok_settings.ini` beside the exe:
 | Heat haze | original, smooth, sharp (the flamethrower and rocket haze: original is the console's blocks; smooth filters the ripple; sharp also copies the screen at full resolution) | `RECOMP_SMOOTH_BUMP=1` (smooth) |
 | Keep bodies | off, on (off by default; also keeps decals; always off in the flying levels) | |
 
+The page shows ten rows at a time and scrolls: it follows the highlight as you move up and down, and the mouse wheel scrolls it (click a row, or press left and right, to change its value).
+
 An environment variable set by hand still wins at start-up.
 
 - **Widescreen** widens the view rather than stretching it (Hor+): the game's

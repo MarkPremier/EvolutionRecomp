@@ -894,6 +894,11 @@ typedef struct PageRow {
     char key[32];
     int label, value_text, last;
 } PageRow;
+/* Video Options: rows this far apart, VIDEO_SHOWN of them at a time (the
+ * page scrolls: video_scroll). */
+#define VIDEO_STEP  2.8f
+#define VIDEO_SHOWN 10
+
 typedef struct PageSpec {
     const char *history;
     int title, count;
@@ -1436,7 +1441,7 @@ static void look_not_inverted(Buffer *history)
 
 static int edit_video_screen(Node *screen, const char *unused)
 {
-    PageSpec page = {VIDEO_HST, TEXT_TITLE, SETTING_COUNT, 2.2f, TEXT_SCALE, NULL};
+    PageSpec page = {VIDEO_HST, TEXT_TITLE, SETTING_COUNT, VIDEO_STEP, TEXT_SCALE, NULL};
     int s;
     (void)unused;
     for (s = 0; s < SETTING_COUNT; s++) {
@@ -1886,6 +1891,7 @@ static void apply_setting(int setting)
 
 static void menu_pointer(void);
 static void controls_frame(void);
+static void video_scroll(void);
 
 static float s_mouse_turn[2];          /* yaw, pitch: stick units x seconds, not yet used */
 
@@ -1894,6 +1900,7 @@ void video_settings_mouse_look(void)
     double gain;
     int dx = 0, dy = 0, step;
     controls_frame();
+    video_scroll();
     menu_pointer();
     if (s_values[SET_MOUSE_LOOK] != 1) return;
     /* Raw look works through the on-foot turn functions. When they have not
@@ -2570,6 +2577,107 @@ static void controls_frame(void)
     else controls_watch();
 }
 
+/* ── Video Options, scrolled ──────────────────────────────────────
+ *
+ * More rows than the panel holds at a roomy spacing: the page is laid out
+ * at VIDEO_STEP and shows VIDEO_SHOWN rows from s_scroll_first, each label
+ * and its value widget (found by name: the setting's key, and the key with
+ * "ValueWidget") moved by their position's height (actor +0x3C, from which
+ * the game places the text and the entry's box each frame); the rows out of
+ * the window go far off the screen, where the pointer does not reach them --
+ * those before it far above, those after far below, since up and down move
+ * the focus to the nearest entry that way (wrapping to the far end). The window
+ * follows the focus as the keys or a pad move it, and the mouse wheel
+ * scrolls it (video_scroll_by). */
+#define SCROLL_OFF 1000.0f
+static struct { uint32_t actor; int row; float y; } s_scroll[2 * SETTING_COUNT];
+static int s_scroll_count, s_scroll_first;
+static uint32_t s_scroll_screens, s_scroll_focus;
+
+static void scroll_collect(uint32_t screen)
+{
+    uint32_t actor, text;
+    int n, k, rows = 0;
+    char name[48];
+    s_scroll_count = 0;
+    if (!guest_read(screen + 0x9C, &actor)) return;
+    for (n = 0; actor && n < 2048 && s_scroll_count < COUNT(s_scroll); n++, actor = next_actor(actor)) {
+        if (!guest_read(actor + 0x5C, &text) || text < 0x10000u) continue;
+        __try {
+            snprintf(name, sizeof name, "%s", (const char *)((uintptr_t)text + g_xbox_mem_offset));
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            continue;
+        }
+        for (k = 0; k < SETTING_COUNT; k++) {
+            size_t length = strlen(k_settings[k].key);
+            if (_strnicmp(name, k_settings[k].key, length) ||
+                    (name[length] && _stricmp(name + length, "ValueWidget")))
+                continue;
+            if (guest_float(actor + 0x3C, &s_scroll[s_scroll_count].y)) {
+                s_scroll[s_scroll_count].actor = actor;
+                s_scroll[s_scroll_count].row = k;
+                s_scroll_count++;
+                rows += !name[length];
+            }
+            break;
+        }
+    }
+    if (rows < SETTING_COUNT) s_scroll_count = 0;     /* not the page (or not built yet) */
+}
+
+static void scroll_place(void)
+{
+    int i;
+    for (i = 0; i < s_scroll_count; i++) {
+        int row = s_scroll[i].row;
+        float y = s_scroll[i].y + (row < s_scroll_first ? SCROLL_OFF :
+                                   row >= s_scroll_first + VIDEO_SHOWN ? -SCROLL_OFF :
+                                   (float)s_scroll_first * VIDEO_STEP);
+        uint32_t bits;
+        memcpy(&bits, &y, 4);
+        *(volatile uint32_t *)((uintptr_t)(s_scroll[i].actor + 0x3Cu) + g_xbox_mem_offset) = bits;
+    }
+}
+
+static void video_scroll(void)
+{
+    uint32_t screen = s_menu_screen, focus = 0;
+    int i, row = -1, first = s_scroll_first;
+    if (!s_in_menu || !screen) {
+        s_scroll_screens = 0;
+        s_scroll_count = 0;
+        return;
+    }
+    if (s_scroll_screens != s_menu_screens) {
+        scroll_collect(screen);
+        if (!s_scroll_count) return;               /* look again next frame */
+        s_scroll_screens = s_menu_screens;
+        s_scroll_first = first = 0;
+        s_scroll_focus = 0;
+    }
+    if (!s_scroll_count) return;
+    guest_read(screen + 0x198, &focus);
+    if (focus != s_scroll_focus) {                 /* the window follows a new focus */
+        s_scroll_focus = focus;
+        for (i = 0; i < s_scroll_count && row < 0; i++)
+            if (s_scroll[i].actor == focus) row = s_scroll[i].row;
+        if (row >= 0 && row < first) first = row;
+        if (row >= first + VIDEO_SHOWN) first = row - VIDEO_SHOWN + 1;
+    }
+    s_scroll_first = clamp(first, 0, SETTING_COUNT - VIDEO_SHOWN);
+    scroll_place();
+}
+
+/* The wheel on the page: `notches` up (positive) or down. 0 if the page
+ * does not scroll. */
+static int video_scroll_by(int notches)
+{
+    if (!s_scroll_count || s_scroll_screens != s_menu_screens) return 0;
+    s_scroll_first = clamp(s_scroll_first - notches, 0, SETTING_COUNT - VIDEO_SHOWN);
+    scroll_place();
+    return 1;
+}
+
 static void menu_pointer(void)
 {
     static int pointer_on, enter_was;
@@ -2657,7 +2765,9 @@ static void menu_pointer(void)
         if (hovered && is_option_row(hovered)) { if (!wrap_option(hovered, 0)) press("LEFT", 1); }
         else press(s_pause_menu ? "START" : "B", 1);
     }
-    if (wheel) {
+    if (wheel && video_scroll_by(wheel)) {
+        /* scrolled */
+    } else if (wheel) {
         int row = hovered ? is_option_row(hovered) : focus && is_option_row(focus);
         press(row ? (wheel > 0 ? "RIGHT" : "LEFT") : (wheel > 0 ? "UP" : "DOWN"), wheel > 0 ? wheel : -wheel);
     }
