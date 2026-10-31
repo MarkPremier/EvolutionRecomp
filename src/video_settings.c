@@ -2272,23 +2272,36 @@ static uint32_t next_actor(uint32_t actor)
     return 0;
 }
 
-/* The entry of `screen` at (x, y) on the 640x480 screen, or 0. */
+/* The entry of `screen` at (x, y) on the 640x480 screen, or 0. An entry's
+ * box (+0x2C4) is narrower than its text and sits a little below it (the
+ * main menu's are 100x20, 7 pixels low), so a click on the top of a word or
+ * its ends missed: off every box, the nearest within 14 pixels up or down
+ * and 90 across is the one, the closest row first, measured to where the
+ * text is (the box raised by a third of its height). */
 static uint32_t entry_at(uint32_t screen, float x, float y)
 {
-    uint32_t actor, owner, flags;
+    uint32_t actor, owner, flags, nearest = 0;
     int n;
-    float box[4];
+    float box[4], best = 1e9f;
     if (!guest_read(screen + 0x9C, &actor)) return 0;
     for (n = 0; actor && n < 2048; n++, actor = next_actor(actor)) {
-        if (is_widget(actor) && guest_read(actor + 0x48, &owner) && owner == screen &&
+        float dx, dy;
+        if (!(is_widget(actor) && guest_read(actor + 0x48, &owner) && owner == screen &&
                 guest_read(actor + 0x244, &flags) && (flags & 1) &&
                 guest_float(actor + 0x2C4, &box[0]) && guest_float(actor + 0x2C8, &box[1]) &&
                 guest_float(actor + 0x2CC, &box[2]) && guest_float(actor + 0x2D0, &box[3]) &&
-                box[2] > 0 && box[3] > 0 && box[2] < 2000 && box[3] < 2000 &&
-                x >= box[0] && x < box[0] + box[2] && y >= box[1] && y < box[1] + box[3])
-            return actor;
+                box[2] > 0 && box[3] > 0 && box[2] < 2000 && box[3] < 2000))
+            continue;
+        dx = x < box[0] ? box[0] - x : x >= box[0] + box[2] ? x - (box[0] + box[2]) : 0;
+        if (!dx && y >= box[1] && y < box[1] + box[3]) return actor;
+        box[1] -= box[3] / 3;
+        dy = y < box[1] ? box[1] - y : y >= box[1] + box[3] ? y - (box[1] + box[3]) : 0;
+        if (dx <= 90 && dy <= 14 && dy * 8 + dx < best) {
+            best = dy * 8 + dx;
+            nearest = actor;
+        }
     }
-    return 0;
+    return nearest;
 }
 
 /* A this-call into the game, on its thread between its own calls; its eax. */
@@ -2311,35 +2324,62 @@ static uint32_t guest_call(void (*function)(void), uint32_t self, int count, con
 
 /* Focus `actor` as the menu's up and down do (sub_000A86A0): the controller
  * goes with the focus -- a button press is the widget's that holds it -- so
- * the old entry gives it up (sub_0003A1F0) and the new one takes the same
- * (pad n: sub_00046D60(n); any pad: sub_00045390 or sub_00045450, as the old
- * one had it), then the screen's SetFocus tells both widgets. */
+ * the entry holding it gives it up (sub_0003A1F0) and the new one takes the
+ * same (pad n: sub_00046D60(n); any pad: sub_00045390 or sub_00045450, as
+ * the old one had it), then the screen's SetFocus tells both widgets. */
 extern void sub_00038C50(void), sub_0003AA60(void), sub_0003AA80(void), sub_0003A1F0(void);
 extern void sub_00046D60(void), sub_00045390(void), sub_00045450(void);
 
-static void set_focus(uint32_t screen, uint32_t old, uint32_t actor)
+static int screen_widget(uint32_t screen, uint32_t actor)
 {
-    uint32_t pad = 0, owner, arguments[2];
-    int handed = 0;
-    if (old && guest_read(old + 0x48, &owner) && owner == screen && is_widget(old)) {
-        uint32_t control = 0;
-        if (guest_read(old + 0x210, &control) && control && guest_call(sub_00038C50, old, 0, NULL)) {
-            if (guest_read(control + 4, &pad)) handed = (int)pad + 1;
-        } else if (guest_call(sub_0003AA60, old, 0, NULL)) {
-            handed = -1;
-        } else if (guest_call(sub_0003AA80, old, 0, NULL)) {
-            handed = -2;
-        }
-        if (handed) guest_call(sub_0003A1F0, old, 0, NULL);
-    }
+    uint32_t owner;
+    return actor && guest_read(actor + 0x48, &owner) && owner == screen && is_widget(actor);
+}
+
+/* How `widget` holds the controller: pad n + 1, -1 or -2 for any pad (as
+ * above), 0 if it does not. */
+static int controller_held(uint32_t widget)
+{
+    uint32_t control = 0, pad;
+    if (guest_read(widget + 0x210, &control) && control && guest_call(sub_00038C50, widget, 0, NULL))
+        return guest_read(control + 4, &pad) ? (int)pad + 1 : 0;
+    if (guest_call(sub_0003AA60, widget, 0, NULL)) return -1;
+    if (guest_call(sub_0003AA80, widget, 0, NULL)) return -2;
+    return 0;
+}
+
+/* Hand the controller to `actor` from whichever of the screen's entries has
+ * it: usually the focused one (`hint`), but not always -- back from another
+ * page, the focus can show one entry while the first (NEW GAME) still holds
+ * the controller, and a click on the shown one opened New Game. */
+static void give_controller(uint32_t screen, uint32_t hint, uint32_t actor)
+{
+    uint32_t holder = 0, entry, flags, arguments[1];
+    int handed = 0, n;
+    if (screen_widget(screen, hint) && (handed = controller_held(hint))) holder = hint;
+    if (!holder && guest_read(screen + 0x9C, &entry))
+        for (n = 0; entry && n < 2048; n++, entry = next_actor(entry))
+            if (screen_widget(screen, entry) && guest_read(entry + 0x244, &flags) && (flags & 1) &&
+                    (handed = controller_held(entry))) {
+                holder = entry;
+                break;
+            }
+    if (!holder || holder == actor) return;
+    guest_call(sub_0003A1F0, holder, 0, NULL);
     if (handed > 0) {
         arguments[0] = (uint32_t)handed;
         guest_call(sub_00046D60, actor, 1, arguments);
     } else if (handed == -1) {
         guest_call(sub_00045390, actor, 0, NULL);
-    } else if (handed == -2) {
+    } else {
         guest_call(sub_00045450, actor, 0, NULL);
     }
+}
+
+static void set_focus(uint32_t screen, uint32_t old, uint32_t actor)
+{
+    uint32_t arguments[2];
+    give_controller(screen, old, actor);
     arguments[0] = actor;
     arguments[1] = 1;
     guest_call(sub_000544D0, screen, 2, arguments);
@@ -2565,6 +2605,18 @@ static void menu_pointer(void)
         if (trace && (moved || pressed || wheel))
             fprintf(stderr, "[MENU] pointer %.0f,%.0f over %d hovered %08X focus %08X pressed %d wheel %d\n",
                     x, y, over, hovered, focus, pressed, wheel);
+        if (trace && pressed && !hovered) {     /* where the entries are */
+            uint32_t actor, flags;
+            float box[4];
+            int n;
+            guest_read(screen + 0x9C, &actor);
+            for (n = 0; actor && n < 2048; n++, actor = next_actor(actor))
+                if (screen_widget(screen, actor) && guest_read(actor + 0x244, &flags) &&
+                        guest_float(actor + 0x2C4, &box[0]) && guest_float(actor + 0x2C8, &box[1]) &&
+                        guest_float(actor + 0x2CC, &box[2]) && guest_float(actor + 0x2D0, &box[3]))
+                    fprintf(stderr, "[MENU]   entry %08X flags %X box %.0f,%.0f %.0fx%.0f\n",
+                            actor, flags, box[0], box[1], box[2], box[3]);
+        }
     }
 
     /* The keys or a pad moved the focus: the arrow goes until the mouse moves. */
@@ -2576,6 +2628,8 @@ static void menu_pointer(void)
     if (hovered && hovered != focus && (pressed || moved)) {
         set_focus(screen, focus, hovered);
         focus = hovered;
+    } else if (hovered && (pressed & 1)) {
+        give_controller(screen, focus, hovered);   /* the click is the entry under it */
     }
     if (over) { last_x = x; last_y = y; }
     last_focus = focus;
