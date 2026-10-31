@@ -1,5 +1,5 @@
 diff --git a/src/apu/apu_core.c b/src/apu/apu_core.c
-index c5c8a86..5f74bc1 100644
+index c5c8a86..843b28c 100644
 --- a/src/apu/apu_core.c
 +++ b/src/apu/apu_core.c
 @@ -85,9 +85,22 @@ uint8_t *mcpx_apu_ram_address(uint64_t addr, uint32_t bytes)
@@ -85,16 +85,18 @@ index c5c8a86..5f74bc1 100644
  /* The interrupt line, as the frame thread sees it. update_irq used to call
   * pci_irq_assert, which is an empty stub here, so DirectSound's service
   * routine never ran and no voice completion ever reached it. */
-@@ -135,6 +198,8 @@ extern void xbox_worker_stack_free(int slot);
+@@ -135,6 +198,10 @@ extern void xbox_worker_stack_free(int slot);
  extern uint32_t xbox_GetConnectedInterrupt(uint32_t vector);
  extern uint32_t xbox_AllocThreadTib(void);
  extern int xbox_IrqlBlocksInterrupts(void);
 +extern int xbox_AsyncGateEnter(int force);
 +extern void xbox_AsyncGateLeave(void);
++extern int xbox_InterruptLockTry(void);
++extern void xbox_InterruptLockLeave(void);
  extern int xbox_IrqlEnterInterrupt(int level);
  extern void xbox_IrqlLeaveInterrupt(int saved);
  #if defined(_MSC_VER)
-@@ -158,12 +223,15 @@ static void apu_deliver_irq(MCPXAPUState *d)
+@@ -158,12 +225,15 @@ static void apu_deliver_irq(MCPXAPUState *d)
      uint32_t kint, routine, context;
      uint8_t *guest_ram = (uint8_t *)(uintptr_t)xbox_GetMemoryOffset();
      apu_guest_fn fn;
@@ -113,7 +115,7 @@ index c5c8a86..5f74bc1 100644
      held_off = 0;
      kint = xbox_GetConnectedInterrupt(APU_VECTOR);
      if (!kint)
-@@ -185,7 +253,15 @@ static void apu_deliver_irq(MCPXAPUState *d)
+@@ -185,7 +255,27 @@ static void apu_deliver_irq(MCPXAPUState *d)
          return;
  
      qemu_mutex_unlock(&d->lock);
@@ -126,18 +128,32 @@ index c5c8a86..5f74bc1 100644
 +    }
      if (!xbox_GuestAudioGuardTryEnter()) {
 +        xbox_AsyncGateLeave();
++        xbox_worker_stack_free(slot);
++        qemu_mutex_lock(&d->lock);
++        return;
++    }
++    /* A KeSynchronizeExecution routine is running: on the console the line
++     * is masked until it returns, so the ISR waits for the next frame. */
++    if (!xbox_InterruptLockTry()) {
++        static unsigned waits;
++        if (!(waits++ & (waits < 10000 ? 1023u : 65535u)))
++            fprintf(stderr, "[APU] interrupt waited for KeSynchronizeExecution (%u times)\n", waits);
++        xbox_GuestAudioGuardLeave();
++        xbox_AsyncGateLeave();
          xbox_worker_stack_free(slot);
          qemu_mutex_lock(&d->lock);
          return;
-@@ -197,6 +273,7 @@ static void apu_deliver_irq(MCPXAPUState *d)
+@@ -196,7 +286,9 @@ static void apu_deliver_irq(MCPXAPUState *d)
+     g_esp -= 4; *(uint32_t *)(guest_ram + g_esp) = kint;
      g_esp -= 4; *(uint32_t *)(guest_ram + g_esp) = 0xDEADBEEFu;
      { int _irql = xbox_IrqlEnterInterrupt(16); fn(); xbox_IrqlLeaveInterrupt(_irql); }
++    xbox_InterruptLockLeave();
      xbox_GuestAudioGuardLeave();
 +    xbox_AsyncGateLeave();
      xbox_worker_stack_free(slot);
      qemu_mutex_lock(&d->lock);
  
-@@ -288,7 +365,7 @@ void mcpx_apu_write(void *opaque, hwaddr addr, uint64_t val,
+@@ -288,7 +380,7 @@ void mcpx_apu_write(void *opaque, hwaddr addr, uint64_t val,
          break;
      case NV_PAPU_FEMEMDATA:
          /* 'magic write' - value written to FEMEMADDR on notify completion */
@@ -146,7 +162,7 @@ index c5c8a86..5f74bc1 100644
          qatomic_set(&d->regs[addr], (uint32_t)val);
          break;
      default:
-@@ -405,8 +482,9 @@ void mcpx_apu_monitor_finalize(MCPXAPUState *d)
+@@ -405,8 +497,9 @@ void mcpx_apu_monitor_finalize(MCPXAPUState *d)
  /* Optional raw PCM capture for offline analysis (RECOMP_APU_WAV=<base>):
   * <base>.emu.raw = EP/DSP mixdown before the software mixer,
   * <base>.mix.raw = what is actually submitted to the audio backend. */
@@ -157,7 +173,7 @@ index c5c8a86..5f74bc1 100644
  
  static void apu_wav_capture(const int16_t (*buf)[2], int n, int mix)
  {
-@@ -419,12 +497,19 @@ static void apu_wav_capture(const int16_t (*buf)[2], int n, int mix)
+@@ -419,12 +512,19 @@ static void apu_wav_capture(const int16_t (*buf)[2], int n, int mix)
              g_wav_emu = fopen(path, "wb");
              snprintf(path, sizeof(path), "%s.mix.raw", base);
              g_wav_mix = fopen(path, "wb");
@@ -177,7 +193,7 @@ index c5c8a86..5f74bc1 100644
  }
  
  /* Declick: a sound that is cut off abruptly makes the mix step from a large
-@@ -569,8 +654,13 @@ static void throttle(MCPXAPUState *d)
+@@ -569,8 +669,13 @@ static void throttle(MCPXAPUState *d)
  
      int64_t now_us = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
  
@@ -192,7 +208,7 @@ index c5c8a86..5f74bc1 100644
          d->next_frame_time_us = now_us;
      }
  
-@@ -592,6 +682,68 @@ static void throttle(MCPXAPUState *d)
+@@ -592,6 +697,68 @@ static void throttle(MCPXAPUState *d)
   * se_frame - Process one audio frame (VP -> GP -> EP pipeline)
   * ============================================================ */
  
@@ -261,7 +277,7 @@ index c5c8a86..5f74bc1 100644
  static void se_frame(MCPXAPUState *d)
  {
      mcpx_apu_update_dsp_preference(d);
-@@ -614,9 +766,31 @@ static void se_frame(MCPXAPUState *d)
+@@ -614,9 +781,31 @@ static void se_frame(MCPXAPUState *d)
      float mixbins[NUM_MIXBINS][NUM_SAMPLES_PER_FRAME];
      memset(mixbins, 0, sizeof(mixbins));
  
@@ -296,7 +312,7 @@ index c5c8a86..5f74bc1 100644
  
      d->ep_frame_div++;
  
-@@ -695,9 +869,16 @@ static void *mcpx_apu_frame_thread(void *arg)
+@@ -695,9 +884,16 @@ static void *mcpx_apu_frame_thread(void *arg)
           * thread starved there indefinitely: Burnout 3 froze on its vehicle
           * select, blocked in voice_lock at raised IRQL, which in turn held
           * off every USB interrupt. */
@@ -316,7 +332,7 @@ index c5c8a86..5f74bc1 100644
      }
  
      qemu_mutex_unlock(&d->lock);
-@@ -845,27 +1026,27 @@ void mcpx_apu_dispatch_mmio(MCPXAPUState *d, hwaddr addr, uint64_t val,
+@@ -845,27 +1041,27 @@ void mcpx_apu_dispatch_mmio(MCPXAPUState *d, hwaddr addr, uint64_t val,
          /* VP region */
          hwaddr vp_addr = addr - 0x20000;
          if (is_write) {
@@ -2216,10 +2232,10 @@ index 3c7bdd4..ef06092 100644
      pState->dwPacketNumber = ++packet;
  }
 diff --git a/src/kernel/kernel.h b/src/kernel/kernel.h
-index 9f71e6b..68c1e70 100644
+index 9f71e6b..8479265 100644
 --- a/src/kernel/kernel.h
 +++ b/src/kernel/kernel.h
-@@ -806,6 +806,10 @@ KIRQL   __stdcall xbox_KeGetCurrentIrql(void);
+@@ -806,6 +806,17 @@ KIRQL   __stdcall xbox_KeGetCurrentIrql(void);
   * Device models ask before delivering an interrupt; raising IRQL masks the
   * line for the whole processor on hardware, not just for one thread. */
  int     xbox_IrqlBlocksInterrupts(void);
@@ -2227,14 +2243,54 @@ index 9f71e6b..68c1e70 100644
 +void    xbox_DpcGateLeave(void);
 +int     xbox_AsyncGateEnter(int force);   /* same gate, for an ISR; 0: hold off */
 +void    xbox_AsyncGateLeave(void);
++/* An interrupt's service routine and KeSynchronizeExecution's routines, one
++ * at a time (the one processor's interrupt spinlock). A device model takes
++ * it with Try around its ISR and holds the interrupt off when it cannot;
++ * KeSynchronizeExecution waits for it. The same thread may take it again. */
++int     xbox_InterruptLockTry(void);
++void    xbox_InterruptLockEnter(void);
++void    xbox_InterruptLockLeave(void);
  int     xbox_IrqlRaisedCount(void);
  int     xbox_IrqlEnterInterrupt(int level);     /* around host-run ISRs and DPCs */
  void    xbox_IrqlLeaveInterrupt(int saved);
 diff --git a/src/kernel/kernel_bridge.c b/src/kernel/kernel_bridge.c
-index 2f6660a..71b1959 100644
+index 2f6660a..7e6fdbc 100644
 --- a/src/kernel/kernel_bridge.c
 +++ b/src/kernel/kernel_bridge.c
-@@ -2372,21 +2372,132 @@ static int kernel_raise_interrupt(uint32_t vector)
+@@ -2164,10 +2164,10 @@ static int kernel_run_dpc(uint32_t dpc_va, uint32_t arg1, uint32_t arg2)
+  * ran -- the same failure as an unqueued DPC, and just as quiet: the driver
+  * asks for exclusive access, is told it did not get it, and skips the work.
+  *
+- * ponytail: no lock is taken. Nothing else here runs at ISR IRQL, and the one
+- * caller that matters is a device model on its own thread; if two of those
+- * ever contend, this wants the interrupt object's own lock rather than a
+- * global one.
++ * The routine runs holding the interrupt lock (xbox_InterruptLockEnter),
++ * which the APU model takes around its ISR: DirectSound's DPC moves what its
++ * ISR queued this way, and without the lock the ISR, on its own thread,
++ * linked into a list mid-move.
+  */
+ static void bridge_KeSynchronizeExecution(void)
+ {
+@@ -2189,7 +2189,17 @@ static void bridge_KeSynchronizeExecution(void)
+      * the dummy return address and the argument, so g_esp needs no fixup. */
+     g_esp -= 4; BRIDGE_MEM32(g_esp) = context;
+     g_esp -= 4; BRIDGE_MEM32(g_esp) = 0;
++    {
++        static volatile LONG seen;
++        if (!InterlockedExchange(&seen, 1)) {
++            fprintf(stderr, "  [KERNEL] KeSynchronizeExecution: routine 0x%08X runs under the interrupt lock\n",
++                    routine);
++            fflush(stderr);
++        }
++    }
++    xbox_InterruptLockEnter();
+     fn();
++    xbox_InterruptLockLeave();
+     /* g_eax is whatever the routine returned, which is this call's result. */
+ }
+ 
+@@ -2372,21 +2382,132 @@ static int kernel_raise_interrupt(uint32_t vector)
  #define NV2A_PCRTC_INTR_VBLANK (1u << 0)
  #define NV2A_VECTOR            3u
  
@@ -2375,7 +2431,7 @@ index 2f6660a..71b1959 100644
  
      if (!xbox_GetConnectedInterrupt(NV2A_VECTOR))
          return;
-@@ -2910,12 +3021,26 @@ static DWORD WINAPI kernel_timer_thread(LPVOID unused)
+@@ -2910,12 +3031,26 @@ static DWORD WINAPI kernel_timer_thread(LPVOID unused)
          long long now;
          int i;
  
@@ -2402,7 +2458,7 @@ index 2f6660a..71b1959 100644
          kernel_drain_dpcs();   /* deferred work, before due timers */
          now = (long long)GetTickCount64();
  
-@@ -2949,6 +3074,8 @@ static DWORD WINAPI kernel_timer_thread(LPVOID unused)
+@@ -2949,6 +3084,8 @@ static DWORD WINAPI kernel_timer_thread(LPVOID unused)
                  }
              }
          }
@@ -2411,7 +2467,7 @@ index 2f6660a..71b1959 100644
      }
  }
  
-@@ -3784,6 +3911,25 @@ static int bridge_async_io_enabled(void)
+@@ -3784,6 +3921,25 @@ static int bridge_async_io_enabled(void)
      return on;
  }
  
@@ -2437,7 +2493,7 @@ index 2f6660a..71b1959 100644
  /* ── NtReadFile (ordinal 219, 8 args = 32 bytes) ──────── */
  static void bridge_NtReadFile(void)
  {
-@@ -3807,13 +3953,30 @@ static void bridge_NtReadFile(void)
+@@ -3807,13 +3963,30 @@ static void bridge_NtReadFile(void)
          off.HighPart = (LONG)BRIDGE_MEM32(offset_va + 4);
          poff = &off;
      }
@@ -2472,7 +2528,7 @@ index 2f6660a..71b1959 100644
          const uint8_t *p = (const uint8_t *)XBOX_TO_NATIVE(buffer_va);
          uint32_t got = (uint32_t)ios.Information;
          /* The offset matters as much as the length. A title streaming a pack
-@@ -9849,10 +10012,15 @@ static void kernel_thunk_dispatch_body(void)
+@@ -9849,10 +10022,15 @@ static void kernel_thunk_dispatch_body(void)
      }
  
      {
@@ -2632,10 +2688,10 @@ index 3446243..a728be6 100644
                  info->AvailableAllocationUnits.QuadPart = 524288;
              }
 diff --git a/src/kernel/kernel_hal.c b/src/kernel/kernel_hal.c
-index 93dc2ec..200b507 100644
+index 93dc2ec..01412ff 100644
 --- a/src/kernel/kernel_hal.c
 +++ b/src/kernel/kernel_hal.c
-@@ -55,6 +55,78 @@ static volatile LONG g_guest_levels[256];
+@@ -55,6 +55,113 @@ static volatile LONG g_guest_levels[256];
  static RECOMP_TLS int t_isr_irql = -1;   /* this ISR/DPC thread's level; -1 = not in one */
  static volatile LONG g_isr_active;       /* host ISRs/DPCs in flight */
  
@@ -2679,6 +2735,41 @@ index 93dc2ec..200b507 100644
 +    InterlockedDecrement(&g_async_running);
 +}
 +
++/* The interrupt spinlock KeSynchronizeExecution takes on hardware: its
++ * routine runs at the interrupt's level holding the interrupt object's lock,
++ * so the ISR cannot run while it does. That is how DirectSound moves what its
++ * audio ISR queued (0x1B2353, from its DPC 0x1B27F8) onto lists it then works
++ * through unguarded; with no lock here, the ISR, on the APU thread, linked a
++ * voice in mid-move and the list pointed at garbage (a crash in
++ * sub_001B22DA's drain). One lock for every interrupt is stricter than one
++ * per interrupt object, and costs nothing here: the holders are short. */
++static CRITICAL_SECTION g_interrupt_lock;
++static INIT_ONCE g_interrupt_lock_once = INIT_ONCE_STATIC_INIT;
++
++static BOOL CALLBACK interrupt_lock_init(PINIT_ONCE once, PVOID parameter, PVOID *context)
++{
++    (void)once; (void)parameter; (void)context;
++    InitializeCriticalSectionAndSpinCount(&g_interrupt_lock, 4000);
++    return TRUE;
++}
++
++int xbox_InterruptLockTry(void)
++{
++    InitOnceExecuteOnce(&g_interrupt_lock_once, interrupt_lock_init, NULL, NULL);
++    return TryEnterCriticalSection(&g_interrupt_lock) ? 1 : 0;
++}
++
++void xbox_InterruptLockEnter(void)
++{
++    InitOnceExecuteOnce(&g_interrupt_lock_once, interrupt_lock_init, NULL, NULL);
++    EnterCriticalSection(&g_interrupt_lock);
++}
++
++void xbox_InterruptLockLeave(void)
++{
++    LeaveCriticalSection(&g_interrupt_lock);
++}
++
 +int xbox_DpcGateEnter(void)
 +{
 +    static ULONGLONG blocked_since;
@@ -2714,7 +2805,7 @@ index 93dc2ec..200b507 100644
  static KIRQL irql_swap(KIRQL v)
  {
      if (t_isr_irql >= 0) { KIRQL o = (KIRQL)t_isr_irql; t_isr_irql = v; return o; }
-@@ -62,8 +134,11 @@ static KIRQL irql_swap(KIRQL v)
+@@ -62,8 +169,11 @@ static KIRQL irql_swap(KIRQL v)
      if (old != v) {
          if (v >= DISPATCH_LEVEL)
              InterlockedIncrement(&g_guest_levels[v]);
