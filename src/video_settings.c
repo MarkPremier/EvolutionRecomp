@@ -56,6 +56,7 @@ extern void nv2a_gpu_replace_texture(uint64_t hash, const uint32_t *bgra, uint32
 extern void nv2a_gpu_set_texture_replacements(int on);
 extern void nv2a_gpu_set_anisotropy(int level);
 extern void nv2a_gpu_set_msaa(int samples);
+extern void nv2a_gpu_set_heat_haze(int mode);
 
 /* ── Settings ─────────────────────────────────────────────────── */
 
@@ -63,7 +64,7 @@ extern void nv2a_gpu_set_msaa(int samples);
  * through its values (shown, and written in turok_settings.ini, as their
  * text). */
 enum { SET_RESOLUTION, SET_ASPECT, SET_DISPLAY, SET_VSYNC, SET_FRAMES, SET_ANISOTROPY, SET_MSAA, SET_DRAW_DISTANCE,
-       SET_BODIES, SET_ICONS,
+       SET_HEAT_HAZE, SET_BODIES, SET_ICONS,
        SET_MOUSE_LOOK, SET_MOUSE_SPEED, SETTING_COUNT };
 
 typedef struct VideoSetting {
@@ -82,6 +83,7 @@ static const char *const k_frames[] = {"30", "60", "120", "144", "240", "display
 static const char *const k_anisotropy[] = {"off", "2x", "4x", "8x", "16x"};
 static const char *const k_msaa[] = {"off", "2x", "4x", "8x"};
 static const char *const k_distances[] = {"normal", "2x", "4x", "8x"};
+static const char *const k_hazes[] = {"original", "smooth", "sharp"};
 static const char *const k_icons[] = {"xbox", "pc"};
 static const char *const k_mouse_looks[] = {"stick", "raw"};
 static const char *const k_speeds[] = {"1", "2", "3", "4", "5", "6", "7", "8", "9", "10"};
@@ -96,6 +98,7 @@ static const VideoSetting k_settings[SETTING_COUNT] = {
     {"anisotropy", "anisotropy", k_anisotropy, COUNT(k_anisotropy), 4},
     {"msaa", "msaa", k_msaa, COUNT(k_msaa), 0},
     {"draw_distance", "draw distance", k_distances, COUNT(k_distances), 1},
+    {"heat_haze", "heat haze", k_hazes, COUNT(k_hazes), 0},
     {"keep_bodies", "keep bodies", k_switches, COUNT(k_switches), 0},
     {"button_icons", "button icons", k_icons, COUNT(k_icons), 0},
     {"mouse_look", "mouse look", k_mouse_looks, COUNT(k_mouse_looks), 1},
@@ -1433,7 +1436,7 @@ static void look_not_inverted(Buffer *history)
 
 static int edit_video_screen(Node *screen, const char *unused)
 {
-    PageSpec page = {VIDEO_HST, TEXT_TITLE, SETTING_COUNT, 2.3f, TEXT_SCALE, NULL};
+    PageSpec page = {VIDEO_HST, TEXT_TITLE, SETTING_COUNT, 2.2f, TEXT_SCALE, NULL};
     int s;
     (void)unused;
     for (s = 0; s < SETTING_COUNT; s++) {
@@ -1860,6 +1863,7 @@ static void apply_setting(int setting)
     case SET_FRAMES: apply_frames(); break;
     case SET_ANISOTROPY: nv2a_gpu_set_anisotropy(1 << s_values[SET_ANISOTROPY]); break;
     case SET_MSAA: nv2a_gpu_set_msaa(1 << s_values[SET_MSAA]); break;
+    case SET_HEAT_HAZE: nv2a_gpu_set_heat_haze(s_values[SET_HEAT_HAZE]); break;
     case SET_ICONS: nv2a_gpu_set_texture_replacements(s_values[SET_ICONS]); break;
     case SET_MOUSE_LOOK: xbox_KbmSetRawMouse(s_values[SET_MOUSE_LOOK]); s_mouse_raw = s_values[SET_MOUSE_LOOK]; break;
     case SET_DRAW_DISTANCE:           /* read each frame */
