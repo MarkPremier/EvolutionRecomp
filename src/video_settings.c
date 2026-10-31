@@ -893,11 +893,15 @@ static const char *const k_template_values[] = {"autoaimValueWidget", "hudValueW
 typedef struct PageRow {
     char key[32];
     int label, value_text, last;
+    const char *history;  /* another page's history item it shows, or NULL */
+    int item;             /* (its item) */
 } PageRow;
 /* Video Options: rows this far apart, VIDEO_SHOWN of them at a time (the
- * page scrolls: video_scroll). */
+ * page scrolls: video_scroll). Its rows are the settings up to Mouse look;
+ * Mouse speed, the last, is on PC Controls (still Video.hst's item). */
 #define VIDEO_STEP  2.8f
 #define VIDEO_SHOWN 10
+#define VIDEO_ROWS  SET_MOUSE_SPEED
 
 typedef struct PageSpec {
     const char *history;
@@ -906,6 +910,16 @@ typedef struct PageSpec {
     const char *font;     /* the rows' font, or NULL for the template's */
     PageRow rows[16];
 } PageSpec;
+
+static const char *row_history(const PageSpec *page, int s)
+{
+    return page->rows[s].history ? page->rows[s].history : page->history;
+}
+
+static int row_item(const PageSpec *page, int s)
+{
+    return page->rows[s].history ? page->rows[s].item : s + 1;
+}
 
 static int is_template(const char *name)
 {
@@ -986,10 +1000,10 @@ static int make_page(Node *screen, const PageSpec *page)
         set_byte(child(label_vars, "W_TMN"), page->rows[s].label);
         set_text(child(box_vars, "W_TMF"), OPTIONS_TXM);
         set_byte(child(box_vars, "W_TMN"), page->rows[s].value_text);
-        set_text(child(box_vars, "W_THF"), page->history);
-        set_byte(child(box_vars, "W_THI"), s + 1);
-        set_text(child(box_vars, "A_HIF"), page->history);
-        set_byte(child(box_vars, "A_HII"), s + 1);
+        set_text(child(box_vars, "W_THF"), row_history(page, s));
+        set_byte(child(box_vars, "W_THI"), row_item(page, s));
+        set_text(child(box_vars, "A_HIF"), row_history(page, s));
+        set_byte(child(box_vars, "A_HII"), row_item(page, s));
         /* Another font: the value box names one (W_FON); the label takes a
          * copy, as Control Setup's labels name theirs. */
         if (page->font && child(box_vars, "W_FON")) {
@@ -1050,13 +1064,13 @@ static int make_page(Node *screen, const PageSpec *page)
         int last = page->rows[s].last;
         snprintf(name, sizeof name, "%s > %d", row_names[s], last);
         set_text(link, name);
-        set_text(child(cause, "HSTF"), page->history);
-        set_byte(child(cause, "ITM"), s + 1);
+        set_text(child(cause, "HSTF"), row_history(page, s));
+        set_byte(child(cause, "ITM"), row_item(page, s));
         set_byte(child(cause, "VAL"), last);
         for (j = 0; events && j < events->count; j++)
             if (events->children[j]->value_size == 4 && !memcmp(events->children[j]->value, "Hist", 4)) {
-                set_text(child(events->children[j], "HSTF"), page->history);
-                set_byte(child(events->children[j], "ITM"), s + 1);
+                set_text(child(events->children[j], "HSTF"), row_history(page, s));
+                set_byte(child(events->children[j], "ITM"), row_item(page, s));
                 set_byte(child(events->children[j], "VAL"), last);
             }
         node_insert(deity, deity->count, link);
@@ -1441,10 +1455,10 @@ static void look_not_inverted(Buffer *history)
 
 static int edit_video_screen(Node *screen, const char *unused)
 {
-    PageSpec page = {VIDEO_HST, TEXT_TITLE, SETTING_COUNT, VIDEO_STEP, TEXT_SCALE, NULL};
+    PageSpec page = {VIDEO_HST, TEXT_TITLE, VIDEO_ROWS, VIDEO_STEP, TEXT_SCALE, NULL};
     int s;
     (void)unused;
-    for (s = 0; s < SETTING_COUNT; s++) {
+    for (s = 0; s < VIDEO_ROWS; s++) {
         snprintf(page.rows[s].key, sizeof page.rows[s].key, "%s", k_settings[s].key);
         page.rows[s].label = text_label(s);
         page.rows[s].value_text = text_label(s) + 1;
@@ -1454,10 +1468,11 @@ static int edit_video_screen(Node *screen, const char *unused)
 }
 
 /* Every row's value is a key name; the last one, "press a key", only while
- * the row waits for its key (a step past the last key reads as none). */
+ * the row waits for its key (a step past the last key reads as none). Then
+ * Mouse speed, Video.hst's item as Video Options' rows are. */
 static int edit_controls_screen(Node *screen, const char *unused)
 {
-    PageSpec page = {CONTROLS_HST, TEXT_CONTROLS_TITLE, BIND_COUNT, 2.35f, TEXT_SCALE, "$/Data/Fonts/Proportional.fnt"};
+    PageSpec page = {CONTROLS_HST, TEXT_CONTROLS_TITLE, BIND_COUNT + 1, 2.2f, TEXT_SCALE, "$/Data/Fonts/Proportional.fnt"};
     int b;
     (void)unused;
     for (b = 0; b < BIND_COUNT; b++) {
@@ -1466,6 +1481,12 @@ static int edit_controls_screen(Node *screen, const char *unused)
         page.rows[b].value_text = TEXT_KEYS;
         page.rows[b].last = KEY_COUNT - 1;
     }
+    snprintf(page.rows[b].key, sizeof page.rows[b].key, "%s", k_settings[SET_MOUSE_SPEED].key);
+    page.rows[b].label = text_label(SET_MOUSE_SPEED);
+    page.rows[b].value_text = text_label(SET_MOUSE_SPEED) + 1;
+    page.rows[b].last = k_settings[SET_MOUSE_SPEED].count - 1;
+    page.rows[b].history = VIDEO_HST;
+    page.rows[b].item = SET_MOUSE_SPEED + 1;
     return make_page(screen, &page);
 }
 
@@ -1556,7 +1577,8 @@ static int write_patch(const char *game_dir)
     add_text(&files[OPTIONS_TEXT].data, TEXT_ENTRY, "VIDEO OPTIONS");
     add_text(&files[OPTIONS_TEXT].data, TEXT_TITLE, "Video Options");
     for (s = 0; s < SETTING_COUNT; s++) {
-        add_text(&files[OPTIONS_TEXT].data, text_label(s), k_settings[s].label);
+        /* Mouse speed's row is on PC Controls, whose labels are title case */
+        (s == SET_MOUSE_SPEED ? add_title_text : add_text)(&files[OPTIONS_TEXT].data, text_label(s), k_settings[s].label);
         for (i = 0; i < k_settings[s].count; i++)
             add_text(&files[OPTIONS_TEXT].data, text_label(s) + 1 + i, k_settings[s].values[i]);
     }
@@ -2590,7 +2612,7 @@ static void controls_frame(void)
  * follows the focus as the keys or a pad move it, and the mouse wheel
  * scrolls it (video_scroll_by). */
 #define SCROLL_OFF 1000.0f
-static struct { uint32_t actor; int row; float y; } s_scroll[2 * SETTING_COUNT];
+static struct { uint32_t actor; int row; float y; } s_scroll[2 * VIDEO_ROWS];
 static int s_scroll_count, s_scroll_first;
 static uint32_t s_scroll_screens, s_scroll_focus;
 
@@ -2608,7 +2630,7 @@ static void scroll_collect(uint32_t screen)
         } __except (EXCEPTION_EXECUTE_HANDLER) {
             continue;
         }
-        for (k = 0; k < SETTING_COUNT; k++) {
+        for (k = 0; k < VIDEO_ROWS; k++) {
             size_t length = strlen(k_settings[k].key);
             if (_strnicmp(name, k_settings[k].key, length) ||
                     (name[length] && _stricmp(name + length, "ValueWidget")))
@@ -2622,7 +2644,7 @@ static void scroll_collect(uint32_t screen)
             break;
         }
     }
-    if (rows < SETTING_COUNT) s_scroll_count = 0;     /* not the page (or not built yet) */
+    if (rows < VIDEO_ROWS) s_scroll_count = 0;        /* not the page (or not built yet) */
 }
 
 static void scroll_place(void)
@@ -2664,7 +2686,7 @@ static void video_scroll(void)
         if (row >= 0 && row < first) first = row;
         if (row >= first + VIDEO_SHOWN) first = row - VIDEO_SHOWN + 1;
     }
-    s_scroll_first = clamp(first, 0, SETTING_COUNT - VIDEO_SHOWN);
+    s_scroll_first = clamp(first, 0, VIDEO_ROWS - VIDEO_SHOWN);
     scroll_place();
 }
 
@@ -2673,7 +2695,7 @@ static void video_scroll(void)
 static int video_scroll_by(int notches)
 {
     if (!s_scroll_count || s_scroll_screens != s_menu_screens) return 0;
-    s_scroll_first = clamp(s_scroll_first - notches, 0, SETTING_COUNT - VIDEO_SHOWN);
+    s_scroll_first = clamp(s_scroll_first - notches, 0, VIDEO_ROWS - VIDEO_SHOWN);
     scroll_place();
     return 1;
 }

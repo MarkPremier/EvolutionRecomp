@@ -289,7 +289,7 @@ effect at once and are kept in `turok_settings.ini` beside the exe:
 | MSAA | off, 2x, 4x, 8x | |
 | Button icons | xbox, pc | |
 | Mouse look | raw, stick (raw falls back to stick while the on-foot turning is not running: flying, vehicles, turrets) | |
-| Mouse speed | 1 to 10 (5 by default; each step 1.4x) | |
+| Mouse speed | 1 to 10 (5 by default; each step 1.4x; on the PC Controls page, kept with these settings) | |
 | Draw distance | normal, 2x, 4x, 8x (2x by default) | |
 | Heat haze | original, smooth, sharp (the flamethrower and rocket haze: original is the console's blocks; smooth filters the ripple; sharp also copies the screen at full resolution) | `RECOMP_SMOOTH_BUMP=1` (smooth) |
 | Keep bodies | off, on (off by default; also keeps decals; always off in the flying levels) | |
