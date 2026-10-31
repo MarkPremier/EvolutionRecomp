@@ -126,6 +126,44 @@ void sub_001B23DD(void)
     sub_001B23DD_gen();
 }
 
+/*
+ * The same handler's pass over the voices to service (sub_001B22DA, this =
+ * DirectSound) walks three lists at +0x730 (8 bytes a head) and empties the
+ * one at +0x748, calling each entry's vfunc +0x14. With the title relinking
+ * them on its own thread, a head was once left pointing at 0xFE0001F0 --
+ * not memory -- and the call through it took the process down. Each list is
+ * checked first: a link outside RAM, or one that does not come back to its
+ * head, empties that list (its voices miss this notification) instead.
+ */
+extern void sub_001B22DA_gen(void);
+extern size_t g_xbox_total_ram;
+
+/* In RAM, or in its kernel mirror at 0x80000000 (where DirectSound's own
+ * allocations sit). */
+static int dsound_link_ok(uint32_t link)
+{
+    uint32_t ram = (uint32_t)g_xbox_total_ram, low = link & 0x7FFFFFFFu;
+    return !(link & 3u) && low >= 0x10000u && low < ram && (link < ram || link >= 0x80000000u);
+}
+
+void sub_001B22DA(void)
+{
+    static const uint32_t heads[] = {0x730u, 0x738u, 0x740u, 0x748u};
+    uint32_t self = g_ecx;
+    unsigned i;
+    for (i = 0; i < sizeof heads / sizeof *heads; i++) {
+        uint32_t head = self + heads[i], link = TUROK_MEM32(head), steps = 0;
+        while (link != head && dsound_link_ok(link) && steps++ < 4096u) link = TUROK_MEM32(link);
+        if (link != head) {
+            fprintf(stderr, "[DSOUND] list +0x%X links to %08X; emptied\n", heads[i], link);
+            TUROK_MEM32(head) = head;
+            TUROK_MEM32(head + 4u) = head;
+        }
+    }
+    g_ecx = self;
+    sub_001B22DA_gen();
+}
+
 /* ── D3D KickOff without the write-combine handshake ───────────
  *
  * Before publishing DMA_PUT, KickOff (sub_001984B0) and its flush helper
