@@ -897,11 +897,12 @@ typedef struct PageRow {
     int item;             /* (its item) */
 } PageRow;
 /* Video Options: rows this far apart, VIDEO_SHOWN of them at a time (the
- * page scrolls: video_scroll). Its rows are the settings up to Mouse look;
- * Mouse speed, the last, is on PC Controls (still Video.hst's item). */
+ * page scrolls: video_scroll). Its rows are the settings up to Button
+ * icons; Mouse look and Mouse speed, the last two, are on PC Controls (still
+ * Video.hst's items). */
 #define VIDEO_STEP  2.8f
 #define VIDEO_SHOWN 10
-#define VIDEO_ROWS  SET_MOUSE_SPEED
+#define VIDEO_ROWS  SET_MOUSE_LOOK
 
 typedef struct PageSpec {
     const char *history;
@@ -1469,11 +1470,12 @@ static int edit_video_screen(Node *screen, const char *unused)
 
 /* Every row's value is a key name; the last one, "press a key", only while
  * the row waits for its key (a step past the last key reads as none). Then
- * Mouse speed, Video.hst's item as Video Options' rows are. */
+ * Mouse look and Mouse speed, Video.hst's items as Video Options' rows are. */
 static int edit_controls_screen(Node *screen, const char *unused)
 {
-    PageSpec page = {CONTROLS_HST, TEXT_CONTROLS_TITLE, BIND_COUNT + 1, 2.2f, TEXT_SCALE, "$/Data/Fonts/Proportional.fnt"};
-    int b;
+    PageSpec page = {CONTROLS_HST, TEXT_CONTROLS_TITLE, BIND_COUNT + SETTING_COUNT - VIDEO_ROWS, 2.05f, TEXT_SCALE,
+                     "$/Data/Fonts/Proportional.fnt"};
+    int b, s;
     (void)unused;
     for (b = 0; b < BIND_COUNT; b++) {
         snprintf(page.rows[b].key, sizeof page.rows[b].key, "%s", k_binds[b].key);
@@ -1481,12 +1483,14 @@ static int edit_controls_screen(Node *screen, const char *unused)
         page.rows[b].value_text = TEXT_KEYS;
         page.rows[b].last = KEY_COUNT - 1;
     }
-    snprintf(page.rows[b].key, sizeof page.rows[b].key, "%s", k_settings[SET_MOUSE_SPEED].key);
-    page.rows[b].label = text_label(SET_MOUSE_SPEED);
-    page.rows[b].value_text = text_label(SET_MOUSE_SPEED) + 1;
-    page.rows[b].last = k_settings[SET_MOUSE_SPEED].count - 1;
-    page.rows[b].history = VIDEO_HST;
-    page.rows[b].item = SET_MOUSE_SPEED + 1;
+    for (s = VIDEO_ROWS; s < SETTING_COUNT; s++, b++) {
+        snprintf(page.rows[b].key, sizeof page.rows[b].key, "%s", k_settings[s].key);
+        page.rows[b].label = text_label(s);
+        page.rows[b].value_text = text_label(s) + 1;
+        page.rows[b].last = k_settings[s].count - 1;
+        page.rows[b].history = VIDEO_HST;
+        page.rows[b].item = s + 1;
+    }
     return make_page(screen, &page);
 }
 
@@ -1577,10 +1581,11 @@ static int write_patch(const char *game_dir)
     add_text(&files[OPTIONS_TEXT].data, TEXT_ENTRY, "VIDEO OPTIONS");
     add_text(&files[OPTIONS_TEXT].data, TEXT_TITLE, "Video Options");
     for (s = 0; s < SETTING_COUNT; s++) {
-        /* Mouse speed's row is on PC Controls, whose labels are title case */
-        (s == SET_MOUSE_SPEED ? add_title_text : add_text)(&files[OPTIONS_TEXT].data, text_label(s), k_settings[s].label);
+        /* The rows on PC Controls (from VIDEO_ROWS on) are title case, as its labels are */
+        (s >= VIDEO_ROWS ? add_title_text : add_text)(&files[OPTIONS_TEXT].data, text_label(s), k_settings[s].label);
         for (i = 0; i < k_settings[s].count; i++)
-            add_text(&files[OPTIONS_TEXT].data, text_label(s) + 1 + i, k_settings[s].values[i]);
+            (s >= VIDEO_ROWS ? add_title_text : add_text)(&files[OPTIONS_TEXT].data, text_label(s) + 1 + i,
+                                                          k_settings[s].values[i]);
     }
     add_text(&files[OPTIONS_TEXT].data, TEXT_CONTROLS, "PC CONTROLS");
     add_text(&files[OPTIONS_TEXT].data, TEXT_CONTROLS_TITLE, "PC Controls");
