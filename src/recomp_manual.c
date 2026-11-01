@@ -1742,3 +1742,32 @@ void recomp_unimpl(const char *text, uint32_t va)
     }
     if (stop) abort();
 }
+
+/* ── Flight-path turns skip rotation collision (sub_00042450) ──
+ * The movement integrator (thiscall; arg 1 an absolute orientation
+ * quaternion, arg 2 a rotation delta, then position arguments) turns an
+ * actor to arg 1 in collision-checked steps unless its flags (+0x34 bit 2)
+ * say rotation ignores collision, when it simply takes the quaternion. The
+ * scripted flight path's mover (sub_00080CD0, returning to 0x80EB1) calls
+ * it with the path's orientation and nothing else. Escape Flight's VTOLs
+ * climb to the play area's ceiling on such a path; at 120 fps their smaller
+ * steps bring them close enough that turning the box touches the ceiling,
+ * and the blocked turn left the ship tumbling in every direction. A path's
+ * own orientation is not something collision should bend: for that caller
+ * the turn is taken as given. RECOMP_PATH_TURN_DIRECT=0 turns this off. */
+void sub_00042450_gen(void);
+void sub_00042450(void)
+{
+    static int direct = -1;
+    uint32_t actor = g_ecx, flags;
+    int lift;
+    if (direct < 0) {
+        const char *value = getenv("RECOMP_PATH_TURN_DIRECT");
+        direct = !(value && *value == '0');
+    }
+    flags = TUROK_MEM32(actor + 0x34u);
+    lift = direct && TUROK_MEM32(g_esp) == 0x00080EB1u && TUROK_MEM32(g_esp + 4) && !(flags & 4u);
+    if (lift) TUROK_MEM32(actor + 0x34u) = flags | 4u;
+    sub_00042450_gen();
+    if (lift) TUROK_MEM32(actor + 0x34u) &= ~4u;
+}
