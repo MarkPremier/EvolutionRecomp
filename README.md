@@ -38,7 +38,7 @@ CPU-renderer build (about 9 fps on the title screen).
   edge beside you showed as a straight lit line on shadowed walls), so
   creatures beside and behind you (and at the sides of a
   widescreen view) cast them too, at 2048x2048 (the game's own 16 units
-  ahead at 512x512). A creature out of view still casts its shadow; the
+  ahead at 512x512), drawn on the GPU at 4096 by default (Shadow detail). A creature out of view still casts its shadow; the
   game drew only those of creatures on screen. `RECOMP_SHADOW_DISTANCE`,
   `RECOMP_SHADOW_AROUND`, `RECOMP_SHADOW_MAP` and `RECOMP_SHADOW_OFFSCREEN`
   change them; 16, 0, 512 and 0 give the original.
@@ -301,6 +301,7 @@ effect at once and are kept in `turok_settings.ini` beside the exe:
 | Mouse speed | 1 to 10 (5 by default; each step 1.4x; on the PC Controls page, kept with these settings) | |
 | Draw distance | normal, 2x, 4x, 8x (2x by default) | |
 | Heat haze | original, smooth, sharp (the flamethrower and rocket haze: original is the console's blocks; smooth filters the ripple; sharp also copies the screen at full resolution) | `RECOMP_SMOOTH_BUMP=1` (smooth) |
+| Shadow detail | normal, 2x, 4x (the shadow map drawn on the GPU at 2048, 4096 or 8192 texels a side: sharper, less blocky shadow edges in every level; 2x is the default, normal is lighter on a Steam Deck) | `RECOMP_SHADOW_SCALE=1/2/4` |
 | Keep bodies | off, on (off by default; also keeps decals; always off in the flying levels) | |
 
 The page shows ten rows at a time and scrolls: it follows the highlight as you move up and down, and the mouse wheel scrolls it (click a row, or press left and right, to change its value).

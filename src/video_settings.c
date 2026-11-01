@@ -57,6 +57,7 @@ extern void nv2a_gpu_set_texture_replacements(int on);
 extern void nv2a_gpu_set_anisotropy(int level);
 extern void nv2a_gpu_set_msaa(int samples);
 extern void nv2a_gpu_set_heat_haze(int mode);
+extern void nv2a_gpu_set_shadow_scale(int factor);
 
 /* ── Settings ─────────────────────────────────────────────────── */
 
@@ -64,7 +65,7 @@ extern void nv2a_gpu_set_heat_haze(int mode);
  * through its values (shown, and written in turok_settings.ini, as their
  * text). */
 enum { SET_RESOLUTION, SET_ASPECT, SET_DISPLAY, SET_VSYNC, SET_FRAMES, SET_ANISOTROPY, SET_MSAA, SET_DRAW_DISTANCE,
-       SET_HEAT_HAZE, SET_BODIES, SET_ICONS,
+       SET_HEAT_HAZE, SET_SHADOWS, SET_BODIES, SET_ICONS,
        SET_MOUSE_LOOK, SET_MOUSE_SPEED, SETTING_COUNT };
 
 typedef struct VideoSetting {
@@ -84,6 +85,8 @@ static const char *const k_anisotropy[] = {"off", "2x", "4x", "8x", "16x"};
 static const char *const k_msaa[] = {"off", "2x", "4x", "8x"};
 static const char *const k_distances[] = {"normal", "2x", "4x", "8x"};
 static const char *const k_hazes[] = {"original", "smooth", "sharp"};
+/* Shadow maps on the GPU at 1, 2 or 4 times the game's 2048 (value n: 1 << n). */
+static const char *const k_shadow_details[] = {"normal", "2x", "4x"};
 static const char *const k_icons[] = {"xbox", "pc"};
 static const char *const k_mouse_looks[] = {"stick", "raw"};
 static const char *const k_speeds[] = {"1", "2", "3", "4", "5", "6", "7", "8", "9", "10"};
@@ -99,6 +102,7 @@ static const VideoSetting k_settings[SETTING_COUNT] = {
     {"msaa", "msaa", k_msaa, COUNT(k_msaa), 0},
     {"draw_distance", "draw distance", k_distances, COUNT(k_distances), 1},
     {"heat_haze", "heat haze", k_hazes, COUNT(k_hazes), 0},
+    {"shadow_detail", "shadow detail", k_shadow_details, COUNT(k_shadow_details), 1},
     {"keep_bodies", "keep bodies", k_switches, COUNT(k_switches), 0},
     {"button_icons", "button icons", k_icons, COUNT(k_icons), 0},
     {"mouse_look", "mouse look", k_mouse_looks, COUNT(k_mouse_looks), 1},
@@ -709,15 +713,28 @@ static const struct VideoMenu {
 #define MENU_COUNT (sizeof k_menus / sizeof *k_menus)
 
 /* Options.txm keys from 5 on: the entry, the page's title, then each row's
- * label followed by its values. */
+ * label followed by its values. Keys past 187 do not show, and the controls
+ * page's key names come last, so a row whose values another row already has
+ * shows those (values_of) and takes only its label's key. */
 #define TEXT_ENTRY 5
 #define TEXT_TITLE 6
+
+static int values_of(int setting)
+{
+    return setting == SET_SHADOWS ? SET_DRAW_DISTANCE : setting == SET_BODIES ? SET_VSYNC : setting;
+}
 
 static int text_label(int setting)
 {
     int key = TEXT_TITLE + 1, s;
-    for (s = 0; s < setting; s++) key += 1 + k_settings[s].count;
+    for (s = 0; s < setting; s++) key += 1 + (values_of(s) == s ? k_settings[s].count : 0);
     return key;
+}
+
+/* The key of `setting`'s first value. */
+static int text_values(int setting)
+{
+    return text_label(values_of(setting)) + 1;
 }
 
 /* Then the controls page's: its entry, title, each row's label, and the key
@@ -1462,7 +1479,7 @@ static int edit_video_screen(Node *screen, const char *unused)
     for (s = 0; s < VIDEO_ROWS; s++) {
         snprintf(page.rows[s].key, sizeof page.rows[s].key, "%s", k_settings[s].key);
         page.rows[s].label = text_label(s);
-        page.rows[s].value_text = text_label(s) + 1;
+        page.rows[s].value_text = text_values(s);
         page.rows[s].last = k_settings[s].count - 1;
     }
     return make_page(screen, &page);
@@ -1486,7 +1503,7 @@ static int edit_controls_screen(Node *screen, const char *unused)
     for (s = VIDEO_ROWS; s < SETTING_COUNT; s++, b++) {
         snprintf(page.rows[b].key, sizeof page.rows[b].key, "%s", k_settings[s].key);
         page.rows[b].label = text_label(s);
-        page.rows[b].value_text = text_label(s) + 1;
+        page.rows[b].value_text = text_values(s);
         page.rows[b].last = k_settings[s].count - 1;
         page.rows[b].history = VIDEO_HST;
         page.rows[b].item = s + 1;
@@ -1583,7 +1600,7 @@ static int write_patch(const char *game_dir)
     for (s = 0; s < SETTING_COUNT; s++) {
         /* The rows on PC Controls (from VIDEO_ROWS on) are title case, as its labels are */
         (s >= VIDEO_ROWS ? add_title_text : add_text)(&files[OPTIONS_TEXT].data, text_label(s), k_settings[s].label);
-        for (i = 0; i < k_settings[s].count; i++)
+        for (i = 0; values_of(s) == s && i < k_settings[s].count; i++)
             (s >= VIDEO_ROWS ? add_title_text : add_text)(&files[OPTIONS_TEXT].data, text_label(s) + 1 + i,
                                                           k_settings[s].values[i]);
     }
@@ -1896,6 +1913,7 @@ static void apply_setting(int setting)
     case SET_ANISOTROPY: nv2a_gpu_set_anisotropy(1 << s_values[SET_ANISOTROPY]); break;
     case SET_MSAA: nv2a_gpu_set_msaa(1 << s_values[SET_MSAA]); break;
     case SET_HEAT_HAZE: nv2a_gpu_set_heat_haze(s_values[SET_HEAT_HAZE]); break;
+    case SET_SHADOWS: nv2a_gpu_set_shadow_scale(1 << s_values[SET_SHADOWS]); break;
     case SET_ICONS: nv2a_gpu_set_texture_replacements(s_values[SET_ICONS]); break;
     case SET_MOUSE_LOOK: xbox_KbmSetRawMouse(s_values[SET_MOUSE_LOOK]); s_mouse_raw = s_values[SET_MOUSE_LOOK]; break;
     case SET_DRAW_DISTANCE:           /* read each frame */
