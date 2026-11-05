@@ -297,8 +297,10 @@ effect at once and are kept in `turok_settings.ini` beside the exe:
 | Anisotropy | off, 2x, 4x, 8x, 16x (16x by default) | |
 | MSAA | off, 2x, 4x, 8x | |
 | Button icons | xbox, pc | |
-| Mouse look | raw, stick (raw falls back to stick while the on-foot turning is not running: flying, vehicles, turrets; on the PC Controls page, kept with these settings) | |
+| Mouse look | raw, stick (raw falls back to stick in vehicles and turrets; on the PC Controls page, kept with these settings) | |
 | Mouse speed | 1 to 10 (5 by default; each step 1.4x; on the PC Controls page, kept with these settings) | |
+| Flight mouse | on, off (the mouse steers the pteranodon; on the PC Controls page, kept with these settings) | |
+| Flight speed | 1 to 10 (5 by default; each step 1.4x; the pteranodon's mouse steering; on the PC Controls page, kept with these settings) | |
 | Draw distance | normal, 2x, 4x, 8x (2x by default) | |
 | Heat haze | original, smooth, sharp (the flamethrower and rocket haze: original is the console's blocks; smooth filters the ripple; sharp also copies the screen at full resolution) | `RECOMP_SMOOTH_BUMP=1` (smooth) |
 | Shadow detail | normal, 2x, 4x (the shadow map drawn on the GPU at 2048, 4096 or 8192 texels a side: sharper, less blocky shadow edges in every level; 2x is the default, normal is lighter on a Steam Deck) | `RECOMP_SHADOW_SCALE=1/2/4` |
@@ -340,6 +342,12 @@ An environment variable set by hand still wins at start-up.
   game does there: slower when zoomed, the pitch limits, and Invert Look
   (which turns the mouse and the pad alike). Up and across turn alike per
   count. "stick" is the old behaviour, tuned by `RECOMP_KBM_SENS`.
+- **Flight mouse** (on by default): on the pteranodon the mouse steers it,
+  whichever Mouse look is chosen: moving it pushes a stick of its own that
+  springs back to the centre in about a sixth of a second, added to the
+  flight's stick axes (`sub_001424B0`). The mouse up the screen climbs, as it
+  looks up on foot. **Flight speed** sets how far a move steers (at 5, about
+  500 counts push the stick all the way); Mouse speed does not apply.
 - **MSAA** applies to the screen's targets (multisampled copies resolved
   whenever the game reads them); it combines with the render scale.
   **Anisotropy** applies to mipmapped textures.

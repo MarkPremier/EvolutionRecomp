@@ -1571,6 +1571,50 @@ void sub_00144560(void)
     sub_00144560_gen();
 }
 
+/* ── Mouse steering on the pteranodon (sub_001424B0) ──────────
+ *
+ * The flight update (sub_00150590) has this make its two stick axes from
+ * the player's analog actions: +0x434 up (+0x1920 less +0x1924), +0x430
+ * right (+0x192C less +0x1928), the latter halved under 0.526 and squared
+ * above. sub_001460B0 speeds the pteranodon across its flight path by them.
+ * The mouse (video_settings_take_mouse_steer: right and up, by Flight mouse
+ * and Flight speed) moves a stick of its own that springs back to the centre
+ * in about a sixth of a second, added to the pad's: the mouse up the screen
+ * climbs, as it looks up on foot. */
+extern void sub_001424B0_gen(void);
+
+void sub_001424B0(void)
+{
+    static double last = -1;
+    static float stick[2];
+    uint32_t self = g_ecx;
+    struct timespec now;
+    double seconds;
+    float frame_time, keep;
+    int axis;
+
+    sub_001424B0_gen();
+    timespec_get(&now, TIME_UTC);
+    seconds = (double)now.tv_sec + now.tv_nsec * 1e-9;
+    frame_time = last < 0 ? 1.0f : (float)(seconds - last);
+    last = seconds;
+    /* A pause or a fresh flight starts the mouse's stick centred. */
+    keep = frame_time > 0.0f && frame_time < 0.25f ? expf(-frame_time / 0.15f) : 0.0f;
+    for (axis = 0; axis < 2; axis++) {
+        float steer = video_settings_take_mouse_steer(axis), value;
+        uint32_t va = self + (axis ? 0x434u : 0x430u), bits;
+        stick[axis] = stick[axis] * keep + steer;
+        if (stick[axis] > 1.0f) stick[axis] = 1.0f;
+        if (stick[axis] < -1.0f) stick[axis] = -1.0f;
+        if (stick[axis] == 0.0f) continue;
+        value = guest_float(va) + stick[axis];
+        if (value > 1.0f) value = 1.0f;
+        if (value < -1.0f) value = -1.0f;
+        memcpy(&bits, &value, 4);
+        TUROK_MEM32(va) = bits;
+    }
+}
+
 /* ── Sound volume (sub_000DD7E0) ── DIAG RECOMP_SNDVOL_TRACE ──
  * A sound's volume: its level (+0x1C of the first argument) x a group
  * factor (sub_000D5A20) x the fourth argument, as 20 log10 dB. */

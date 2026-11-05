@@ -66,7 +66,7 @@ extern void nv2a_gpu_set_shadow_scale(int factor);
  * text). */
 enum { SET_RESOLUTION, SET_ASPECT, SET_DISPLAY, SET_VSYNC, SET_FRAMES, SET_ANISOTROPY, SET_MSAA, SET_DRAW_DISTANCE,
        SET_HEAT_HAZE, SET_SHADOWS, SET_BODIES, SET_ICONS,
-       SET_MOUSE_LOOK, SET_MOUSE_SPEED, SETTING_COUNT };
+       SET_MOUSE_LOOK, SET_MOUSE_SPEED, SET_FLIGHT_MOUSE, SET_FLIGHT_SPEED, SETTING_COUNT };
 
 typedef struct VideoSetting {
     const char *key, *label;
@@ -89,6 +89,7 @@ static const char *const k_hazes[] = {"original", "smooth", "sharp"};
 static const char *const k_shadow_details[] = {"normal", "2x", "4x"};
 static const char *const k_icons[] = {"xbox", "pc"};
 static const char *const k_mouse_looks[] = {"stick", "raw"};
+static const char *const k_flight_mice[] = {"off", "on"};
 static const char *const k_speeds[] = {"1", "2", "3", "4", "5", "6", "7", "8", "9", "10"};
 #define COUNT(array) ((int)(sizeof array / sizeof *array))
 
@@ -107,11 +108,14 @@ static const VideoSetting k_settings[SETTING_COUNT] = {
     {"button_icons", "button icons", k_icons, COUNT(k_icons), 0},
     {"mouse_look", "mouse look", k_mouse_looks, COUNT(k_mouse_looks), 1},
     {"mouse_speed", "mouse speed", k_speeds, COUNT(k_speeds), 4},
+    {"flight_mouse", "flight mouse", k_flight_mice, COUNT(k_flight_mice), 1},
+    {"flight_speed", "flight speed", k_speeds, COUNT(k_speeds), 4},
 };
 
 static int s_values[SETTING_COUNT];
 /* Mouse look's state (video_settings_mouse_look). */
 static DWORD s_turn_seen;              /* when a turn function last asked (on foot) */
+static DWORD s_flight_seen;            /* when the pteranodon's flight last asked */
 static int s_mouse_raw = -1;           /* what the input layer was last told */
 
 /* ── PC controls ──────────────────────────────────────────────────
@@ -721,7 +725,13 @@ static const struct VideoMenu {
 
 static int values_of(int setting)
 {
-    return setting == SET_SHADOWS ? SET_DRAW_DISTANCE : setting == SET_BODIES ? SET_VSYNC : setting;
+    switch (setting) {
+    case SET_MSAA: return SET_ANISOTROPY;          /* off, 2x, 4x, 8x: its first four */
+    case SET_SHADOWS: return SET_DRAW_DISTANCE;
+    case SET_BODIES: return SET_VSYNC;
+    case SET_FLIGHT_SPEED: return SET_MOUSE_SPEED;
+    default: return setting;
+    }
 }
 
 static int text_label(int setting)
@@ -915,8 +925,8 @@ typedef struct PageRow {
 } PageRow;
 /* Video Options: rows this far apart, VIDEO_SHOWN of them at a time (the
  * page scrolls: video_scroll). Its rows are the settings up to Button
- * icons; Mouse look and Mouse speed, the last two, are on PC Controls (still
- * Video.hst's items). */
+ * icons; Mouse look, Mouse speed, Flight mouse and Flight speed, the last
+ * four, are on PC Controls (still Video.hst's items). */
 #define VIDEO_STEP  2.8f
 #define VIDEO_SHOWN 10
 #define VIDEO_ROWS  SET_MOUSE_LOOK
@@ -1487,10 +1497,11 @@ static int edit_video_screen(Node *screen, const char *unused)
 
 /* Every row's value is a key name; the last one, "press a key", only while
  * the row waits for its key (a step past the last key reads as none). Then
- * Mouse look and Mouse speed, Video.hst's items as Video Options' rows are. */
+ * Mouse look, Mouse speed, Flight mouse and Flight speed, Video.hst's items
+ * as Video Options' rows are. */
 static int edit_controls_screen(Node *screen, const char *unused)
 {
-    PageSpec page = {CONTROLS_HST, TEXT_CONTROLS_TITLE, BIND_COUNT + SETTING_COUNT - VIDEO_ROWS, 2.05f, TEXT_SCALE,
+    PageSpec page = {CONTROLS_HST, TEXT_CONTROLS_TITLE, BIND_COUNT + SETTING_COUNT - VIDEO_ROWS, 1.8f, TEXT_SCALE,
                      "$/Data/Fonts/Proportional.fnt"};
     int b, s;
     (void)unused;
@@ -1918,7 +1929,9 @@ static void apply_setting(int setting)
     case SET_MOUSE_LOOK: xbox_KbmSetRawMouse(s_values[SET_MOUSE_LOOK]); s_mouse_raw = s_values[SET_MOUSE_LOOK]; break;
     case SET_DRAW_DISTANCE:           /* read each frame */
     case SET_BODIES:
-    case SET_MOUSE_SPEED: break;
+    case SET_MOUSE_SPEED:
+    case SET_FLIGHT_MOUSE:
+    case SET_FLIGHT_SPEED: break;
     }
 }
 
@@ -1939,42 +1952,64 @@ static void controls_frame(void);
 static void video_scroll(void);
 
 static float s_mouse_turn[2];          /* yaw, pitch: stick units x seconds, not yet used */
+static float s_mouse_steer[2];         /* flight: right, up, the same units */
 
 void video_settings_mouse_look(void)
 {
     double gain;
-    int dx = 0, dy = 0, step;
+    int dx = 0, dy = 0, step, speed, flying;
     controls_frame();
     video_scroll();
     menu_pointer();
-    if (s_values[SET_MOUSE_LOOK] != 1) return;
-    /* Raw look works through the on-foot turn functions. When they have not
-     * run for a moment while playing -- flying, a vehicle, a turret: control
-     * the game steers some other way -- the mouse drives the right stick
-     * instead, as Mouse look "stick" does, until they run again. */
+    /* Raw look works through the on-foot turn functions (Mouse look raw), and
+     * on the pteranodon through its flight (Flight mouse on: video_settings_
+     * take_mouse_steer). When neither has run for a moment while playing --
+     * a vehicle, a turret: control the game steers some other way -- the
+     * mouse drives the right stick instead, as Mouse look "stick" does, until
+     * one runs again. */
+    flying = s_values[SET_FLIGHT_MOUSE] && !s_in_menu && GetTickCount() - s_flight_seen < 300;
     {
-        int on_foot = s_in_menu || GetTickCount() - s_turn_seen < 300;
-        if (on_foot != s_mouse_raw) {
-            s_mouse_raw = on_foot;
-            xbox_KbmSetRawMouse(on_foot);
+        int on_foot = s_values[SET_MOUSE_LOOK] == 1 && (s_in_menu || GetTickCount() - s_turn_seen < 300);
+        int raw = on_foot || flying;
+        if (raw != s_mouse_raw) {
+            s_mouse_raw = raw;
+            xbox_KbmSetRawMouse(raw);
         }
-        if (!on_foot) {
-            s_mouse_turn[0] = s_mouse_turn[1] = 0;
-            return;
-        }
+        if (!on_foot) s_mouse_turn[0] = s_mouse_turn[1] = 0;
+        if (!flying) s_mouse_steer[0] = s_mouse_steer[1] = 0;
+        if (!raw) return;
     }
     xbox_FramebufferMouseDelta(&dx, &dy);
     if (s_in_menu) {
         s_mouse_turn[0] = s_mouse_turn[1] = 0;
         return;
     }
-    for (gain = 0.0002, step = 4; step < s_values[SET_MOUSE_SPEED]; step++) gain *= 1.4;
-    for (step = 4; step > s_values[SET_MOUSE_SPEED]; step--) gain /= 1.4;
+    /* Each step of Mouse speed (Flight speed flying) 1.4 times the last. */
+    speed = s_values[flying ? SET_FLIGHT_SPEED : SET_MOUSE_SPEED];
+    for (gain = flying ? 0.002 : 0.0002, step = 4; step < speed; step++) gain *= 1.4;
+    for (step = 4; step > speed; step--) gain /= 1.4;
+    if (flying) {
+        /* Flying: right and up (the mouse up the screen climbs), in stick
+         * deflection: at Flight speed 5, 500 counts push it all the way. */
+        s_mouse_steer[0] += (float)(dx * gain);
+        s_mouse_steer[1] -= (float)(dy * gain);
+        return;
+    }
     /* Down the screen as the pad's down (Invert Look flips both); pitch
      * doubled, as the game turns pitch at half its yaw speed, so a count
      * turns the view as far up as across. */
     s_mouse_turn[0] += (float)(dx * gain);
     s_mouse_turn[1] += (float)(dy * gain * 2);
+}
+
+/* The pteranodon's flight asks each frame (recomp_manual.c, sub_001424B0):
+ * axis 0 right, 1 up, in stick deflection (0 with Flight mouse off). */
+float video_settings_take_mouse_steer(int axis)
+{
+    float steer = s_mouse_steer[axis & 1];
+    s_flight_seen = GetTickCount();
+    s_mouse_steer[axis & 1] = 0;
+    return steer;
 }
 
 float video_settings_take_mouse_turn(int axis)

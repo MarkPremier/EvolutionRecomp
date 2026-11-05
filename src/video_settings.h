@@ -42,5 +42,7 @@ void video_settings_mouse_look(void);
 /* The mouse's turn since last taken (0 yaw, 1 pitch), in stick units x
  * seconds: the look functions divide by their frame time. */
 float video_settings_take_mouse_turn(int axis);
+/* Flying: the mouse's steer, axis 0 right, 1 up, in stick deflection. */
+float video_settings_take_mouse_steer(int axis);
 
 #endif
