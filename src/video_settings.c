@@ -66,7 +66,7 @@ extern void nv2a_gpu_set_shadow_scale(int factor);
  * text). */
 enum { SET_RESOLUTION, SET_ASPECT, SET_DISPLAY, SET_VSYNC, SET_FRAMES, SET_ANISOTROPY, SET_MSAA, SET_DRAW_DISTANCE,
        SET_HEAT_HAZE, SET_SHADOWS, SET_BODIES, SET_ICONS,
-       SET_MOUSE_LOOK, SET_MOUSE_SPEED, SET_FLIGHT_MOUSE, SET_FLIGHT_SPEED, SETTING_COUNT };
+       SET_MOUSE_LOOK, SET_MOUSE_SPEED, SET_FLIGHT_MOUSE, SET_FLIGHT_SPEED, SET_FLIGHT_INVERT, SETTING_COUNT };
 
 typedef struct VideoSetting {
     const char *key, *label;
@@ -89,7 +89,6 @@ static const char *const k_hazes[] = {"original", "smooth", "sharp"};
 static const char *const k_shadow_details[] = {"normal", "2x", "4x"};
 static const char *const k_icons[] = {"xbox", "pc"};
 static const char *const k_mouse_looks[] = {"stick", "raw"};
-static const char *const k_flight_mice[] = {"off", "on"};
 static const char *const k_speeds[] = {"1", "2", "3", "4", "5", "6", "7", "8", "9", "10"};
 #define COUNT(array) ((int)(sizeof array / sizeof *array))
 
@@ -108,8 +107,9 @@ static const VideoSetting k_settings[SETTING_COUNT] = {
     {"button_icons", "button icons", k_icons, COUNT(k_icons), 0},
     {"mouse_look", "mouse look", k_mouse_looks, COUNT(k_mouse_looks), 1},
     {"mouse_speed", "mouse speed", k_speeds, COUNT(k_speeds), 4},
-    {"flight_mouse", "flight mouse", k_flight_mice, COUNT(k_flight_mice), 1},
+    {"flight_mouse", "flight mouse", k_switches, COUNT(k_switches), 1},
     {"flight_speed", "flight speed", k_speeds, COUNT(k_speeds), 4},
+    {"flight_invert", "flight invert", k_switches, COUNT(k_switches), 0},
 };
 
 static int s_values[SETTING_COUNT];
@@ -700,6 +700,7 @@ static const char *target_of(const Node *event, char *name, size_t size)
 }
 
 #define OPTIONS_TXM   "$\\Data\\Text\\Options.txm"
+#define GAME_TXM      "$\\Data\\Text\\GameOptions.txm"
 #define OPTIONS_HST   "$\\Data\\History\\Options.hst"
 #define VIDEO_HST     "$\\Data\\History\\Video.hst"
 #define CONTROLS_HST  "$\\Data\\History\\PCControls.hst"
@@ -709,17 +710,18 @@ static const char *target_of(const Node *event, char *name, size_t size)
  * with its own Game Options page to build from (the pause menu's has the
  * darker panel and returns to the game). */
 static const struct VideoMenu {
-    const char *menu, *game_options, *page, *controls;
+    const char *menu, *game_options, *page, *controls, *settings;
 } k_menus[] = {
-    {"options", "gameoptions", "VideoOptions", "PCControls"},
-    {"ingameoptionsmenu", "ingameoptions", "InGameVideoOptions", "InGamePCControls"},
+    {"options", "gameoptions", "VideoOptions", "PCControls", "PCSettings"},
+    {"ingameoptionsmenu", "ingameoptions", "InGameVideoOptions", "InGamePCControls", "InGamePCSettings"},
 };
 #define MENU_COUNT (sizeof k_menus / sizeof *k_menus)
 
 /* Options.txm keys from 5 on: the entry, the page's title, then each row's
- * label followed by its values. Keys past 187 do not show, and the controls
- * page's key names come last, so a row whose values another row already has
- * shows those (values_of) and takes only its label's key. */
+ * label followed by its values (Video Options' rows, then PC Settings').
+ * Keys past 187 do not show, and the controls page's key names come last, so
+ * a row whose values another row already has shows those (values_of) and
+ * takes only its label's key. */
 #define TEXT_ENTRY 5
 #define TEXT_TITLE 6
 
@@ -728,7 +730,9 @@ static int values_of(int setting)
     switch (setting) {
     case SET_MSAA: return SET_ANISOTROPY;          /* off, 2x, 4x, 8x: its first four */
     case SET_SHADOWS: return SET_DRAW_DISTANCE;
-    case SET_BODIES: return SET_VSYNC;
+    case SET_BODIES:
+    case SET_FLIGHT_MOUSE:
+    case SET_FLIGHT_INVERT: return SET_VSYNC;
     case SET_FLIGHT_SPEED: return SET_MOUSE_SPEED;
     default: return setting;
     }
@@ -747,12 +751,17 @@ static int text_values(int setting)
     return text_label(values_of(setting)) + 1;
 }
 
-/* Then the controls page's: its entry, title, each row's label, and the key
- * names every row's value shows (keys are bytes: all end below 256). */
+/* Then the controls page's: its entry, title and each row's label; PC
+ * Settings' entry; and the key names every controls row's value shows (keys
+ * are bytes: all end below 256). PC Settings' title is GameOptions.txm's
+ * key 13, after the game's own "Game Options" (12), to keep these within
+ * 187. */
 #define TEXT_CONTROLS       text_label(SETTING_COUNT)
 #define TEXT_CONTROLS_TITLE (TEXT_CONTROLS + 1)
 #define TEXT_BIND_LABEL(b)  (TEXT_CONTROLS + 2 + (b))
-#define TEXT_KEYS           (TEXT_CONTROLS + 2 + BIND_COUNT)
+#define TEXT_SETTINGS       (TEXT_CONTROLS + 2 + BIND_COUNT)
+#define TEXT_KEYS           (TEXT_SETTINGS + 1)
+#define GAME_TEXT_SETTINGS_TITLE 13
 
 /* A copy of SOUND OPTIONS named `name`, showing text key `text` and opening
  * the page `page`, after the actor `after`; the screen's setup and fade
@@ -798,13 +807,13 @@ static int add_menu_entry(Node *screen, const char *name, int text, const char *
     return 1;
 }
 
-/* Options' entries top to bottom, evenly from the first: PC CONTROLS under
- * CONTROL SETUP, VIDEO OPTIONS under SOUND OPTIONS (the gap the console left
- * there, where the PC release kept a control-setup entry), a little closer
- * than the console's five. */
-static const char *const k_option_entries[] = {"options", "control", "pccontrols", "soundvideo", "videooptions",
-                                               "saveoptions"};
-#define OPTION_STEP 3.6f
+/* Options' entries top to bottom, evenly from the first: PC CONTROLS and PC
+ * SETTINGS under CONTROL SETUP, VIDEO OPTIONS under SOUND OPTIONS (the gap
+ * the console left there, where the PC release kept a control-setup entry),
+ * closer than the console's five. */
+static const char *const k_option_entries[] = {"options", "control", "pccontrols", "pcsettings", "soundvideo",
+                                               "videooptions", "saveoptions"};
+#define OPTION_STEP 3.3f
 
 /* Options are saved on the way out. The console kept them only when the
  * player chose SAVE OPTIONS, and anything changed and left unsaved (Invert
@@ -890,7 +899,8 @@ static int add_video_entry(Node *screen, const char *page)
     }
     if (!menu || !first || !get_vector(child(first, "POS"), top) ||
             !add_menu_entry(screen, "videooptions", TEXT_ENTRY, menu->page, "soundvideo", id + 1) ||
-            !add_menu_entry(screen, "pccontrols", TEXT_CONTROLS, menu->controls, "control", id + 2))
+            !add_menu_entry(screen, "pccontrols", TEXT_CONTROLS, menu->controls, "control", id + 2) ||
+            !add_menu_entry(screen, "pcsettings", TEXT_SETTINGS, menu->settings, "pccontrols", id + 3))
         return 0;
     for (e = 0; e < COUNT(k_option_entries); e++) {
         Node *entry = actor_named(screen, k_option_entries[e], NULL);
@@ -925,8 +935,8 @@ typedef struct PageRow {
 } PageRow;
 /* Video Options: rows this far apart, VIDEO_SHOWN of them at a time (the
  * page scrolls: video_scroll). Its rows are the settings up to Button
- * icons; Mouse look, Mouse speed, Flight mouse and Flight speed, the last
- * four, are on PC Controls (still Video.hst's items). */
+ * icons; the mouse's, from Mouse look on, are on PC Settings (still
+ * Video.hst's items). */
 #define VIDEO_STEP  2.8f
 #define VIDEO_SHOWN 10
 #define VIDEO_ROWS  SET_MOUSE_LOOK
@@ -936,6 +946,7 @@ typedef struct PageSpec {
     int title, count;
     float step, text_scale;
     const char *font;     /* the rows' font, or NULL for the template's */
+    const char *title_text; /* the title's text file, or NULL for Options.txm */
     PageRow rows[16];
 } PageSpec;
 
@@ -1049,7 +1060,7 @@ static int make_page(Node *screen, const PageSpec *page)
     node_free(row);
     node_free(value);
 
-    set_text(child(child(title, "ACTOR_VARIABLES"), "W_TMF"), OPTIONS_TXM);
+    set_text(child(child(title, "ACTOR_VARIABLES"), "W_TMF"), page->title_text ? page->title_text : OPTIONS_TXM);
     set_byte(child(child(title, "ACTOR_VARIABLES"), "W_TMN"), page->title);
     /* The back button's moves for languages with longer words. */
     for (i = bbutton->count; i-- > 0;)
@@ -1496,14 +1507,12 @@ static int edit_video_screen(Node *screen, const char *unused)
 }
 
 /* Every row's value is a key name; the last one, "press a key", only while
- * the row waits for its key (a step past the last key reads as none). Then
- * Mouse look, Mouse speed, Flight mouse and Flight speed, Video.hst's items
- * as Video Options' rows are. */
+ * the row waits for its key (a step past the last key reads as none). */
 static int edit_controls_screen(Node *screen, const char *unused)
 {
-    PageSpec page = {CONTROLS_HST, TEXT_CONTROLS_TITLE, BIND_COUNT + SETTING_COUNT - VIDEO_ROWS, 1.8f, TEXT_SCALE,
+    PageSpec page = {CONTROLS_HST, TEXT_CONTROLS_TITLE, BIND_COUNT, 2.05f, TEXT_SCALE,
                      "$/Data/Fonts/Proportional.fnt"};
-    int b, s;
+    int b;
     (void)unused;
     for (b = 0; b < BIND_COUNT; b++) {
         snprintf(page.rows[b].key, sizeof page.rows[b].key, "%s", k_binds[b].key);
@@ -1511,13 +1520,24 @@ static int edit_controls_screen(Node *screen, const char *unused)
         page.rows[b].value_text = TEXT_KEYS;
         page.rows[b].last = KEY_COUNT - 1;
     }
-    for (s = VIDEO_ROWS; s < SETTING_COUNT; s++, b++) {
-        snprintf(page.rows[b].key, sizeof page.rows[b].key, "%s", k_settings[s].key);
-        page.rows[b].label = text_label(s);
-        page.rows[b].value_text = text_values(s);
-        page.rows[b].last = k_settings[s].count - 1;
-        page.rows[b].history = VIDEO_HST;
-        page.rows[b].item = s + 1;
+    return make_page(screen, &page);
+}
+
+/* PC Settings: the mouse's settings from Mouse look on, Video.hst's items
+ * as Video Options' rows are, in its style. */
+static int edit_settings_screen(Node *screen, const char *unused)
+{
+    PageSpec page = {VIDEO_HST, GAME_TEXT_SETTINGS_TITLE, SETTING_COUNT - VIDEO_ROWS, VIDEO_STEP, TEXT_SCALE, NULL,
+                     GAME_TXM};
+    int r, s;
+    (void)unused;
+    for (r = 0, s = VIDEO_ROWS; s < SETTING_COUNT; r++, s++) {
+        snprintf(page.rows[r].key, sizeof page.rows[r].key, "%s", k_settings[s].key);
+        page.rows[r].label = text_label(s);
+        page.rows[r].value_text = text_values(s);
+        page.rows[r].last = k_settings[s].count - 1;
+        page.rows[r].history = VIDEO_HST;
+        page.rows[r].item = s + 1;
     }
     return make_page(screen, &page);
 }
@@ -1540,10 +1560,10 @@ static void make_controls_history(Buffer *out)
 static int write_patch(const char *game_dir)
 {
     /* Per menu: its Options screen, the video page and its .atr, the
-     * controls page and its .atr; then the strings, the history files,
-     * history.txt and the marker. */
-    enum { OPTIONS_TEXT = 5 * MENU_COUNT, VIDEO_HISTORY, HISTORY_LIST, MARKER, PRESS_START, MAIN_MENU,
-           CONTROL_HISTORY, PC_CONTROLS_HISTORY, FILE_COUNT };
+     * controls page and its .atr, the settings page and its .atr; then the
+     * strings, the history files, history.txt and the marker. */
+    enum { OPTIONS_TEXT = 7 * MENU_COUNT, VIDEO_HISTORY, HISTORY_LIST, MARKER, PRESS_START, MAIN_MENU,
+           CONTROL_HISTORY, PC_CONTROLS_HISTORY, GAME_TEXT, FILE_COUNT };
     PatchFile files[FILE_COUNT];
     Trees trees;
     Buffer tree = {0}, existing = {0}, pause = {0};
@@ -1573,7 +1593,7 @@ static int write_patch(const char *game_dir)
     load_save_options(&trees);
     for (m = 0; m < MENU_COUNT; m++) {
         const struct VideoMenu *menu = &k_menus[m];
-        PatchFile *out = &files[5 * m];
+        PatchFile *out = &files[7 * m];
         snprintf(from, sizeof from, SCREENS "%s\\%s.ati", menu->menu, menu->menu);
         if (!patch_screen(&trees, from, from, &out[0], add_video_entry, menu->page)) goto done;
         snprintf(from, sizeof from, SCREENS "%s\\%s.ati", menu->game_options, menu->game_options);
@@ -1588,6 +1608,12 @@ static int write_patch(const char *game_dir)
         snprintf(from, sizeof from, SCREENS "%s\\%s.atr", menu->game_options, menu->game_options);
         snprintf(to, sizeof to, SCREENS "%s\\%s.atr", menu->controls, menu->controls);
         if (!patch_screen(&trees, from, to, &out[4], make_video_descriptor, menu->controls)) goto done;
+        snprintf(from, sizeof from, SCREENS "%s\\%s.ati", menu->game_options, menu->game_options);
+        snprintf(to, sizeof to, SCREENS "%s\\%s.ati", menu->settings, menu->settings);
+        if (!patch_screen(&trees, from, to, &out[5], edit_settings_screen, NULL)) goto done;
+        snprintf(from, sizeof from, SCREENS "%s\\%s.atr", menu->game_options, menu->game_options);
+        snprintf(to, sizeof to, SCREENS "%s\\%s.atr", menu->settings, menu->settings);
+        if (!patch_screen(&trees, from, to, &out[6], make_video_descriptor, menu->settings)) goto done;
     }
     snprintf(from, sizeof from, SCREENS "firstinteractivescreen\\firstinteractivescreen.ati");
     if (!patch_screen(&trees, from, from, &files[PRESS_START], any_button_starts, NULL)) goto done;
@@ -1609,15 +1635,17 @@ static int write_patch(const char *game_dir)
     add_text(&files[OPTIONS_TEXT].data, TEXT_ENTRY, "VIDEO OPTIONS");
     add_text(&files[OPTIONS_TEXT].data, TEXT_TITLE, "Video Options");
     for (s = 0; s < SETTING_COUNT; s++) {
-        /* The rows on PC Controls (from VIDEO_ROWS on) are title case, as its labels are */
-        (s >= VIDEO_ROWS ? add_title_text : add_text)(&files[OPTIONS_TEXT].data, text_label(s), k_settings[s].label);
+        add_text(&files[OPTIONS_TEXT].data, text_label(s), k_settings[s].label);
         for (i = 0; values_of(s) == s && i < k_settings[s].count; i++)
-            (s >= VIDEO_ROWS ? add_title_text : add_text)(&files[OPTIONS_TEXT].data, text_label(s) + 1 + i,
-                                                          k_settings[s].values[i]);
+            add_text(&files[OPTIONS_TEXT].data, text_label(s) + 1 + i, k_settings[s].values[i]);
     }
     add_text(&files[OPTIONS_TEXT].data, TEXT_CONTROLS, "PC CONTROLS");
     add_text(&files[OPTIONS_TEXT].data, TEXT_CONTROLS_TITLE, "PC Controls");
     for (s = 0; s < BIND_COUNT; s++) add_title_text(&files[OPTIONS_TEXT].data, TEXT_BIND_LABEL(s), k_binds[s].label);
+    add_text(&files[OPTIONS_TEXT].data, TEXT_SETTINGS, "PC SETTINGS");
+    files[GAME_TEXT].key = tree_key("data\\text\\gameoptions.txm");
+    if (!trees_read(&trees, "data\\text\\gameoptions.txm", &files[GAME_TEXT].data)) goto done;
+    add_text(&files[GAME_TEXT].data, GAME_TEXT_SETTINGS_TITLE, "PC Settings");
     for (i = 0; i < KEY_COUNT; i++) add_title_text(&files[OPTIONS_TEXT].data, TEXT_KEYS + i, k_keys[i].name);
 
     if (!trees_read(&trees, "data\\history\\history.txt", &files[HISTORY_LIST].data)) goto done;
@@ -1931,7 +1959,8 @@ static void apply_setting(int setting)
     case SET_BODIES:
     case SET_MOUSE_SPEED:
     case SET_FLIGHT_MOUSE:
-    case SET_FLIGHT_SPEED: break;
+    case SET_FLIGHT_SPEED:
+    case SET_FLIGHT_INVERT: break;
     }
 }
 
@@ -1989,10 +2018,11 @@ void video_settings_mouse_look(void)
     for (gain = flying ? 0.002 : 0.0002, step = 4; step < speed; step++) gain *= 1.4;
     for (step = 4; step > speed; step--) gain /= 1.4;
     if (flying) {
-        /* Flying: right and up (the mouse up the screen climbs), in stick
-         * deflection: at Flight speed 5, 500 counts push it all the way. */
+        /* Flying: right and up (the mouse up the screen climbs; down with
+         * Flight invert), in stick deflection: at Flight speed 5, 500 counts
+         * push it all the way. */
         s_mouse_steer[0] += (float)(dx * gain);
-        s_mouse_steer[1] -= (float)(dy * gain);
+        s_mouse_steer[1] += (float)(s_values[SET_FLIGHT_INVERT] ? dy * gain : -dy * gain);
         return;
     }
     /* Down the screen as the pad's down (Invert Look flips both); pitch
