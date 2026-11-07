@@ -51,6 +51,9 @@ CPU-renderer build (about 9 fps on the title screen).
   the largest multiple of 640x480 that fits the screen, and **Alt+Enter**
   toggles borderless fullscreen. `RECOMP_VSYNC=1` presents on the monitor's
   refresh; `RECOMP_PRESENT=gdi` goes back to the old 640x480 window.
+- On a laptop with two GPUs the game runs on the faster one (the NVIDIA or
+  AMD card, not the integrated Intel graphics); `turok_log.txt` names the
+  GPU it used on its `[GPU-D3D11] adapter:` line.
 - The game renders above its 640x480: by default at the whole multiple of
   480 lines that covers your monitor's height (3x, 1920x1440, on a 1440p
   screen). `RECOMP_RENDER_SCALE=<n>` sets it (1 to 8, fractions allowed; 1 is

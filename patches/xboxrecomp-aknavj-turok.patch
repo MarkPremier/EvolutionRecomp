@@ -2865,6 +2865,19 @@ index 3c7bdd4..bbde6ad 100644
      result = XInputGetCapabilities(slot, dwFlags, &xi_caps);
      if (result != ERROR_SUCCESS) return result;
  
+diff --git a/src/kernel/CMakeLists.txt b/src/kernel/CMakeLists.txt
+index a1d3ccb..4997ea8 100644
+--- a/src/kernel/CMakeLists.txt
++++ b/src/kernel/CMakeLists.txt
+@@ -43,7 +43,7 @@ target_include_directories(xbox_kernel PUBLIC
+ if(WIN32)
+     target_sources(xbox_kernel PRIVATE nv2a_gpu_d3d11.cpp)
+     target_compile_features(xbox_kernel PRIVATE cxx_std_17)
+-    target_link_libraries(xbox_kernel PRIVATE d3d11 d3dcompiler)
++    target_link_libraries(xbox_kernel PRIVATE d3d11 dxgi d3dcompiler)
+     # platform is an INTERFACE target on Windows: it contributes the src/
+     # include path that "platform/xbox_winnt.h" resolves against.
+     target_link_libraries(xbox_kernel PUBLIC platform kernel32 bcrypt)
 diff --git a/src/kernel/kernel.h b/src/kernel/kernel.h
 index 9f71e6b..8479265 100644
 --- a/src/kernel/kernel.h
@@ -3570,14 +3583,14 @@ index b8d804a..0745337 100644
  int nv2a_gpu_clear(const Nv2aGpuDraw *state, uint32_t flags, uint32_t color, uint32_t depth);
  int nv2a_gpu_execute_state(const uint32_t program[136][4], const uint32_t valid[136], uint32_t start,
 diff --git a/src/kernel/nv2a_gpu_d3d11.cpp b/src/kernel/nv2a_gpu_d3d11.cpp
-index f031faf..f267a57 100644
+index f031faf..2cb4f51 100644
 --- a/src/kernel/nv2a_gpu_d3d11.cpp
 +++ b/src/kernel/nv2a_gpu_d3d11.cpp
 @@ -1,6 +1,7 @@
  #include "nv2a_gpu.h"
  #include <d3d11.h>
  #include <d3d11_1.h>
-+#include <dxgi1_5.h>
++#include <dxgi1_6.h>
  #include <wrl/client.h>
  #include <cstdio>
  #include <cstdlib>
@@ -4664,11 +4677,37 @@ index f031faf..f267a57 100644
      surface.clear_value_valid = false;
      surface.alias_copy_serial = 0;
      gpu_timing.color_refresh_bytes += (uint64_t)surface.width * surface.height * 4;
-@@ -1015,7 +1812,13 @@ static bool refresh_depth(DepthSurface &surface)
-         encode_depth_row(surface.format, source, destination, surface.width);
-     }
-     context->Unmap(surface.staging.Get(), 0);
--    context->CopyResource(surface.texture.Get(), surface.staging.Get());
+@@ -989,67 +1786,278 @@ static void refresh_surface(Surface &surface)
+     gpu_timing.color_refreshed++;
+ }
+ 
+-static bool target_operation_succeeded(const char *kind, const char *operation, HRESULT result)
++static bool target_operation_succeeded(const char *kind, const char *operation, HRESULT result)
++{
++    if (SUCCEEDED(result)) return true;
++    std::fprintf(stderr, "[GPU-D3D11] %s target %s failed: 0x%08X; device 0x%08X\n",
++                 kind, operation, (unsigned)result, (unsigned)device->GetDeviceRemovedReason());
++    std::fflush(stderr);
++    return false;
++}
++
++static bool refresh_depth(DepthSurface &surface)
++{
++    if (!surface.needs_refresh) return true;
++    if (surface_memory_matches(surface, surface.format == 1 ? 2 : 4)) {
++        surface.needs_refresh = false;
++        gpu_timing.depth_refresh_reused++;
++        return true;
++    }
++    D3D11_MAPPED_SUBRESOURCE mapped = {};
++    if (!target_operation_succeeded("depth", "upload map",
++        context->Map(surface.staging.Get(), 0, D3D11_MAP_WRITE, 0, &mapped))) return false;
++    for (uint32_t row = 0; row < surface.height; row++) {
++        const uint8_t *source = surface.memory + (size_t)row * surface.pitch;
++        uint8_t *destination = (uint8_t *)mapped.pData + (size_t)row * mapped.RowPitch;
++        encode_depth_row(surface.format, source, destination, surface.width);
++    }
++    context->Unmap(surface.staging.Get(), 0);
 +    if (surface.ms_texture) { surface.ms_newer = false; surface.ms_stale = true; }
 +    if (is_scaled(surface)) {
 +        context->CopyResource(surface.upload.Get(), surface.staging.Get());
@@ -4676,13 +4715,13 @@ index f031faf..f267a57 100644
 +    } else {
 +        context->CopyResource(surface.texture.Get(), surface.staging.Get());
 +    }
-     surface.clear_value_valid = false;
-     surface.needs_refresh = false;
-     surface.snapshot_valid = false;
-@@ -1023,33 +1826,238 @@ static bool refresh_depth(DepthSurface &surface)
-     return true;
- }
- 
++    surface.clear_value_valid = false;
++    surface.needs_refresh = false;
++    surface.snapshot_valid = false;
++    gpu_timing.depth_refreshed++;
++    return true;
++}
++
 +/* A colour target's texture at its texture size, and for a scaled one the
 + * guest-size resolve and upload; `data` fills an unscaled texture. */
 +static bool create_color_textures(Surface &surface, const D3D11_SUBRESOURCE_DATA *data)
@@ -4706,43 +4745,33 @@ index f031faf..f267a57 100644
 +           target_operation_succeeded("color", "create upload view", device->CreateShaderResourceView(surface.upload.Get(), nullptr, &surface.upload_view));
 +}
 +
- static Surface *get_surface(const Nv2aGpuDraw &state, bool preserve = true, TargetExtent extent = {})
- {
-     if (!extent.width) extent = {state.width, state.height};
-     for (auto &surface : surfaces)
-         if (surface.memory == state.color && surface.width == extent.width && surface.height == extent.height && surface.pitch == state.pitch) {
-             surface.last_used = ++surface_use_serial;
++static Surface *get_surface(const Nv2aGpuDraw &state, bool preserve = true, TargetExtent extent = {})
++{
++    if (!extent.width) extent = {state.width, state.height};
++    for (auto &surface : surfaces)
++        if (surface.memory == state.color && surface.width == extent.width && surface.height == extent.height && surface.pitch == state.pitch) {
++            surface.last_used = ++surface_use_serial;
 +            surface.used_frame = surface_frame_serial;
-             if (preserve) refresh_surface(surface);
-             else surface.needs_refresh = false;
-             return &surface;
-         }
--    D3D11_TEXTURE2D_DESC description = {};
--    description.Width = extent.width; description.Height = extent.height;
--    description.MipLevels = description.ArraySize = 1;
--    description.Format = DXGI_FORMAT_B8G8R8A8_UNORM; description.SampleDesc.Count = 1;
--    description.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
-     Surface surface = {};
-     surface.memory = state.color; surface.width = extent.width; surface.height = extent.height; surface.pitch = state.pitch;
++            if (preserve) refresh_surface(surface);
++            else surface.needs_refresh = false;
++            return &surface;
++        }
++    Surface surface = {};
++    surface.memory = state.color; surface.width = extent.width; surface.height = extent.height; surface.pitch = state.pitch;
 +    texture_size(extent.width, extent.height, true, surface.texture_width, surface.texture_height);
-     surface.last_used = ++surface_use_serial;
++    surface.last_used = ++surface_use_serial;
 +    surface.used_frame = surface_frame_serial;
 +    bool scaled = is_scaled(surface);
-     D3D11_SUBRESOURCE_DATA data = {state.color, state.pitch, 0};
--    if (!target_operation_succeeded("color", "create texture", device->CreateTexture2D(&description, preserve ? &data : nullptr, &surface.texture)) ||
--        !target_operation_succeeded("color", "create view", device->CreateRenderTargetView(surface.texture.Get(), nullptr, &surface.target)) ||
--        !target_operation_succeeded("color", "create sample view", device->CreateShaderResourceView(surface.texture.Get(), nullptr, &surface.view))) return nullptr;
--    description.BindFlags = 0; description.Usage = D3D11_USAGE_STAGING; description.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
++    D3D11_SUBRESOURCE_DATA data = {state.color, state.pitch, 0};
 +    if (!create_color_textures(surface, preserve ? &data : nullptr) || !create_ms_color(surface)) return nullptr;
 +    D3D11_TEXTURE2D_DESC description = {};
 +    description.Width = extent.width; description.Height = extent.height;
 +    description.MipLevels = description.ArraySize = 1;
 +    description.Format = DXGI_FORMAT_B8G8R8A8_UNORM; description.SampleDesc.Count = 1;
 +    description.Usage = D3D11_USAGE_STAGING; description.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-     if (!target_operation_succeeded("color", "create staging", device->CreateTexture2D(&description, nullptr, &surface.staging))) return nullptr;
-     surfaces.push_back(std::move(surface));
-     gpu_timing.color_created++;
--    return &surfaces.back();
++    if (!target_operation_succeeded("color", "create staging", device->CreateTexture2D(&description, nullptr, &surface.staging))) return nullptr;
++    surfaces.push_back(std::move(surface));
++    gpu_timing.color_created++;
 +    Surface &created = surfaces.back();
 +    if (preserve && scaled) {
 +        created.needs_refresh = true;
@@ -4894,24 +4923,77 @@ index f031faf..f267a57 100644
 +
 +/* Before drawing into the twins: what was written to `texture` since. */
 +static void refresh_ms_color(Surface &surface)
-+{
+ {
+-    if (SUCCEEDED(result)) return true;
+-    std::fprintf(stderr, "[GPU-D3D11] %s target %s failed: 0x%08X; device 0x%08X\n",
+-                 kind, operation, (unsigned)result, (unsigned)device->GetDeviceRemovedReason());
+-    std::fflush(stderr);
+-    return false;
 +    if (!surface.ms_texture || !surface.ms_stale) return;
 +    scale_blit(surface.view.Get(), surface.ms_target.Get(), nullptr, surface.texture_width, surface.texture_height);
 +    surface.ms_stale = false;
-+}
-+
+ }
+ 
+-static bool refresh_depth(DepthSurface &surface)
 +static void refresh_ms_depth(DepthSurface &surface)
-+{
+ {
+-    if (!surface.needs_refresh) return true;
+-    if (surface_memory_matches(surface, surface.format == 1 ? 2 : 4)) {
+-        surface.needs_refresh = false;
+-        gpu_timing.depth_refresh_reused++;
+-        return true;
+-    }
+-    D3D11_MAPPED_SUBRESOURCE mapped = {};
+-    if (!target_operation_succeeded("depth", "upload map",
+-        context->Map(surface.staging.Get(), 0, D3D11_MAP_WRITE, 0, &mapped))) return false;
+-    for (uint32_t row = 0; row < surface.height; row++) {
+-        const uint8_t *source = surface.memory + (size_t)row * surface.pitch;
+-        uint8_t *destination = (uint8_t *)mapped.pData + (size_t)row * mapped.RowPitch;
+-        encode_depth_row(surface.format, source, destination, surface.width);
+-    }
+-    context->Unmap(surface.staging.Get(), 0);
+-    context->CopyResource(surface.texture.Get(), surface.staging.Get());
+-    surface.clear_value_valid = false;
+-    surface.needs_refresh = false;
+-    surface.snapshot_valid = false;
+-    gpu_timing.depth_refreshed++;
+-    return true;
 +    if (!surface.ms_texture || !surface.ms_stale) return;
 +    context->ClearDepthStencilView(surface.ms_view.Get(), D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, 1.0f, 0);
 +    scale_blit(surface.sample_view.Get(), nullptr, surface.ms_view.Get(), surface.texture_width, surface.texture_height);
 +    surface.ms_stale = false;
-+}
-+
+ }
+ 
+-static Surface *get_surface(const Nv2aGpuDraw &state, bool preserve = true, TargetExtent extent = {})
 +/* The views a draw writes: both twins when every target it has has one;
 + * otherwise the single-sampled textures, brought up to date first. */
 +static void bind_draw_targets(Surface *surface, DepthSurface *depth, ID3D11RenderTargetView *&color, ID3D11DepthStencilView *&depth_view)
-+{
+ {
+-    if (!extent.width) extent = {state.width, state.height};
+-    for (auto &surface : surfaces)
+-        if (surface.memory == state.color && surface.width == extent.width && surface.height == extent.height && surface.pitch == state.pitch) {
+-            surface.last_used = ++surface_use_serial;
+-            if (preserve) refresh_surface(surface);
+-            else surface.needs_refresh = false;
+-            return &surface;
+-        }
+-    D3D11_TEXTURE2D_DESC description = {};
+-    description.Width = extent.width; description.Height = extent.height;
+-    description.MipLevels = description.ArraySize = 1;
+-    description.Format = DXGI_FORMAT_B8G8R8A8_UNORM; description.SampleDesc.Count = 1;
+-    description.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+-    Surface surface = {};
+-    surface.memory = state.color; surface.width = extent.width; surface.height = extent.height; surface.pitch = state.pitch;
+-    surface.last_used = ++surface_use_serial;
+-    D3D11_SUBRESOURCE_DATA data = {state.color, state.pitch, 0};
+-    if (!target_operation_succeeded("color", "create texture", device->CreateTexture2D(&description, preserve ? &data : nullptr, &surface.texture)) ||
+-        !target_operation_succeeded("color", "create view", device->CreateRenderTargetView(surface.texture.Get(), nullptr, &surface.target)) ||
+-        !target_operation_succeeded("color", "create sample view", device->CreateShaderResourceView(surface.texture.Get(), nullptr, &surface.view))) return nullptr;
+-    description.BindFlags = 0; description.Usage = D3D11_USAGE_STAGING; description.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+-    if (!target_operation_succeeded("color", "create staging", device->CreateTexture2D(&description, nullptr, &surface.staging))) return nullptr;
+-    surfaces.push_back(std::move(surface));
+-    gpu_timing.color_created++;
+-    return &surfaces.back();
 +    bool multisampled = (surface && surface->ms_texture) || (depth && depth->ms_texture);
 +    if (multisampled && ((surface && !surface->ms_texture) || (depth && !depth->ms_texture))) multisampled = false;
 +    if (multisampled) {
@@ -6243,7 +6325,68 @@ index f031faf..f267a57 100644
          if (SUCCEEDED(result))
              result = device->CreateGeometryShader(pixel_code->GetBufferPointer(), pixel_code->GetBufferSize(), nullptr,
                                                     geometry.shader->ReleaseAndGetAddressOf());
-@@ -3314,6 +5095,8 @@ extern "C" int nv2a_gpu_available(void)
+@@ -3296,24 +5077,66 @@ extern "C" int nv2a_gpu_compile(void)
+     return 1;
+ }
+ 
++/* Laptops with two GPUs list the integrated one first, and that is the one a
++ * device made with no adapter gets. NVIDIA's and AMD's switchable-graphics
++ * drivers read these exports from the executable (a static library's
++ * dllexport still reaches the program's export table) and start it on the
++ * discrete GPU; DXGI is asked for the high-performance adapter as well. */
++extern "C" {
++__declspec(dllexport) unsigned long NvOptimusEnablement = 1;
++__declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
++}
++
++static ComPtr<IDXGIAdapter1> high_performance_adapter()
++{
++    ComPtr<IDXGIFactory1> factory;
++    ComPtr<IDXGIFactory6> factory6;
++    ComPtr<IDXGIAdapter1> adapter;
++    DXGI_ADAPTER_DESC1 description = {};
++    /* IDXGIFactory6 needs Windows 10 1803; before it, the default adapter. */
++    if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))) || FAILED(factory.As(&factory6)) ||
++            FAILED(factory6->EnumAdapterByGpuPreference(0, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE,
++                                                        IID_PPV_ARGS(&adapter))) ||
++            FAILED(adapter->GetDesc1(&description)) || (description.Flags & DXGI_ADAPTER_FLAG_SOFTWARE))
++        return nullptr;
++    return adapter;
++}
++
+ extern "C" int nv2a_gpu_available(void)
+ {
+     static bool attempted;
+     if (!attempted) {
+         attempted = true;
+-        D3D_FEATURE_LEVEL level;
+-        HRESULT result = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0, nullptr, 0,
+-                                         D3D11_SDK_VERSION, &device, &level, &context);
++        D3D_FEATURE_LEVEL level = {};
++        ComPtr<IDXGIAdapter1> adapter = high_performance_adapter();
++        HRESULT result = E_FAIL;
++        if (adapter)
++            result = D3D11CreateDevice(adapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr, 0, nullptr, 0,
++                                       D3D11_SDK_VERSION, &device, &level, &context);
++        if (FAILED(result))
++            result = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0, nullptr, 0,
++                                       D3D11_SDK_VERSION, &device, &level, &context);
+         if (FAILED(result)) {
+             std::fprintf(stderr, "[GPU-D3D11] device unavailable: 0x%08X\n", (unsigned)result);
+             return 0;
+         }
+         std::fprintf(stderr, "[GPU-D3D11] device ready: feature level 0x%X, hardware\n", (unsigned)level);
++        {
++            ComPtr<IDXGIDevice> dxgi_device;
++            ComPtr<IDXGIAdapter> used;
++            DXGI_ADAPTER_DESC description = {};
++            if (SUCCEEDED(device.As(&dxgi_device)) && SUCCEEDED(dxgi_device->GetAdapter(&used)) &&
++                    SUCCEEDED(used->GetDesc(&description)))
++                std::fprintf(stderr, "[GPU-D3D11] adapter: %ls, %u MB video memory\n", description.Description,
++                             (unsigned)(description.DedicatedVideoMemory >> 20));
++        }
+         if (SUCCEEDED(context.As(&context1))) {
+             D3D11_FEATURE_DATA_D3D11_OPTIONS options = {};
              if (FAILED(device->CheckFeatureSupport(D3D11_FEATURE_D3D11_OPTIONS, &options, sizeof options)) ||
                  !options.ConstantBufferOffsetting)
                  context1.Reset();
@@ -8936,6 +9079,19 @@ index 712b158..4876700 100644
 +void xbox_FramebufferSetCursorImage(const uint32_t *bgra, int width, int height, int hot_x, int hot_y)
 +{ (void)bgra; (void)width; (void)height; (void)hot_x; (void)hot_y; }
  #endif
+diff --git a/tests/d3d8_smoke/CMakeLists.txt b/tests/d3d8_smoke/CMakeLists.txt
+index 734dbc8..003148e 100644
+--- a/tests/d3d8_smoke/CMakeLists.txt
++++ b/tests/d3d8_smoke/CMakeLists.txt
+@@ -22,7 +22,7 @@ if(WIN32)
+         ../../src/kernel/nv2a_gpu_d3d11.cpp
+     )
+     target_include_directories(nv2a_shader_smoke PRIVATE ../../src)
+-    target_link_libraries(nv2a_shader_smoke PRIVATE platform d3d11 d3dcompiler)
++    target_link_libraries(nv2a_shader_smoke PRIVATE platform d3d11 dxgi d3dcompiler)
+     target_compile_features(nv2a_shader_smoke PRIVATE cxx_std_17)
+     target_compile_definitions(nv2a_shader_smoke PRIVATE _CRT_SECURE_NO_WARNINGS)
+     if(MSVC)
 diff --git a/tests/d3d8_smoke/test_nv2a_shader.c b/tests/d3d8_smoke/test_nv2a_shader.c
 index 0650472..1fb1119 100644
 --- a/tests/d3d8_smoke/test_nv2a_shader.c
