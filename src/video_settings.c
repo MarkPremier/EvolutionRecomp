@@ -3016,6 +3016,7 @@ void video_settings_start(const char *game_dir)
     load_pc_cursor();
     apply_setting(SET_ANISOTROPY);
     apply_setting(SET_MSAA);
+    apply_setting(SET_SHADOWS);   /* its map scale and exact depth (else only when changed) */
     apply_setting(SET_ICONS);
     apply_setting(SET_MOUSE_LOOK);
     apply_bindings();
