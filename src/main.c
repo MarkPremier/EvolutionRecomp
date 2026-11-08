@@ -428,10 +428,47 @@ static void log_fatal(const char *what)
     fflush(stderr);
 }
 
+/* A minidump in CrashDumps beside the program, for a crash report: every
+ * thread's registers and call stack, and the memory they point at -- not
+ * the Xbox's 64 MB, so it stays a few megabytes. Only for what ends the
+ * program: the faults the emulation steps over (MMIO, the APU's guarded
+ * writes) never reach here. With no exception (abort and the like) it shows
+ * the thread that gave up. */
+static void write_crash_dump(EXCEPTION_POINTERS *ep)
+{
+    char path[MAX_PATH + 64], *slash;
+    SYSTEMTIME now;
+    HANDLE file;
+    MINIDUMP_EXCEPTION_INFORMATION info;
+    BOOL written;
+
+    if (!GetModuleFileNameA(NULL, path, MAX_PATH) || !(slash = strrchr(path, '\\'))) return;
+    strcpy(slash + 1, "CrashDumps");
+    CreateDirectoryA(path, NULL);
+    GetLocalTime(&now);
+    snprintf(slash + 1, sizeof path - (slash + 1 - path),
+             "CrashDumps\\turok_evolution_%04u-%02u-%02u_%02u-%02u-%02u.dmp",
+             now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute, now.wSecond);
+    file = CreateFileA(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE) return;
+    info.ThreadId = GetCurrentThreadId();
+    info.ExceptionPointers = ep;
+    info.ClientPointers = FALSE;
+    written = MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), file,
+                                (MINIDUMP_TYPE)(MiniDumpWithThreadInfo | MiniDumpWithUnloadedModules |
+                                                MiniDumpWithIndirectlyReferencedMemory),
+                                ep ? &info : NULL, NULL, NULL);
+    CloseHandle(file);
+    if (written) fprintf(stderr, "[FATAL] crash dump: %s\n", path);
+    else DeleteFileA(path);
+    fflush(stderr);
+}
+
 static void on_abort(int signal_number)
 {
     (void)signal_number;
     log_fatal("abort()");
+    write_crash_dump(NULL);
     _exit(3);
 }
 
@@ -440,12 +477,14 @@ static void on_invalid_parameter(const wchar_t *expression, const wchar_t *funct
 {
     (void)expression; (void)function; (void)file; (void)line; (void)reserved;
     log_fatal("invalid argument to a C runtime function");
+    write_crash_dump(NULL);
     _exit(3);
 }
 
 static void on_purecall(void)
 {
     log_fatal("pure virtual call");
+    write_crash_dump(NULL);
     _exit(3);
 }
 
@@ -456,6 +495,7 @@ static LONG WINAPI on_unhandled(EXCEPTION_POINTERS *ep)
              (unsigned long)ep->ExceptionRecord->ExceptionCode,
              (unsigned long long)ep->ContextRecord->Rip);
     log_fatal(what);
+    write_crash_dump(ep);
     return EXCEPTION_CONTINUE_SEARCH;
 }
 

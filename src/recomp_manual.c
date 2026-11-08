@@ -77,8 +77,10 @@ extern __declspec(thread) uint32_t g_esp;
  * frame to frame. The toolkit answers every test "fully visible" anyway (it
  * has no real occlusion counter on the D3D11 path), so an unfinished test is
  * given that same answer now rather than "not yet": the slot is completed as
- * visible and the original function reads it. When the executor reaches the
- * GET_REPORT it writes the same verdict.
+ * visible and the original function reads it. The executor never writes the
+ * report itself: here D3D's report page sits above the 16 MB its 24-bit
+ * offset reaches (0x01A89000, reported as 0xA89000), so a write would land
+ * 16 MB too low, on other data.
  */
 extern void sub_00194B40_gen(void);
 
@@ -281,12 +283,18 @@ void sub_001984B0(void)
  * the distance), so a creature further away casts nothing. The XBOX
  * subclass then creates its render target from the size fields.
  *
- * RECOMP_SHADOW_DISTANCE (default 64) and RECOMP_SHADOW_MAP (default 2048,
- * a power of two from 512 to 4096) replace them; at the defaults shadows
- * reach four times as far (see sub_0017DAF0 below for the area around the
- * player). Set 16 and 512 (and RECOMP_SHADOW_AROUND=0) for the original.
+ * With Shadows set to enhanced (video_settings_enhanced_shadows) the map is
+ * 2048 and the distance 64 (RECOMP_SHADOW_MAP, a power of two from 512 to
+ * 4096, and RECOMP_SHADOW_DISTANCE replace them): shadows reach four times
+ * as far (see sub_0017DAF0 below for the area around the player). Xbox keeps
+ * the game's own. The distance follows the setting at once (written at each
+ * fit, sub_0017DAF0); the map size when the manager is next made.
  */
 extern void sub_0017D5C0_gen(void);
+extern int video_settings_enhanced_shadows(void);
+
+static float s_shadow_distance;        /* enhanced shadows' distance, or 0 */
+static float s_game_shadow_distance;   /* the game's own (16) */
 
 void sub_0017D5C0(void)
 {
@@ -297,12 +305,14 @@ void sub_0017D5C0(void)
     uint32_t map = map_text ? (uint32_t)strtoul(map_text, NULL, 0) : 2048u;
 
     sub_0017D5C0_gen();
-    if (distance > 0.0f && distance < 10000.0f)
-        memcpy((void *)((uintptr_t)(self + 0x40Cu) + g_xbox_mem_offset), &distance, 4);
-    if (map >= 512u && map <= 4096u && !(map & (map - 1u))) {
+    memcpy(&s_game_shadow_distance, (void *)((uintptr_t)(self + 0x40Cu) + g_xbox_mem_offset), 4);
+    s_shadow_distance = distance > 0.0f && distance < 10000.0f ? distance : s_game_shadow_distance;
+    if (video_settings_enhanced_shadows() && map >= 512u && map <= 4096u && !(map & (map - 1u))) {
         TUROK_MEM32(self + 0x400u) = map;
         TUROK_MEM32(self + 0x404u) = map;
     }
+    fprintf(stderr, "[SHADOW] shadow manager: %ux%u map, %s shadows\n", TUROK_MEM32(self + 0x400u),
+            TUROK_MEM32(self + 0x404u), video_settings_enhanced_shadows() ? "enhanced" : "xbox");
 }
 
 /* ── Shadow area around the player (sub_0017DAF0) ──────────────
@@ -313,8 +323,8 @@ void sub_0017D5C0(void)
  * (sub_0001FD20 sets it, radians at camera +0xEC): the shadowed area is a
  * disc with the player on its rim. Anything beside or behind the player --
  * and, in widescreen, near the sides of the view -- is off the map and
- * casts nothing. The angle is widened so the disc also reaches
- * RECOMP_SHADOW_AROUND units past the player: 12 outdoors, 32 in the
+ * casts nothing. With enhanced shadows the angle is widened so the disc also
+ * reaches RECOMP_SHADOW_AROUND units past the player: 12 outdoors, 32 in the
  * indoor levels (video_settings_indoor_level) -- under a roof, where the
  * whole room is in shadow, the disc's rim shows as a straight lit edge, and
  * at 21:9 one 12 units out was in view at the sides. Outdoors the smaller
@@ -336,6 +346,10 @@ static float guest_float(uint32_t va)
 void sub_0017DAF0(void)
 {
     s_shadow_fit = g_ecx;
+    if (s_game_shadow_distance > 0.0f) {
+        float distance = video_settings_enhanced_shadows() ? s_shadow_distance : s_game_shadow_distance;
+        memcpy((void *)((uintptr_t)(g_ecx + 0x40Cu) + g_xbox_mem_offset), &distance, 4);
+    }
     sub_0017DAF0_gen();
     s_shadow_fit = 0;
 }
@@ -351,7 +365,7 @@ void sub_0001FD20(void)
         set = text ? (float)atof(text) : -1.0f;
         if (text && !(set >= 0 && set < 1000.0f)) set = 0;
     }
-    around = set >= 0 ? set : video_settings_indoor_level() ? 32.0f : 12.0f;
+    around = !video_settings_enhanced_shadows() ? 0.0f : set >= 0 ? set : video_settings_indoor_level() ? 32.0f : 12.0f;
     if (self && g_ecx == self + 0x10u && around > 0) {
         float dx = guest_float(self + 0x210u) - guest_float(self + 0x204u);
         float dy = guest_float(self + 0x214u) - guest_float(self + 0x208u);
@@ -375,20 +389,20 @@ void sub_0001FD20(void)
  * passed one of its visibility tests (occlusion queries, polled every
  * fourth frame, sub_00194B40). Only a model drawn on screen issues them, so
  * one just out of view -- whose shadow may well be in view -- casts none.
- * RECOMP_SHADOW_OFFSCREEN=0 restores that; otherwise every model the
- * manager offers casts its shadow, and the light camera clips the rest. */
+ * Xbox shadows keep that; enhanced ones cast every model the manager offers,
+ * and the light camera clips the rest (RECOMP_SHADOW_OFFSCREEN=0: not). */
 extern void sub_000F21B0_gen(void);
 
 /* Its caller, the shadow pass's actor loop in sub_0017E2D0, holds the actor
- * in esi (position +0x38/+0x3C/+0x40, y up). The ambient birds --
- * FlyingIndigenousAI, vtable 0x21A240 (made by sub_0012D370) -- cast none
- * once they are more than RECOMP_SHADOW_BIRD_HEIGHT units (default 10) above
- * the shadowed area's centre (the manager's target, +0x210, at the player's
- * height): circling high over the levels as set dressing, their shadows
- * landed far below them as stray blobs. Birds flushed from the brush (the
- * birds that burst up at the start of the first level) always cast theirs,
- * however high they climb. Flying enemies (FlyingEnemyAI) always cast.
- * RECOMP_SHADOW_BIRDS=1: every bird does. */
+ * in esi (position +0x38/+0x3C/+0x40, y up). With enhanced shadows the
+ * ambient birds -- FlyingIndigenousAI, vtable 0x21A240 (made by
+ * sub_0012D370) -- cast none once they are more than RECOMP_SHADOW_BIRD_HEIGHT
+ * units (default 10) above the shadowed area's centre (the manager's target,
+ * +0x210, at the player's height): circling high over the levels as set
+ * dressing, their shadows landed far below them as stray blobs. Birds
+ * flushed from the brush (the birds that burst up at the start of the first
+ * level) always cast theirs, however high they climb. Flying enemies
+ * (FlyingEnemyAI) always cast. RECOMP_SHADOW_BIRDS=1: every bird does. */
 extern __declspec(thread) uint32_t g_esi;
 #define FLYING_INDIGENOUS_AI_VTABLE 0x0021A240u
 
@@ -451,11 +465,102 @@ void sub_000F21B0(void)
         if (getenv("RECOMP_SHADOW_BIRD_HEIGHT")) bird_height = (float)atof(getenv("RECOMP_SHADOW_BIRD_HEIGHT"));
     }
     sub_000F21B0_gen();
+    if (!video_settings_enhanced_shadows()) return;   /* Xbox shadows: the game's verdict */
     if (offscreen) g_eax = 1;
     if (!birds && actor && TUROK_MEM32(actor) == FLYING_INDIGENOUS_AI_VTABLE &&
             guest_float(actor + 0x3Cu) - guest_float(manager + 0x214u) > bird_height &&
             !bird_was_flushed(actor))
         g_eax = 0;
+}
+
+/* ── Aim wobble at any frame rate ───────────────────────────────
+ *
+ * A scoped gun (sub_0011B220, called each frame while scoped) and the bows
+ * at full draw (sub_0011CD30, sub_0011E9E0, and the update sub_00122CD0,
+ * whose wobble is inline) wobble the aim one step per frame: each step eases
+ * a yaw and a pitch rate toward a random target (the bows' BaseWobble and
+ * RandWobble), turns the view by the yaw rate (sub_001421B0) and moves the
+ * aim point by the pitch rate (sub_00038E10). No step looks at the frame
+ * time, so at 120 fps the aim wandered twice as fast as at 60 and twice as
+ * far a second, at 240 four times: past 60, scopes and drawn bows were
+ * impossible to hold on a target (the pistol scope worst).
+ *
+ * The steps now come at most 60 a second, by the game's frame time (its
+ * timer, [0x250A84] + 0x5C): at 60 fps and below, one a frame, as before
+ * (the Xbox ran at 60 or less); above, only on frames where a 60th of a
+ * second has gone by. The three wobble-only functions are skipped on the
+ * other frames. The bow update still runs then -- its draw timer and the
+ * rest -- with its wobble's state (+0x2BC..+0x2C8) put back and its turn and
+ * aim moves dropped. */
+#define AIM_WOBBLE_RATE   60.0f
+#define GAME_TIMER_PTR    0x00250A84u
+
+static __declspec(thread) int s_wobble_held;   /* sub_00122CD0's wobble is not due */
+
+/* 1 if a wobble step is due this frame (once a frame at most). */
+static int aim_wobble_due(float *owed)
+{
+    uint32_t timer = TUROK_MEM32(GAME_TIMER_PTR);
+    float seconds = timer ? guest_float(timer + 0x5Cu) : 0.0f;
+    if (!(seconds > 0.0f) || seconds > 0.25f) seconds = 1.0f / AIM_WOBBLE_RATE;
+    *owed += seconds * AIM_WOBBLE_RATE;
+    if (*owed < 0.999f) return 0;
+    *owed -= 1.0f;
+    if (*owed > 1.0f) *owed = 0.0f;    /* below 60 fps: no catching up */
+    return 1;
+}
+
+extern void sub_0011B220_gen(void);
+extern void sub_0011CD30_gen(void);
+extern void sub_0011E9E0_gen(void);
+extern void sub_00122CD0_gen(void);
+extern void sub_001421B0_gen(void);
+extern void sub_00038E10_gen(void);
+
+void sub_0011B220(void)   /* scoped gun (this-call, ret) */
+{
+    static float owed;
+    if (!aim_wobble_due(&owed)) { g_esp += 4; return; }
+    sub_0011B220_gen();
+}
+
+void sub_0011CD30(void)   /* bow (this-call, ret) */
+{
+    static float owed;
+    if (!aim_wobble_due(&owed)) { g_esp += 4; return; }
+    sub_0011CD30_gen();
+}
+
+void sub_0011E9E0(void)   /* bow (this-call, ret) */
+{
+    static float owed;
+    if (!aim_wobble_due(&owed)) { g_esp += 4; return; }
+    sub_0011E9E0_gen();
+}
+
+void sub_00122CD0(void)   /* bow update (this-call, ret 4: frame seconds) */
+{
+    static float owed;
+    uint32_t self = g_ecx, state[4];
+    int i;
+    if (aim_wobble_due(&owed)) { sub_00122CD0_gen(); return; }
+    for (i = 0; i < 4; i++) state[i] = TUROK_MEM32(self + 0x2BCu + 4u * (uint32_t)i);
+    s_wobble_held = 1;
+    sub_00122CD0_gen();
+    s_wobble_held = 0;
+    for (i = 0; i < 4; i++) TUROK_MEM32(self + 0x2BCu + 4u * (uint32_t)i) = state[i];
+}
+
+void sub_001421B0(void)   /* turn the view (this-call, ret 12) */
+{
+    if (s_wobble_held && TUROK_MEM32(g_esp) == 0x00122EE3u) { g_esp += 16; return; }
+    sub_001421B0_gen();
+}
+
+void sub_00038E10(void)   /* set the aim point (this-call, ret 4) */
+{
+    if (s_wobble_held && TUROK_MEM32(g_esp) == 0x00122F58u) { g_esp += 8; return; }
+    sub_00038E10_gen();
 }
 
 /* ── Keep bodies (Video Options) ───────────────────────────────
@@ -466,7 +571,9 @@ void sub_000F21B0(void)
  * second), and at 5 s puts it in state 0x3E, gone -- or, for an actor that
  * respawns (+0x5AA, after a further +0x528 seconds), brings it back. With
  * Keep bodies on, a body that does not respawn has its clock held at two
- * seconds, so it stays where it fell for the rest of the level. */
+ * seconds, so it stays where it fell for the rest of the level. Not in the
+ * stealth level (video_settings_keep_bodies): there the alarms count and
+ * send the Slegs around them, and a body left lying still counted as one. */
 extern void sub_0013D000_gen(void);
 extern int video_settings_keep_bodies(void);
 

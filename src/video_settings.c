@@ -58,6 +58,7 @@ extern void nv2a_gpu_set_anisotropy(int level);
 extern void nv2a_gpu_set_msaa(int samples);
 extern void nv2a_gpu_set_heat_haze(int mode);
 extern void nv2a_gpu_set_shadow_scale(int factor);
+extern void nv2a_gpu_set_exact_shadows(int on);
 
 /* ── Settings ─────────────────────────────────────────────────── */
 
@@ -85,8 +86,9 @@ static const char *const k_anisotropy[] = {"off", "2x", "4x", "8x", "16x"};
 static const char *const k_msaa[] = {"off", "2x", "4x", "8x"};
 static const char *const k_distances[] = {"normal", "2x", "4x", "8x"};
 static const char *const k_hazes[] = {"original", "smooth", "sharp"};
-/* Shadow maps on the GPU at 1, 2 or 4 times the game's 2048 (value n: 1 << n). */
-static const char *const k_shadow_details[] = {"normal", "2x", "4x"};
+/* Shadows: the Xbox's own, or every shadow change of the recompilation
+ * (video_settings_enhanced_shadows). */
+static const char *const k_shadow_modes[] = {"xbox", "enhanced"};
 static const char *const k_icons[] = {"xbox", "pc"};
 static const char *const k_mouse_looks[] = {"stick", "raw"};
 static const char *const k_speeds[] = {"1", "2", "3", "4", "5", "6", "7", "8", "9", "10"};
@@ -102,7 +104,7 @@ static const VideoSetting k_settings[SETTING_COUNT] = {
     {"msaa", "msaa", k_msaa, COUNT(k_msaa), 0},
     {"draw_distance", "draw distance", k_distances, COUNT(k_distances), 1},
     {"heat_haze", "heat haze", k_hazes, COUNT(k_hazes), 0},
-    {"shadow_detail", "shadow detail", k_shadow_details, COUNT(k_shadow_details), 1},
+    {"shadows", "shadows", k_shadow_modes, COUNT(k_shadow_modes), 1},
     {"keep_bodies", "keep bodies", k_switches, COUNT(k_switches), 0},
     {"button_icons", "button icons", k_icons, COUNT(k_icons), 0},
     {"mouse_look", "mouse look", k_mouse_looks, COUNT(k_mouse_looks), 1},
@@ -729,7 +731,6 @@ static int values_of(int setting)
 {
     switch (setting) {
     case SET_MSAA: return SET_ANISOTROPY;          /* off, 2x, 4x, 8x: its first four */
-    case SET_SHADOWS: return SET_DRAW_DISTANCE;
     case SET_BODIES:
     case SET_FLIGHT_MOUSE:
     case SET_FLIGHT_INVERT: return SET_VSYNC;
@@ -738,10 +739,21 @@ static int values_of(int setting)
     }
 }
 
+/* Shadows' label and values are GameOptions.txm's, keys 14 on (after PC
+ * Settings' title, 13): Options.txm has no key left for them. */
+#define GAME_TEXT_SHADOWS 14
+
+static int in_game_text(int setting)
+{
+    return setting == SET_SHADOWS;
+}
+
 static int text_label(int setting)
 {
     int key = TEXT_TITLE + 1, s;
-    for (s = 0; s < setting; s++) key += 1 + (values_of(s) == s ? k_settings[s].count : 0);
+    if (in_game_text(setting)) return GAME_TEXT_SHADOWS;
+    for (s = 0; s < setting; s++)
+        if (!in_game_text(s)) key += 1 + (values_of(s) == s ? k_settings[s].count : 0);
     return key;
 }
 
@@ -930,6 +942,7 @@ static const char *const k_template_values[] = {"autoaimValueWidget", "hudValueW
 typedef struct PageRow {
     char key[32];
     int label, value_text, last;
+    const char *text;     /* its label's and values' text file, or NULL for Options.txm */
     const char *history;  /* another page's history item it shows, or NULL */
     int item;             /* (its item) */
 } PageRow;
@@ -1035,9 +1048,9 @@ static int make_page(Node *screen, const PageSpec *page)
         scale[1] *= page->text_scale;
         set_vector(child(box, "SCALE"), scale);
 
-        set_text(child(label_vars, "W_TMF"), OPTIONS_TXM);
+        set_text(child(label_vars, "W_TMF"), page->rows[s].text ? page->rows[s].text : OPTIONS_TXM);
         set_byte(child(label_vars, "W_TMN"), page->rows[s].label);
-        set_text(child(box_vars, "W_TMF"), OPTIONS_TXM);
+        set_text(child(box_vars, "W_TMF"), page->rows[s].text ? page->rows[s].text : OPTIONS_TXM);
         set_byte(child(box_vars, "W_TMN"), page->rows[s].value_text);
         set_text(child(box_vars, "W_THF"), row_history(page, s));
         set_byte(child(box_vars, "W_THI"), row_item(page, s));
@@ -1502,6 +1515,7 @@ static int edit_video_screen(Node *screen, const char *unused)
         page.rows[s].label = text_label(s);
         page.rows[s].value_text = text_values(s);
         page.rows[s].last = k_settings[s].count - 1;
+        page.rows[s].text = in_game_text(s) ? GAME_TXM : NULL;
     }
     return make_page(screen, &page);
 }
@@ -1536,6 +1550,7 @@ static int edit_settings_screen(Node *screen, const char *unused)
         page.rows[r].label = text_label(s);
         page.rows[r].value_text = text_values(s);
         page.rows[r].last = k_settings[s].count - 1;
+        page.rows[r].text = in_game_text(s) ? GAME_TXM : NULL;
         page.rows[r].history = VIDEO_HST;
         page.rows[r].item = s + 1;
     }
@@ -1635,6 +1650,7 @@ static int write_patch(const char *game_dir)
     add_text(&files[OPTIONS_TEXT].data, TEXT_ENTRY, "VIDEO OPTIONS");
     add_text(&files[OPTIONS_TEXT].data, TEXT_TITLE, "Video Options");
     for (s = 0; s < SETTING_COUNT; s++) {
+        if (in_game_text(s)) continue;   /* GameOptions.txm's, below */
         add_text(&files[OPTIONS_TEXT].data, text_label(s), k_settings[s].label);
         for (i = 0; values_of(s) == s && i < k_settings[s].count; i++)
             add_text(&files[OPTIONS_TEXT].data, text_label(s) + 1 + i, k_settings[s].values[i]);
@@ -1646,6 +1662,12 @@ static int write_patch(const char *game_dir)
     files[GAME_TEXT].key = tree_key("data\\text\\gameoptions.txm");
     if (!trees_read(&trees, "data\\text\\gameoptions.txm", &files[GAME_TEXT].data)) goto done;
     add_text(&files[GAME_TEXT].data, GAME_TEXT_SETTINGS_TITLE, "PC Settings");
+    for (s = 0; s < SETTING_COUNT; s++) {
+        if (!in_game_text(s)) continue;
+        add_text(&files[GAME_TEXT].data, text_label(s), k_settings[s].label);
+        for (i = 0; i < k_settings[s].count; i++)
+            add_text(&files[GAME_TEXT].data, text_label(s) + 1 + i, k_settings[s].values[i]);
+    }
     for (i = 0; i < KEY_COUNT; i++) add_title_text(&files[OPTIONS_TEXT].data, TEXT_KEYS + i, k_keys[i].name);
 
     if (!trees_read(&trees, "data\\history\\history.txt", &files[HISTORY_LIST].data)) goto done;
@@ -1952,7 +1974,10 @@ static void apply_setting(int setting)
     case SET_ANISOTROPY: nv2a_gpu_set_anisotropy(1 << s_values[SET_ANISOTROPY]); break;
     case SET_MSAA: nv2a_gpu_set_msaa(1 << s_values[SET_MSAA]); break;
     case SET_HEAT_HAZE: nv2a_gpu_set_heat_haze(s_values[SET_HEAT_HAZE]); break;
-    case SET_SHADOWS: nv2a_gpu_set_shadow_scale(1 << s_values[SET_SHADOWS]); break;
+    case SET_SHADOWS:   /* the rest is read as the game runs (recomp_manual.c) */
+        nv2a_gpu_set_shadow_scale(s_values[SET_SHADOWS] ? 4 : 1);
+        nv2a_gpu_set_exact_shadows(s_values[SET_SHADOWS]);
+        break;
     case SET_ICONS: nv2a_gpu_set_texture_replacements(s_values[SET_ICONS]); break;
     case SET_MOUSE_LOOK: xbox_KbmSetRawMouse(s_values[SET_MOUSE_LOOK]); s_mouse_raw = s_values[SET_MOUSE_LOOK]; break;
     case SET_DRAW_DISTANCE:           /* read each frame */
@@ -2064,8 +2089,14 @@ float video_settings_take_mouse_turn(int axis)
  *
  * Not in the flying levels (the pod-02/09/13/17 "flight" chapters): there
  * what is shot down falls out of sight, and its gibs, kept, only crowd the
- * particles the fighting needs. */
+ * particles the fighting needs.
+ *
+ * Bodies, not decals, are off in the stealth level (pod 05) too: its alarms
+ * stand down only once no alerted Sleg is left near them, and send the
+ * nearest Sleg to raise them, and a body left lying still counted as one --
+ * the alarm never ended and the security gates stayed shut. */
 static int s_flying_level;
+static int s_stealth_level;
 /* Indoors (the base interiors of pods 05 and 06, Sleg City's pods 10-12): a
  * room under a roof is all in shadow, so the shadow map's edge beside the
  * player shows there (recomp_manual.c, sub_0001FD20). */
@@ -2081,8 +2112,11 @@ void video_settings_level(const char *path)
     s_flying_level = strstr(lower, "-flight") != NULL;
     s_indoor_level = strstr(lower, "\\pod-05-") || strstr(lower, "\\pod-06-") || strstr(lower, "-s-city-");
     if (s_indoor_level) fprintf(stderr, "[VIDEO] indoor level: shadows reach further around the player\n");
+    s_stealth_level = strstr(lower, "\\pod-05-") != NULL;
     if (s_flying_level && s_values[SET_BODIES])
         fprintf(stderr, "[VIDEO] flying level: keep bodies is off here\n");
+    if (s_stealth_level && s_values[SET_BODIES])
+        fprintf(stderr, "[VIDEO] stealth level: keep bodies keeps only decals here\n");
 }
 
 int video_settings_indoor_level(void)
@@ -2090,9 +2124,20 @@ int video_settings_indoor_level(void)
     return s_indoor_level;
 }
 
+/* Shadows: enhanced -- every shadow change of the recompilation
+ * (recomp_manual.c, the toolkit): a 2048 map instead of the game's 512, drawn
+ * four times finer again on the GPU, exact depth, four times the reach, a
+ * wider area around the player, models out of view casting, high ambient
+ * birds not. Xbox: the game's own shadows, none of them. */
+int video_settings_enhanced_shadows(void)
+{
+    return s_values[SET_SHADOWS] != 0;
+}
+
+
 int video_settings_keep_bodies(void)
 {
-    return s_values[SET_BODIES] && !s_flying_level;
+    return s_values[SET_BODIES] && !s_flying_level && !s_stealth_level;
 }
 
 int video_settings_keep_decals(void)

@@ -31,21 +31,33 @@ CPU-renderer build (about 9 fps on the title screen).
   takes the next. `RECOMP_HID_PADS=0` turns this off. Both the DualSense
   and the Switch 2 Pro Controller are tested.
 - Keyboard and mouse work too, merged onto controller 1 (see Controls).
-- Dinosaurs and Turok cast shadows, with filtered (PCF) edges.
-  `RECOMP_SHADOWS=0` turns them off. They reach further than on the Xbox:
-  the shadow map covers 64 units ahead of the camera and 12 around the
-  player (32 in the indoor levels, pods 05, 06 and 10-12, where the map's
-  edge beside you showed as a straight lit line on shadowed walls), so
-  creatures beside and behind you (and at the sides of a
-  widescreen view) cast them too, at 2048x2048 (the game's own 16 units
-  ahead at 512x512), drawn on the GPU at 4096 by default (Shadow detail). A creature out of view still casts its shadow; the
-  game drew only those of creatures on screen. `RECOMP_SHADOW_DISTANCE`,
-  `RECOMP_SHADOW_AROUND`, `RECOMP_SHADOW_MAP` and `RECOMP_SHADOW_OFFSCREEN`
-  change them; 16, 0, 512 and 0 give the original.
-  The ambient birds (FlyingIndigenousAI) cast no shadow once more than 10
-  units above the player's height (`RECOMP_SHADOW_BIRD_HEIGHT`): their blobs
-  landed far below them. Birds taking off nearby keep theirs.
-  `RECOMP_SHADOW_BIRDS=1` gives every bird one.
+- Dinosaurs and Turok cast shadows, with filtered (PCF) edges, the Xbox's
+  own or enhanced (Shadows, in Video Options; `RECOMP_SHADOWS=0` turns them
+  off). Xbox is the game's shadows as they were. Enhanced is every change
+  the recompilation makes to them:
+  - a 2048x2048 shadow map instead of the game's 512x512, drawn four times
+    finer again on the GPU (8192 texels a side): sharp edges, no blocks;
+  - exact (float) shadow depth instead of the Xbox's 16-bit: there one
+    depth step is several units deep, deeper than a creature, so a wall or
+    building just in front of a body took its shadow as streaks;
+  - four times the reach: the map covers 64 units ahead of the camera, not
+    16, and 12 around the player (32 in the indoor levels, pods 05, 06 and
+    10-12, where the map's edge beside you showed as a straight lit line on
+    shadowed walls), so creatures beside and behind you (and at the sides
+    of a widescreen view) cast them too;
+  - creatures out of view cast theirs; the game drew only those of
+    creatures on screen;
+  - the ambient birds (FlyingIndigenousAI) cast none once more than 10 units
+    above the player's height: their blobs landed far below them. Birds
+    taking off nearby keep theirs.
+
+  The longer reach has a side effect the Xbox never shows: the game draws
+  only creatures into the shadow map, not floors, so an enemy on a balcony
+  or upper gallery (Halls of Battle) casts down through its floor onto the
+  hall below. The map's size changes when the game next starts; the rest at
+  once. `RECOMP_SHADOW_DISTANCE`, `RECOMP_SHADOW_AROUND`, `RECOMP_SHADOW_MAP`,
+  `RECOMP_SHADOW_OFFSCREEN`, `RECOMP_SHADOW_EXACT`, `RECOMP_SHADOW_SCALE`,
+  `RECOMP_SHADOW_BIRD_HEIGHT` and `RECOMP_SHADOW_BIRDS=1` tune Enhanced.
 - The window shows frames straight from the GPU through a swap chain, so it
   resizes and maximises freely (the frame stays 4:3, letterboxed), opens at
   the largest multiple of 640x480 that fits the screen, and **Alt+Enter**
@@ -87,8 +99,10 @@ folder by hand. Saves go in that folder's `udata`.
 
 If the game crashes, the details are in `turok_log.txt` beside the program
 (the run before is kept as `turok_log.prev.txt`, so starting again does not
-lose it). Please include that file when reporting a crash. A run with stderr
-redirected writes there instead.
+lose it), and a crash dump in the `CrashDumps` folder beside it
+(`turok_evolution_<date>_<time>.dmp`, under a megabyte: every thread's
+registers and call stack). Please include both when reporting a crash. A run
+with stderr redirected writes the log there instead.
 
 The game's shaders are translated to HLSL and compiled as each one first
 appears. Compiled shaders are kept in `%LOCALAPPDATA%\xboxrecomp\shadercache`,
@@ -311,8 +325,8 @@ effect at once and are kept in `turok_settings.ini` beside the exe:
 | Flight invert | off, on (the mouse up the screen dives instead of climbing; on the PC Settings page, kept with these settings) | |
 | Draw distance | normal, 2x, 4x, 8x (2x by default) | |
 | Heat haze | original, smooth, sharp (the flamethrower and rocket haze: original is the console's blocks; smooth filters the ripple; sharp also copies the screen at full resolution) | `RECOMP_SMOOTH_BUMP=1` (smooth) |
-| Shadow detail | normal, 2x, 4x (the shadow map drawn on the GPU at 2048, 4096 or 8192 texels a side: sharper, less blocky shadow edges in every level; 2x is the default, normal is lighter on a Steam Deck) | `RECOMP_SHADOW_SCALE=1/2/4` |
-| Keep bodies | off, on (off by default; also keeps decals; always off in the flying levels) | |
+| Shadows | xbox, enhanced (enhanced by default; see Shadows above -- the shadow map's size changes when the game next starts) | `RECOMP_SHADOW_EXACT`, `RECOMP_SHADOW_SCALE` override parts |
+| Keep bodies | off, on (off by default; also keeps decals; always off in the flying levels, and bodies are not kept in the stealth level) | |
 
 The page shows ten rows at a time and scrolls: it follows the highlight as you move up and down, and the mouse wheel scrolls it (click a row, or press left and right, to change its value).
 
@@ -332,7 +346,11 @@ An environment variable set by hand still wins at start-up.
   and its text otherwise flash past.
 - **Frame limit**: the game steps by a measured clock (`sub_00028B40`), so it
   runs at the right speed at any rate. The front end stays at 60, as its
-  movies are paced by the vertical blank.
+  movies are paced by the vertical blank. The aim wobble of scoped weapons
+  and fully drawn bows was the exception: it stepped once a frame, so above
+  60 fps it wandered faster and further the higher the rate (impossible to
+  aim at 120 and up, the pistol scope worst). It now steps at most 60 times
+  a second; at 60 fps and below it is as before.
 - **Button icons, pc**: the menus' A and B prompts become the PC release's
   Enter and Esc keys. They are read from a PC install, which you name in
   `turok_settings.ini`: `[paths]` then `pc_game_dir=<folder with data\Textures>`
@@ -371,7 +389,13 @@ An environment variable set by hand still wins at start-up.
   (`sub_0013D000`) counts time since death at +0x52C; past 3.5 s it fades
   the body and sinks it into the ground, and at 5 s removes it. With the
   setting on that clock is held at 2 s, except for actors that respawn
-  (+0x5AA). `RECOMP_CORPSE_TRACE=1` logs deaths, fades and actor changes;
+  (+0x5AA). Bodies are not kept in the stealth level (pod 05), whose alarms
+  were built around the dead disappearing: an alarm box stands down only 10 s
+  after no alerted Sleg is left near it (`sub_00128380` counts them from the
+  Sleg list, where a kept body stayed), and sends the nearest Sleg to raise
+  it, so with bodies kept the alarm never ended, the security gates stayed
+  shut, and reinforcements and lockdowns misbehaved. Its decals are still
+  kept. `RECOMP_CORPSE_TRACE=1` logs deaths, fades and actor changes;
   `RECOMP_DEBUG_KILL=<s>` zeroes the dinosaurs' health that long into a level.
 - The same setting keeps decals: blood splats, bullet holes, scorch marks and gibs last ten
   minutes instead of 3 to 20 seconds. They are particles, each kind a PARTDEF
@@ -422,7 +446,7 @@ the disc has them. A `patch0.tre` that something else wrote is left alone.
 | `src/main.c` | Host entry point: loads the XBE, sets the runtime defaults below, calls the game's entry point |
 | `src/game_files.c` | Finds the player's USA disc files, checks `default.xbe`, and extracts a disc image (XDVDFS) into `game` |
 | `src/video_settings.c` | The Video Options page: builds `patch0.tre` from the disc's menus (its `.tre` and screen formats are described there), keeps `turok_settings.ini`, and applies the page's values through the history values the menu writes |
-| `src/recomp_manual.c` | Hand-written overrides: D3D's GetVisibilityTestResult (sub_00194B40) completes unfinished tests as visible; DirectSound's idle-voice handler (sub_001B23DD) ignores voices nobody owns (the emulated APU could report one, and quitting a level crashed); the shadow manager's constructor (sub_0017D5C0) takes its shadow distance and map size from `RECOMP_SHADOW_DISTANCE`/`RECOMP_SHADOW_MAP`; the light camera's fit (sub_0017DAF0, through the camera FOV setter sub_0001FD20) widens to cover the area around the player; the shadow caster check (sub_000F21B0) passes creatures out of view; the box-in-view test (sub_00021A90) settles 95% of its calls natively, with the original's x87 roundings (`RECOMP_CULL_VERIFY=1` checks every answer against the original); D3D KickOff (sub_001984B0/sub_00198480) skips the write-combine flush handshake and the vblank handler (sub_0019D580) drops PMC_INTR's PCRTC bit before its acknowledge spin -- both waited on the toolkit's GPU thread; the movement integrator (sub_00042450) takes a flight path's orientation without rotation collision (Escape Flight's ships tumbled at the ceiling at 120 fps) |
+| `src/recomp_manual.c` | Hand-written overrides: D3D's GetVisibilityTestResult (sub_00194B40) completes unfinished tests as visible; DirectSound's idle-voice handler (sub_001B23DD) ignores voices nobody owns (the emulated APU could report one, and quitting a level crashed); with enhanced shadows, the shadow manager's constructor (sub_0017D5C0) takes its map size from `RECOMP_SHADOW_MAP`, the light camera's fit (sub_0017DAF0, through the camera FOV setter sub_0001FD20) its distance and a wider area around the player, and the shadow caster check (sub_000F21B0) passes creatures out of view; the box-in-view test (sub_00021A90) settles 95% of its calls natively, with the original's x87 roundings (`RECOMP_CULL_VERIFY=1` checks every answer against the original); D3D KickOff (sub_001984B0/sub_00198480) skips the write-combine flush handshake and the vblank handler (sub_0019D580) drops PMC_INTR's PCRTC bit before its acknowledge spin -- both waited on the toolkit's GPU thread; the movement integrator (sub_00042450) takes a flight path's orientation without rotation collision (Escape Flight's ships tumbled at the ceiling at 120 fps); the aim wobble of scoped guns (sub_0011B220) and drawn bows (sub_0011CD30, sub_0011E9E0, and the update sub_00122CD0 through the view turn sub_001421B0 and aim setter sub_00038E10) steps at most 60 times a second |
 | `seeds/manual_seeds.json` | Functions only reached through pointers (XPP init) |
 | `seeds/recomp_extra_seeds.json` | Functions the disassembler misses, found by the upstream recompiler or at runtime (`tools.seed_from_log` on an `[ICALL] Failed to resolve` log). Includes the player-action thunks (`mov eax,[ecx]; mov [ecx+0x3A4],0; jmp [eax+N]`) reached only through runtime-built tables; without them fire, pause and previous weapon did nothing. `py -3 tools/scan_missed_functions.py <default.xbe> src/recomp/gen` lists code still missing (after switch tables, in gaps) to seed; its remaining five hits are data or interior addresses |
 | `patches/xboxrecomp-aknavj-turok.patch` | The toolkit changes as one diff against aknavj 11a8aa1 |
