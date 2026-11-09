@@ -116,6 +116,10 @@ void sub_00194B40(void)
  */
 extern __declspec(thread) uint32_t g_ecx;
 extern void sub_001B23DD_gen(void);
+typedef struct MCPXAPUState MCPXAPUState;
+extern MCPXAPUState *g_apu_state;
+extern int mcpx_apu_voice_idle_begin(MCPXAPUState *d, uint32_t voice);
+extern void mcpx_apu_voice_idle_end(MCPXAPUState *d, uint32_t voice);
 
 void sub_001B23DD(void)
 {
@@ -125,7 +129,15 @@ void sub_001B23DD(void)
         g_esp += 8;   /* ret 4 */
         return;
     }
+    /* The trap can be consumed here from either the ISR or synchronous
+     * DirectSound work, after a stop/restart has made its idle report stale.
+     * Retiring it then unlinks the new shot, leaving an active silent voice. */
+    if (!mcpx_apu_voice_idle_begin(g_apu_state, handle)) {
+        g_esp += 8;
+        return;
+    }
     sub_001B23DD_gen();
+    mcpx_apu_voice_idle_end(g_apu_state, handle);
 }
 
 /*
@@ -497,11 +509,30 @@ void sub_000F21B0(void)
 
 static __declspec(thread) int s_wobble_held;   /* sub_00122CD0's wobble is not due */
 
-/* 1 if a wobble step is due this frame (once a frame at most). */
-static int aim_wobble_due(float *owed)
+#define AIM_WOBBLE_CLOCKS 64u
+static struct { uint32_t self; float owed[4]; } s_wobble_clocks[AIM_WOBBLE_CLOCKS];
+
+static void aim_wobble_reset(void)
 {
+    memset(s_wobble_clocks, 0, sizeof s_wobble_clocks);
+}
+
+/* Each weapon instance has its own clock for each update method. Sharing
+ * one across players let one player's update consume another's next step. */
+static int aim_wobble_due(uint32_t self, unsigned method)
+{
+    unsigned first = (self >> 4) & (AIM_WOBBLE_CLOCKS - 1u), at = first, tries;
     uint32_t timer = TUROK_MEM32(GAME_TIMER_PTR);
     float seconds = timer ? guest_float(timer + 0x5Cu) : 0.0f;
+    float *owed;
+    for (tries = 0; tries < AIM_WOBBLE_CLOCKS; tries++, at = (at + 1u) & (AIM_WOBBLE_CLOCKS - 1u))
+        if (!s_wobble_clocks[at].self || s_wobble_clocks[at].self == self) break;
+    if (tries == AIM_WOBBLE_CLOCKS) {
+        at = first;   /* bounded storage; a new weapon starts with a fresh clock */
+        memset(&s_wobble_clocks[at], 0, sizeof s_wobble_clocks[at]);
+    }
+    s_wobble_clocks[at].self = self;
+    owed = &s_wobble_clocks[at].owed[method];
     if (!(seconds > 0.0f) || seconds > 0.25f) seconds = 1.0f / AIM_WOBBLE_RATE;
     *owed += seconds * AIM_WOBBLE_RATE;
     if (*owed < 0.999f) return 0;
@@ -519,35 +550,31 @@ extern void sub_00038E10_gen(void);
 
 void sub_0011B220(void)   /* scoped gun (this-call, ret) */
 {
-    static float owed;
-    if (!aim_wobble_due(&owed)) { g_esp += 4; return; }
+    if (!aim_wobble_due(g_ecx, 0)) { g_esp += 4; return; }
     sub_0011B220_gen();
 }
 
 void sub_0011CD30(void)   /* bow (this-call, ret) */
 {
-    static float owed;
-    if (!aim_wobble_due(&owed)) { g_esp += 4; return; }
+    if (!aim_wobble_due(g_ecx, 1)) { g_esp += 4; return; }
     sub_0011CD30_gen();
 }
 
 void sub_0011E9E0(void)   /* bow (this-call, ret) */
 {
-    static float owed;
-    if (!aim_wobble_due(&owed)) { g_esp += 4; return; }
+    if (!aim_wobble_due(g_ecx, 2)) { g_esp += 4; return; }
     sub_0011E9E0_gen();
 }
 
 void sub_00122CD0(void)   /* bow update (this-call, ret 4: frame seconds) */
 {
-    static float owed;
     uint32_t self = g_ecx, state[4];
-    int i;
-    if (aim_wobble_due(&owed)) { sub_00122CD0_gen(); return; }
+    int i, held = s_wobble_held;
+    if (aim_wobble_due(self, 3)) { sub_00122CD0_gen(); return; }
     for (i = 0; i < 4; i++) state[i] = TUROK_MEM32(self + 0x2BCu + 4u * (uint32_t)i);
     s_wobble_held = 1;
     sub_00122CD0_gen();
-    s_wobble_held = 0;
+    s_wobble_held = held;
     for (i = 0; i < 4; i++) TUROK_MEM32(self + 0x2BCu + 4u * (uint32_t)i) = state[i];
 }
 
@@ -615,6 +642,16 @@ static struct { uint32_t def; float own, set; } s_keep_defs[KEEP_DECAL_DEFS];
 static unsigned s_keep_count;
 static int s_keep_applied = -1;  /* the setting the remembered lives reflect */
 
+/* Definitions belong to the world being left. Forget their addresses before
+ * the screen loader frees that world or reuses its memory for the next one.
+ * Pause-menu screens keep the same world and must keep its records too. */
+static void keep_decals_reset(void)
+{
+    s_keep_count = 0;
+    s_keep_applied = -1;
+    s_partdef_keepsake = 0;
+}
+
 static int partdef_is_keepsake(uint32_t text, uint32_t size)
 {
     /* Not explosions\1txt_fireb3_.tga: those are explosion fireballs, which
@@ -661,17 +698,23 @@ void sub_000B0110(void)
 void sub_000AF2A0(void)
 {
     uint32_t def = g_ecx;
+    unsigned i;
+    /* A definition reparsed at the same address may no longer be a decal. */
+    for (i = 0; i < s_keep_count; i++)
+        if (s_keep_defs[i].def == def) {
+            s_keep_defs[i] = s_keep_defs[--s_keep_count];
+            break;
+        }
     if (s_partdef_keepsake) {
         float own = fabsf(guest_float(g_esp + 4)), set = own;
-        unsigned i;
+        i = s_keep_count;
         if (video_settings_keep_decals() && own < KEEP_DECAL_SECONDS) {
             uint32_t bits;
             set = KEEP_DECAL_SECONDS;
             memcpy(&bits, &set, 4);
             TUROK_MEM32(g_esp + 4) = bits;
         }
-        for (i = 0; i < s_keep_count && s_keep_defs[i].def != def; i++) {}
-        if (i == s_keep_count && s_keep_count < KEEP_DECAL_DEFS) s_keep_count++;
+        if (s_keep_count < KEEP_DECAL_DEFS) s_keep_count++;
         if (i < KEEP_DECAL_DEFS) {
             s_keep_defs[i].def = def;
             s_keep_defs[i].own = own;
@@ -681,9 +724,8 @@ void sub_000AF2A0(void)
     sub_000AF2A0_gen();
 }
 
-/* Once a frame: after the setting changes, each remembered definition gets
- * its own life back or the long one -- if it still holds what was last
- * written there (one freed and reused since does not). */
+/* Once a frame: apply the setting to this world's definitions. The value
+ * check also leaves a definition alone if the game has edited its life. */
 static void keep_decals_frame(void)
 {
     int keep = video_settings_keep_decals();
@@ -737,6 +779,23 @@ recomp_func_t recomp_lookup_manual(uint32_t xbox_va);
 static struct { uint32_t particle, stamp; } s_particle_stamps[PARTICLE_STAMPS];
 static uint32_t s_particle_stamp, s_particle_manager;
 static unsigned s_particles_removed, s_particles_refused;
+static uint64_t s_particle_frame;
+
+typedef struct { uint32_t stamp, particle; } KeptParticle;
+static struct {
+    KeptParticle *kept;
+    unsigned room, count, next;
+    uint32_t manager;
+    uint64_t frame;
+    int valid;
+} s_particle_trim;
+
+static void particle_tracking_reset(void)
+{
+    memset(s_particle_stamps, 0, sizeof s_particle_stamps);
+    s_particle_stamp = s_particle_manager = 0;
+    s_particle_trim.valid = 0;
+}
 
 static int32_t particle_capacity(void)
 {
@@ -784,7 +843,7 @@ void sub_000B98D0(void)
 {
     uint32_t *stamp;
     if (g_ecx != s_particle_manager) {
-        memset(s_particle_stamps, 0, sizeof s_particle_stamps);
+        particle_tracking_reset();
         s_particle_manager = g_ecx;
     }
     stamp = particle_stamp(TUROK_MEM32(g_esp + 4u));
@@ -801,21 +860,20 @@ static int particle_kept(uint32_t particle)
            guest_float(def + 0x7Cu) >= KEEP_DECAL_SECONDS;
 }
 
-static void particle_kill(uint32_t particle)
+static int particle_kill(uint32_t particle)
 {
     uint32_t va = TUROK_MEM32(TUROK_MEM32(particle) + 0x1Cu);
     uint32_t eax = g_eax, ecx = g_ecx, edx = g_edx, esp = g_esp;
     recomp_func_t fn = recomp_lookup_manual(va);
     if (!fn) fn = recomp_lookup(va);
-    if (!fn) return;
+    if (!fn) return 0;
     g_esp -= 4;
     TUROK_MEM32(g_esp) = 0;   /* return address */
     g_ecx = particle;
     fn();
     g_eax = eax; g_ecx = ecx; g_edx = edx; g_esp = esp;
+    return 1;
 }
-
-typedef struct { uint32_t stamp, particle; } KeptParticle;
 
 static int kept_older(const void *a, const void *b)
 {
@@ -823,12 +881,20 @@ static int kept_older(const void *a, const void *b)
     return x < y ? -1 : x > y;
 }
 
-/* Remove up to `count` kept particles, the oldest first. */
+/* Scan and sort at most once per frame, then consume the list across this
+ * frame's emission requests. Even an empty result is cached: a full manager
+ * with nothing removable must not be walked again for every effect. Newly
+ * added particles become candidates next frame; their stamps also protect
+ * against removing a new particle at an address a cached one used. */
 static void particle_trim(uint32_t self, int32_t count)
 {
-    static KeptParticle *kept;
-    static unsigned room;
     unsigned n = 0, i, priority, kind;
+    if (s_particle_trim.valid && s_particle_trim.manager == self && s_particle_trim.frame == s_particle_frame)
+        goto remove_kept;
+    s_particle_trim.valid = 1;
+    s_particle_trim.manager = self;
+    s_particle_trim.frame = s_particle_frame;
+    s_particle_trim.next = s_particle_trim.count = 0;
     for (priority = 0; priority < 5u; priority++)
         for (kind = 0; kind < 2u; kind++) {
             uint32_t head = self + (kind ? 0x26C8u : 0x1E1Cu) + priority * 0x1BCu;
@@ -837,25 +903,31 @@ static void particle_trim(uint32_t self, int32_t count)
             for (; at && at != tail && walked < 65536u; at = TUROK_MEM32(at + 0x1A4u), walked++) {
                 uint32_t *stamp;
                 if (!particle_kept(at)) continue;
-                if (n == room) {
-                    KeptParticle *more = realloc(kept, (room + 1024u) * sizeof *kept);
+                if (n == s_particle_trim.room) {
+                    KeptParticle *more = realloc(s_particle_trim.kept, (s_particle_trim.room + 1024u) * sizeof *more);
                     if (!more) break;
-                    kept = more;
-                    room += 1024u;
+                    s_particle_trim.kept = more;
+                    s_particle_trim.room += 1024u;
                 }
                 stamp = particle_stamp(at);
-                kept[n].stamp = stamp ? *stamp : 0;
-                kept[n].particle = at;
+                s_particle_trim.kept[n].stamp = stamp ? *stamp : 0;
+                s_particle_trim.kept[n].particle = at;
                 n++;
             }
         }
-    if (!n) return;
-    qsort(kept, n, sizeof *kept, kept_older);
-    for (i = 0; i < n && count > 0; i++) {
-        uint32_t at = kept[i].particle;
+    s_particle_trim.count = n;
+    if (n > 1) qsort(s_particle_trim.kept, n, sizeof *s_particle_trim.kept, kept_older);
+remove_kept:
+    while (s_particle_trim.next < s_particle_trim.count && count > 0) {
+        uint32_t at, previous, *stamp;
+        i = s_particle_trim.next++;
+        at = s_particle_trim.kept[i].particle;
+        stamp = particle_stamp(at);
+        if (!stamp || *stamp != s_particle_trim.kept[i].stamp) continue;
         /* still out (removing one may have taken others with it) */
-        if (TUROK_MEM32(TUROK_MEM32(at + 0x1A8u) + 0x1A4u) != at || !particle_kept(at)) continue;
-        particle_kill(at);
+        previous = TUROK_MEM32(at + 0x1A8u);
+        if (!previous || TUROK_MEM32(previous + 0x1A4u) != at || !particle_kept(at)) continue;
+        if (!particle_kill(at)) continue;
         count--;
         s_particles_removed++;
     }
@@ -1072,6 +1144,7 @@ void sub_00040DB0(void)
 
 void sub_00104600(void)
 {
+    s_particle_frame++;
     sub_00104600_gen();
     keep_decals_frame();
     /* RECOMP_DEBUG_KILL=<s>: that long after a level's actors were made,
@@ -1436,6 +1509,11 @@ void sub_00054A60(void)
     if (name) {
         const char *text = (const char *)((uintptr_t)name + g_xbox_mem_offset);
         int kind = is_front_end_screen(text);
+        if (kind == 1 || !strstr(text, "creens\\")) {
+            keep_decals_reset();
+            aim_wobble_reset();
+            particle_tracking_reset();
+        }
         fprintf(stderr, "[TUROK] screen %.96s: %s\n", text, kind == 1 ? "front end" : kind ? "pause menu" : "game");
         if (!strstr(text, "creens\\")) {   /* a level: 4:3 and held until sub_000FFF20 */
             s_level_loading = 1;
@@ -1921,4 +1999,109 @@ void sub_00042450(void)
     if (lift) TUROK_MEM32(actor + 0x34u) = flags | 4u;
     sub_00042450_gen();
     if (lift) TUROK_MEM32(actor + 0x34u) &= ~4u;
+}
+
+
+/* ── Weapons on the number keys (keyboard) ──────────────────────
+ *
+ * A PC addition: 1-9 and 0 pick a weapon directly, a second press of the
+ * same key the next weapon sharing it. The pad's next/previous weapon
+ * only queue steps (player vfunc +0x250/+0x254 add to the inventory's +0x2C
+ * and arm its 0.2 s timer at +0x30); the inventory's update (sub_00160760,
+ * this = player + 0x19FC) walks them and switches with sub_001605A0(index).
+ * A key calls that same switch, from the same update, so the game changes
+ * weapon as it does for a step: its own checks (sub_0015FDA0: owned, with
+ * ammunition), animation and timing. Entries (0x28 bytes, from [+4] to [+8])
+ * hold the weapon's ID first; [+0x5C] is the one being switched to. Not
+ * while the inventory is locked ([+0x1C], [+0x34], as the steps) or has a
+ * weapon to return to ([+0x38], sub_0015FFC0/sub_00160680). Keyboard and
+ * mouse drive controller 1, so the keys act only while there is one player
+ * (the list at 0x257E90, linked through +0x39C), not in split-screen. */
+extern void sub_00160760_gen(void);
+extern void sub_0015FDA0(void);
+extern void sub_001605A0(void);
+extern int xbox_FramebufferKeyDown(int vk);
+extern __declspec(thread) uint32_t g_eax, g_edx, g_esp;
+
+/* Weapon IDs per key, '1' to '9' then '0' (the table at 0x24B790): 1 War
+ * Club, 2 Bow, 3 Tek Bow, 4 Spiked Mine, 5 Pistol, 6 Shotgun, 7 Minigun,
+ * 8 Rocket Launcher, 9 Tek Weapon (Plasma Cannon), 10 Flamethrower,
+ * 11 Guided Device (Spider Mine), 12 Gravity Disruptor, 13 Dark Matter
+ * Cube, 14 Crossbow. Spiked Mine is the grenade weapon. Crossbow shares
+ * the bow slot if available. */
+static const signed char k_weapon_keys[10][4] = {
+    {1, -1}, {2, 3, 14, -1}, {5, -1}, {6, -1}, {8, -1},
+    {9, -1}, {7, -1}, {10, -1}, {12, -1}, {4, 11, 13, -1},
+};
+
+/* An inventory method taking an entry index (thiscall, ret 4); its eax. */
+static uint32_t inventory_call(void (*method)(void), uint32_t inventory, uint32_t index)
+{
+    uint32_t ecx_saved = g_ecx, eax_saved = g_eax, edx_saved = g_edx, result;
+    g_esp -= 4; TUROK_MEM32(g_esp) = index;
+    g_esp -= 4; TUROK_MEM32(g_esp) = 0;      /* return address; its ret 4 pops both */
+    g_ecx = inventory;
+    method();
+    result = g_eax;
+    g_ecx = ecx_saved; g_eax = eax_saved; g_edx = edx_saved;
+    return result;
+}
+
+static void weapon_key(uint32_t inventory, int key)
+{
+    uint32_t begin = TUROK_MEM32(inventory + 4u), end = TUROK_MEM32(inventory + 8u);
+    uint32_t count = end > begin ? (end - begin) / 0x28u : 0;
+    uint32_t current = TUROK_MEM32(inventory + 0x5Cu), current_id, i;
+    int length = 0, position = -1, step;
+    const signed char *group = k_weapon_keys[key];
+
+    if (!count || count > 32) return;
+    current_id = current < count ? TUROK_MEM32(begin + current * 0x28u) : 0xFFFFFFFFu;
+    while (length < 4 && group[length] >= 0) {
+        if ((uint32_t)group[length] == current_id) position = length;
+        length++;
+    }
+    /* The next of the key's weapons after the one in hand (the first if
+     * the one in hand is not the key's), skipping any that cannot be used. */
+    for (step = 1; step <= length; step++) {
+        uint32_t id = (uint32_t)group[(position + step) % length];
+        for (i = 0; i < count; i++)
+            if (TUROK_MEM32(begin + i * 0x28u) == id) break;
+        if (i == count || i == current) continue;
+        if (inventory_call(sub_0015FDA0, inventory, i) && inventory_call(sub_001605A0, inventory, i)) {
+            TUROK_MEM32(inventory + 0x2Cu) = 0;     /* a wheel step queued before does not undo it */
+            return;
+        }
+    }
+}
+
+void sub_00160760(void)
+{
+    static unsigned held;                 /* keys down at the last update */
+    static int keyboard = -1;
+    uint32_t inventory = g_ecx, player = TUROK_MEM32(inventory + 0x4Cu);
+    uint32_t first = TUROK_MEM32(0x257E90u);
+    unsigned down = 0, pressed;
+    int key;
+
+    if (keyboard < 0) {
+        const char *value = getenv("RECOMP_KBM");
+        keyboard = value && *value && *value != '0';
+    }
+    if (!keyboard) {
+        sub_00160760_gen();
+        return;
+    }
+
+    for (key = 0; key < 10; key++)
+        if (xbox_FramebufferKeyDown(key == 9 ? '0' : '1' + key)) down |= 1u << key;
+    pressed = down & ~held;
+    held = down;
+    if (pressed && player && player == first && !TUROK_MEM32(first + 0x39Cu) &&
+            !TUROK_MEM32(inventory + 0x1Cu) && !TUROK_MEM32(inventory + 0x34u) &&
+            TUROK_MEM32(inventory + 0x38u) == 0xFFFFFFFFu)
+        for (key = 0; key < 10; key++)
+            if (pressed & (1u << key)) { weapon_key(inventory, key); break; }
+    g_ecx = inventory;
+    sub_00160760_gen();
 }

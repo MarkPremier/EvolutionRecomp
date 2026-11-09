@@ -239,8 +239,11 @@ static int walk(Image *image, const uint8_t *table, uint32_t size, uint32_t offs
     if (left && !walk(image, table, size, left * 4u, depth + 1, out)) return 0;
     if (out) snprintf(path, sizeof path, "%s\\%s", out, name);
     if (attributes & 0x10) {
-        uint8_t *sub = read_table(image, sector, bytes);
+        uint8_t *sub = bytes ? read_table(image, sector, bytes) : NULL;
         int ok = 1;
+        /* An empty directory needs no table. A nonempty one must be read:
+         * skipping a failed read would publish an incomplete installation. */
+        if (bytes && !sub) return 0;
         if (out && !CreateDirectoryA(path, NULL) && GetLastError() != ERROR_ALREADY_EXISTS) ok = 0;
         if (ok && sub) ok = walk(image, sub, bytes, 0, depth + 1, out ? path : NULL);
         free(sub);

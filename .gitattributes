@@ -1,2 +1,2 @@
-# Patches must stay byte-exact or `git apply` rejects them.
-*.patch -text
+# Patches must stay byte-exact, including the space on blank context lines.
+*.patch -text -whitespace

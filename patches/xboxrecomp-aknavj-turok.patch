@@ -1,3 +1,48 @@
+diff --git a/src/apu/README.md b/src/apu/README.md
+index 103d9e1..daa9c28 100644
+--- a/src/apu/README.md
++++ b/src/apu/README.md
+@@ -31,6 +31,23 @@ and mixes software voices into it; it must not clear hardware output or
+ generate 1024/2048 replacement frames each tick. Muting clears the packet,
+ and the inactive-hardware path clears stale VP data before software mixing.
+ 
++Voice locks synchronize with only that voice's current VP slice. A locked
++voice waits while the title updates its buffer, position or resampler;
++other voices continue. Natural completion of a non-looping buffer waits
++for the resampler's buffered output to reach the mix before notifying the
++title, so short effects and the ends of longer sounds are preserved.
++
++The title's idle-voice handler uses `mcpx_apu_voice_idle_begin`/`end` to
++recheck whether that voice was restarted while its notification waited.
++This covers both interrupt and synchronous DirectSound service. Stale
++notifications are ignored; valid idle reports hold the voice guard through
++retirement, so a late completion cannot unlink a new playback of the voice.
++
++`RECOMP_APU_EVENT_TRACE=1` logs voice starts, pause/resume, first nonzero
++mixed contribution, stops, idle traps and rejected stale idle reports. This
++helps distinguish missing starts, silent or unlinked voices, and downstream
++output problems. It is off by default.
++
+ XAudio2 queue saturation applies backpressure while releasing the APU lock.
+ The waveOut fallback also waits before reusing an in-flight buffer. Submission
+ failures and two-second queue stalls are reported and stop host output,
+diff --git a/src/apu/apu.h b/src/apu/apu.h
+index daaac64..d5059d1 100644
+--- a/src/apu/apu.h
++++ b/src/apu/apu.h
+@@ -48,6 +48,12 @@ void mcpx_apu_play_test_tone(MCPXAPUState *d);
+ 
+ #define APU_MIXER_MAX_VOICES 64
+ 
++/* Validate an idle notification at the point the guest consumes it, whether
++ * from its ISR or its synchronous audio service. A true result holds that
++ * voice stable until idle_end; false means it was restarted or is locked. */
++int mcpx_apu_voice_idle_begin(MCPXAPUState *d, uint32_t voice);
++void mcpx_apu_voice_idle_end(MCPXAPUState *d, uint32_t voice);
++
+ typedef struct APUMixerVoice {
+     volatile int     active;       /* 1 = playing, 0 = stopped */
+     volatile int     looping;      /* 1 = loop, 0 = one-shot */
 diff --git a/src/apu/apu_core.c b/src/apu/apu_core.c
 index c5c8a86..843b28c 100644
 --- a/src/apu/apu_core.c
@@ -763,11 +808,25 @@ index 1d1cbf9..6ebb52e 100644
  
  /* Little-endian physical memory reads */
  static inline uint32_t ldl_le_phys(void *as, hwaddr addr) {
+diff --git a/src/apu/apu_state.h b/src/apu/apu_state.h
+index 342f1f8..287570d 100644
+--- a/src/apu/apu_state.h
++++ b/src/apu/apu_state.h
+@@ -326,6 +326,9 @@ typedef struct MCPXAPUVPState {
+     uint8_t submix_headroom[NUM_MIXBINS];
+     float sample_buf[NUM_SAMPLES_PER_FRAME][2];
+     uint64_t voice_locked[4];
++    /* Synchronize a voice update with its current VP slice, without making
++     * the title wait for all other voices or the DSP/output work. */
++    QemuMutex voice_guard[MCPX_HW_MAX_VOICES];
+ 
+     struct {
+         int current_entry;
 diff --git a/src/apu/apu_vp.c b/src/apu/apu_vp.c
-index 7c36737..9a11bb1 100644
+index 7c36737..9fe4887 100644
 --- a/src/apu/apu_vp.c
 +++ b/src/apu/apu_vp.c
-@@ -54,21 +54,39 @@ static void set_notify_status(MCPXAPUState *d, uint32_t v, int notifier,
+@@ -54,26 +54,45 @@ static void set_notify_status(MCPXAPUState *d, uint32_t v, int notifier,
                             v * MCPX_HW_NOTIFIER_COUNT + notifier);
      notify_offset += 15;
  
@@ -810,7 +869,13 @@ index 7c36737..9a11bb1 100644
      memset(&d->vp.filters[v].svf, 0, sizeof(d->vp.filters[v].svf));
      hrtf_filter_clear_history(&d->vp.filters[v].hrtf);
      if (d->vp.filters[v].resampler) {
-@@ -93,6 +111,20 @@ static float clampf(float v, float mn, float mx)
+         src_reset(d->vp.filters[v].resampler);
+     }
++    d->vp.filters[v].resample_source_ended = false;
+ }
+ 
+ static bool voice_should_mute(uint16_t v)
+@@ -93,6 +112,20 @@ static float clampf(float v, float mn, float mx)
      return v;
  }
  
@@ -831,7 +896,7 @@ index 7c36737..9a11bb1 100644
  static float attenuate(uint16_t vol)
  {
      vol &= 0xFFF;
-@@ -107,7 +139,7 @@ static uint32_t voice_get_mask(MCPXAPUState *d, uint16_t voice_handle,
+@@ -107,7 +140,7 @@ static uint32_t voice_get_mask(MCPXAPUState *d, uint16_t voice_handle,
                                 hwaddr offset, uint32_t mask)
  {
      hwaddr voice = d->regs[NV_PAPU_VPVADDR] + voice_handle * NV_PAVS_SIZE;
@@ -840,7 +905,7 @@ index 7c36737..9a11bb1 100644
             ctz32(mask);
  }
  
-@@ -115,9 +147,8 @@ static void voice_set_mask(MCPXAPUState *d, uint16_t voice_handle,
+@@ -115,17 +148,43 @@ static void voice_set_mask(MCPXAPUState *d, uint16_t voice_handle,
                             hwaddr offset, uint32_t mask, uint32_t val)
  {
      hwaddr voice = d->regs[NV_PAPU_VPVADDR] + voice_handle * NV_PAVS_SIZE;
@@ -852,15 +917,42 @@ index 7c36737..9a11bb1 100644
  }
  
  /* ============================================================
-@@ -126,6 +157,7 @@ static void voice_set_mask(MCPXAPUState *d, uint16_t voice_handle,
+  * Voice off / lock
+  * ============================================================ */
  
++/* Event-level tracing for intermittent effects: a start without a matching
++ * first-mix line identifies a silent voice, rather than host output loss. */
++static bool voice_trace_pending[MCPX_HW_MAX_VOICES];
++static bool voice_event_trace(void)
++{
++    static int enabled = -1;
++    if (enabled < 0) {
++        const char *value = getenv("RECOMP_APU_EVENT_TRACE");
++        enabled = value && *value && *value != '0';
++    }
++    return enabled != 0;
++}
++
++static void trace_voice_event(MCPXAPUState *d, uint16_t v, const char *event)
++{
++    if (!voice_event_trace()) return;
++    fprintf(stderr, "[APU-EVENT] %s v%u tick=%u ba=%06X cbo=%u ebo=%u state=%08X fmt=%08X pending=%d\n",
++            event, v, (unsigned)d->ep_frame_div,
++            voice_get_mask(d, v, NV_PAVS_VOICE_CUR_PSL_START, NV_PAVS_VOICE_CUR_PSL_START_BA),
++            voice_get_mask(d, v, NV_PAVS_VOICE_PAR_OFFSET, NV_PAVS_VOICE_PAR_OFFSET_CBO),
++            voice_get_mask(d, v, NV_PAVS_VOICE_PAR_NEXT, NV_PAVS_VOICE_PAR_NEXT_EBO),
++            voice_get_mask(d, v, NV_PAVS_VOICE_PAR_STATE, 0xFFFFFFFFu),
++            voice_get_mask(d, v, NV_PAVS_VOICE_CFG_FMT, 0xFFFFFFFFu), voice_trace_pending[v]);
++}
++
  static void voice_off(MCPXAPUState *d, uint16_t v)
  {
 +    if (out_of_range("voice", v, MCPX_HW_MAX_VOICES)) return;
++    trace_voice_event(d, v, "off");
      voice_set_mask(d, v, NV_PAVS_VOICE_PAR_STATE,
                     NV_PAVS_VOICE_PAR_STATE_ACTIVE_VOICE, 0);
  
-@@ -133,32 +165,32 @@ static void voice_off(MCPXAPUState *d, uint16_t v)
+@@ -133,36 +192,60 @@ static void voice_off(MCPXAPUState *d, uint16_t v)
                                   NV_PAVS_VOICE_CFG_FMT_DATA_TYPE) != 0;
      int notifier = MCPX_HW_NOTIFIER_SSLA_DONE;
      if (stream) {
@@ -872,12 +964,10 @@ index 7c36737..9a11bb1 100644
      set_notify_status(d, v, notifier, NV1BA0_NOTIFICATION_STATUS_DONE_SUCCESS);
  }
  
-+/* The lock bits are only read back by the front end (is_voice_locked), so a
-+ * PIO VOICE_LOCK is an atomic bit flip. It used to take d->lock, which the
-+ * frame thread holds for a whole frame and lets go of once per frame: with
-+ * many 3D voices playing (HRTF, resampling) DirectSound's game thread waited
-+ * a frame or more on every lock and unlock -- a fifth of Turok Evolution's
-+ * frame time in its busier levels. */
++/* Wait only for this voice's current slice before granting the guest's lock.
++ * An atomic bit alone let the VP keep advancing a locked active voice, or
++ * finish an old slice after VOICE_ON reset its position and resampler.
++ * Taking d->lock here instead would wait for every voice and DSP/output work. */
  static void voice_lock(MCPXAPUState *d, uint16_t v, bool lock)
  {
 -    assert(v < MCPX_HW_MAX_VOICES);
@@ -886,6 +976,7 @@ index 7c36737..9a11bb1 100644
 +    if (out_of_range("voice", v, MCPX_HW_MAX_VOICES)) return;
      uint64_t mask = 1ULL << (v % 64);
 +    volatile LONG64 *word = (volatile LONG64 *)&d->vp.voice_locked[v / 64];
++    qemu_mutex_lock(&d->vp.voice_guard[v]);
      if (lock) {
 -        d->vp.voice_locked[v / 64] |= mask;
 +        InterlockedOr64(word, (LONG64)mask);
@@ -896,6 +987,7 @@ index 7c36737..9a11bb1 100644
 -
 -    qemu_cond_signal(&d->cond);
 -    qemu_mutex_unlock(&d->lock);
++    qemu_mutex_unlock(&d->vp.voice_guard[v]);
  }
  
  static bool is_voice_locked(MCPXAPUState *d, uint16_t v)
@@ -905,7 +997,35 @@ index 7c36737..9a11bb1 100644
      uint64_t mask = 1ULL << (v % 64);
      return (qatomic_read(&d->vp.voice_locked[v / 64]) & mask) != 0;
  }
-@@ -171,6 +203,7 @@ static void set_hrir_coeff_tar(MCPXAPUState *d, int channel, int coeff_idx,
+ 
++/* PIO writes run on the title thread while an idle trap waits for its ISR.
++ * A stop followed immediately by a restart can therefore make that trap
++ * stale. Retiring it afterwards unlinks the newly playing voice, leaving
++ * it ACTIVE but unreachable by the VP until another start relinks it.
++ * Validate at the guest handler itself: DirectSound also services traps
++ * synchronously through KeSynchronizeExecution, outside our IRQ delivery. */
++int mcpx_apu_voice_idle_begin(MCPXAPUState *d, uint32_t v)
++{
++    if (!d || v >= MCPX_HW_MAX_VOICES) return 0;
++    qemu_mutex_lock(&d->vp.voice_guard[v]);
++    if (is_voice_locked(d, (uint16_t)v) ||
++        voice_get_mask(d, (uint16_t)v, NV_PAVS_VOICE_PAR_STATE, NV_PAVS_VOICE_PAR_STATE_ACTIVE_VOICE)) {
++        trace_voice_event(d, (uint16_t)v, "stale-idle");
++        qemu_mutex_unlock(&d->vp.voice_guard[v]);
++        return 0;
++    }
++    return 1;
++}
++
++void mcpx_apu_voice_idle_end(MCPXAPUState *d, uint32_t voice)
++{
++    if (d && voice < MCPX_HW_MAX_VOICES) qemu_mutex_unlock(&d->vp.voice_guard[voice]);
++}
++
+ /* ============================================================
+  * HRIR coefficient setter
+  * ============================================================ */
+@@ -171,6 +254,7 @@ static void set_hrir_coeff_tar(MCPXAPUState *d, int channel, int coeff_idx,
                                 int8_t value)
  {
      int entry = d->vp.hrtf.current_entry;
@@ -913,7 +1033,7 @@ index 7c36737..9a11bb1 100644
      d->vp.hrtf.entries[entry].hrir[channel][coeff_idx] = int8_to_float(value);
  }
  
-@@ -181,9 +214,32 @@ static void set_hrir_coeff_tar(MCPXAPUState *d, int channel, int coeff_idx,
+@@ -181,9 +265,32 @@ static void set_hrir_coeff_tar(MCPXAPUState *d, int channel, int coeff_idx,
  static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
  {
      unsigned int slot;
@@ -949,7 +1069,7 @@ index 7c36737..9a11bb1 100644
      unsigned int selected_handle, list;
  
      switch (method) {
-@@ -197,6 +253,7 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
+@@ -197,10 +304,15 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
  
      case NV1BA0_PIO_VOICE_ON: {
          selected_handle = argument & NV1BA0_PIO_VOICE_ON_HANDLE;
@@ -957,7 +1077,15 @@ index 7c36737..9a11bb1 100644
  
          bool locked = is_voice_locked(d, (uint16_t)selected_handle);
          if (!locked) voice_lock(d, (uint16_t)selected_handle, true);
-@@ -282,6 +339,7 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
+ 
++        if (voice_event_trace()) {
++            voice_trace_pending[selected_handle] = true;
++            trace_voice_event(d, (uint16_t)selected_handle, "on");
++        }
+         list = GET_MASK(d->regs[NV_PAPU_FEAV], NV_PAPU_FEAV_LST);
+         if (list != NV1BA0_PIO_SET_ANTECEDENT_VOICE_LIST_INHERIT) {
+             unsigned int top_reg = voice_list_regs[list - 1].top;
+@@ -282,6 +394,7 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
  
      case NV1BA0_PIO_VOICE_RELEASE: {
          selected_handle = argument & NV1BA0_PIO_VOICE_ON_HANDLE;
@@ -965,7 +1093,32 @@ index 7c36737..9a11bb1 100644
  
          bool locked = is_voice_locked(d, (uint16_t)selected_handle);
          if (!locked) voice_lock(d, (uint16_t)selected_handle, true);
-@@ -362,8 +420,8 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
+@@ -308,13 +421,22 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
+     }
+ 
+     case NV1BA0_PIO_VOICE_OFF:
+-        voice_off(d, (uint16_t)(argument & NV1BA0_PIO_VOICE_OFF_HANDLE));
++        selected_handle = argument & NV1BA0_PIO_VOICE_OFF_HANDLE;
++        if (out_of_range("voice", selected_handle, MCPX_HW_MAX_VOICES)) break;
++        qemu_mutex_lock(&d->vp.voice_guard[selected_handle]);
++        voice_off(d, (uint16_t)selected_handle);
++        qemu_mutex_unlock(&d->vp.voice_guard[selected_handle]);
+         break;
+ 
+     case NV1BA0_PIO_VOICE_PAUSE:
+-        voice_set_mask(d, (uint16_t)(argument & NV1BA0_PIO_VOICE_PAUSE_HANDLE),
++        selected_handle = argument & NV1BA0_PIO_VOICE_PAUSE_HANDLE;
++        if (out_of_range("voice", selected_handle, MCPX_HW_MAX_VOICES)) break;
++        qemu_mutex_lock(&d->vp.voice_guard[selected_handle]);
++        voice_set_mask(d, (uint16_t)selected_handle,
+                        NV_PAVS_VOICE_PAR_STATE, NV_PAVS_VOICE_PAR_STATE_PAUSED,
+                        (argument & NV1BA0_PIO_VOICE_PAUSE_ACTION) != 0);
++        trace_voice_event(d, (uint16_t)selected_handle, argument & NV1BA0_PIO_VOICE_PAUSE_ACTION ? "pause" : "resume");
++        qemu_mutex_unlock(&d->vp.voice_guard[selected_handle]);
+         break;
+ 
+     case NV1BA0_PIO_SET_CURRENT_HRTF_ENTRY:
+@@ -362,8 +484,8 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
                         NV_PAVS_VOICE_CFG_HRTF_TARGET,
                         NV_PAVS_VOICE_CFG_HRTF_TARGET_HANDLE, handle);
          if (current_voice < MCPX_HW_MAX_3D_VOICES &&
@@ -976,7 +1129,7 @@ index 7c36737..9a11bb1 100644
              hrtf_filter_set_target_params(&d->vp.filters[current_voice].hrtf,
                                            d->vp.hrtf.entries[handle].hrir,
                                            d->vp.hrtf.entries[handle].itd);
-@@ -374,6 +432,26 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
+@@ -374,6 +496,26 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
      case NV1BA0_PIO_SET_VOICE_TAR_VOLA:
          voice_set_mask(d, (uint16_t)d->regs[NV_PAPU_FECV],
                         NV_PAVS_VOICE_TAR_VOLA, 0xFFFFFFFF, argument);
@@ -1003,7 +1156,7 @@ index 7c36737..9a11bb1 100644
          break;
      case NV1BA0_PIO_SET_VOICE_TAR_VOLB:
          voice_set_mask(d, (uint16_t)d->regs[NV_PAPU_FECV],
-@@ -429,7 +507,7 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
+@@ -429,7 +571,7 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
      case NV1BA0_PIO_SET_CURRENT_INBUF_SGE_OFFSET: {
          hwaddr sge_address =
              d->regs[NV_PAPU_VPSGEADDR] + d->vp.inbuf_sge_handle * 8;
@@ -1012,7 +1165,7 @@ index 7c36737..9a11bb1 100644
                      argument & NV1BA0_PIO_SET_CURRENT_INBUF_SGE_OFFSET_PARAMETER);
          break;
      }
-@@ -442,7 +520,7 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
+@@ -442,7 +584,7 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
      case NV1BA0_PIO_SET_CURRENT_OUTBUF_SGE_OFFSET: {
          hwaddr sge_address =
              d->regs[NV_PAPU_VPSGEADDR] + d->vp.outbuf_sge_handle * 8;
@@ -1021,7 +1174,7 @@ index 7c36737..9a11bb1 100644
                      argument & NV1BA0_PIO_SET_CURRENT_OUTBUF_SGE_OFFSET_PARAMETER);
          break;
      }
-@@ -450,7 +528,7 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
+@@ -450,7 +592,7 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
      case NV1BA0_PIO_SET_VOICE_SSL_A: {
          int ssl = 0;
          int current_voice = d->regs[NV_PAPU_FECV];
@@ -1030,7 +1183,7 @@ index 7c36737..9a11bb1 100644
          d->vp.ssl[current_voice].base[ssl] =
              GET_MASK(argument, NV1BA0_PIO_SET_VOICE_SSL_A_BASE);
          d->vp.ssl[current_voice].count[ssl] =
-@@ -460,7 +538,7 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
+@@ -460,7 +602,7 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
      case NV1BA0_PIO_SET_VOICE_SSL_B: {
          int ssl = 1;
          int current_voice = d->regs[NV_PAPU_FECV];
@@ -1039,7 +1192,7 @@ index 7c36737..9a11bb1 100644
          d->vp.ssl[current_voice].base[ssl] =
              GET_MASK(argument, NV1BA0_PIO_SET_VOICE_SSL_A_BASE);
          d->vp.ssl[current_voice].count[ssl] =
-@@ -488,10 +566,14 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
+@@ -488,10 +630,15 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
  
      case SE2FE_IDLE_VOICE:
          if (d->regs[NV_PAPU_FETFORCE1] & NV_PAPU_FETFORCE1_SE2FE_IDLE_VOICE) {
@@ -1047,6 +1200,7 @@ index 7c36737..9a11bb1 100644
 -            d->regs[NV_PAPU_FECTL] |= NV_PAPU_FECTL_FEMETHMODE_TRAPPED;
 -            d->regs[NV_PAPU_FECTL] &= ~NV_PAPU_FECTL_FETRAPREASON;
 -            d->regs[NV_PAPU_FECTL] |= NV_PAPU_FECTL_FETRAPREASON_REQUESTED;
++            trace_voice_event(d, (uint16_t)argument, "idle-trap");
 +            /* The pair first, then the trap that makes the ISR read it, in
 +             * one store that is also a barrier (see the top of fe_method). */
 +            uint32_t fectl = d->regs[NV_PAPU_FECTL];
@@ -1058,7 +1212,7 @@ index 7c36737..9a11bb1 100644
              d->set_irq = true;
          }
          break;
-@@ -499,8 +581,7 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
+@@ -499,8 +646,7 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
      default:
          /* Handle range-based cases that can't use case ranges in MSVC */
          if (method >= NV1BA0_PIO_SET_HRIR && method < NV1BA0_PIO_SET_HRIR_X) {
@@ -1068,7 +1222,7 @@ index 7c36737..9a11bb1 100644
              int8_t left0 = (int8_t)GET_MASK(argument, NV1BA0_PIO_SET_HRIR_LEFT0);
              int8_t right0 = (int8_t)GET_MASK(argument, NV1BA0_PIO_SET_HRIR_RIGHT0);
              int8_t left1 = (int8_t)GET_MASK(argument, NV1BA0_PIO_SET_HRIR_LEFT1);
-@@ -511,7 +592,7 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
+@@ -511,7 +657,7 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
              set_hrir_coeff_tar(d, 0, coeff_idx + 1, left1);
              set_hrir_coeff_tar(d, 1, coeff_idx + 1, right1);
          } else if (method == NV1BA0_PIO_SET_HRIR_X) {
@@ -1077,7 +1231,7 @@ index 7c36737..9a11bb1 100644
              int8_t left30 = (int8_t)GET_MASK(argument, NV1BA0_PIO_SET_HRIR_X_LEFT30);
              int8_t right30 = (int8_t)GET_MASK(argument, NV1BA0_PIO_SET_HRIR_X_RIGHT30);
              int16_t itd = (int16_t)GET_MASK(argument, NV1BA0_PIO_SET_HRIR_X_ITD);
-@@ -524,7 +605,7 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
+@@ -524,7 +670,7 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
              hwaddr addr = d->regs[NV_PAPU_VPSSLADDR]
                            + (d->vp.ssl_base_page * 8)
                            + (method - NV1BA0_PIO_SET_SSL_SEGMENT_OFFSET);
@@ -1086,7 +1240,7 @@ index 7c36737..9a11bb1 100644
          } else if (method >= NV1BA0_PIO_SET_SUBMIX_HEADROOM &&
                     method <= NV1BA0_PIO_SET_SUBMIX_HEADROOM + 4 * (NUM_MIXBINS - 1)) {
              assert((method & 3) == 0);
-@@ -580,7 +661,7 @@ static hwaddr get_data_ptr(hwaddr sge_base, unsigned int max_sge, uint32_t addr)
+@@ -580,7 +726,7 @@ static hwaddr get_data_ptr(hwaddr sge_base, unsigned int max_sge, uint32_t addr)
      unsigned int entry = addr / TARGET_PAGE_SIZE;
      assert(entry <= max_sge);
      uint32_t prd_address =
@@ -1095,7 +1249,7 @@ index 7c36737..9a11bb1 100644
      return prd_address + addr % TARGET_PAGE_SIZE;
  }
  
-@@ -730,7 +811,7 @@ static float voice_step_envelope(MCPXAPUState *d, uint16_t v, uint32_t reg_0,
+@@ -730,7 +876,7 @@ static float voice_step_envelope(MCPXAPUState *d, uint16_t v, uint32_t reg_0,
  static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
                         int num_samples_requested)
  {
@@ -1104,7 +1258,7 @@ index 7c36737..9a11bb1 100644
      bool stereo = voice_get_mask(d, (uint16_t)v, NV_PAVS_VOICE_CFG_FMT,
                                   NV_PAVS_VOICE_CFG_FMT_STEREO) != 0;
      unsigned int channels = stereo ? 2 : 1;
-@@ -807,8 +888,8 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
+@@ -807,8 +953,8 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
          }
  
          hwaddr addr = d->regs[NV_PAPU_VPSSLADDR] + page * 8;
@@ -1115,7 +1269,7 @@ index 7c36737..9a11bb1 100644
          assert(segment_offset != 0);
          assert(segment_length != 0);
          seg_len = (segment_length >> 0) & 0xffff;
-@@ -831,6 +912,10 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
+@@ -831,6 +977,10 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
      } else {
          block_size = container_size;
      }
@@ -1126,7 +1280,7 @@ index 7c36737..9a11bb1 100644
      block_size *= samples_per_block;
  
      int sample_count = 0;
-@@ -843,8 +928,7 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
+@@ -843,8 +993,7 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
                  uint32_t linear_addr = block_index * (uint32_t)block_size;
                  if (stream) {
                      hwaddr addr = segment_offset + linear_addr;
@@ -1136,7 +1290,27 @@ index 7c36737..9a11bb1 100644
                  } else {
                      linear_addr += ba;
                      for (unsigned int word_index = 0;
-@@ -951,7 +1035,6 @@ static long voice_resample_callback(void *cb_data, float **data)
+@@ -911,7 +1060,7 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
+         }
+     }
+ 
+-    if (cbo >= ebo) {
++    if (cbo > ebo) {
+         if (stream) {
+             d->vp.ssl[v].ssl_seg += 1;
+             cbo = 0;
+@@ -929,7 +1078,9 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
+                 cbo = lbo;
+             } else {
+                 cbo = ebo;
+-                voice_off(d, (uint16_t)v);
++                /* SRC can read ahead of its output. Keep the voice active
++                 * until its buffered samples have actually reached the mix. */
++                d->vp.filters[v].resample_source_ended = true;
+             }
+         }
+     }
+@@ -951,11 +1102,10 @@ static long voice_resample_callback(void *cb_data, float **data)
  {
      MCPXAPUVoiceFilter *filter = cb_data;
      uint16_t v = filter->voice;
@@ -1144,7 +1318,28 @@ index 7c36737..9a11bb1 100644
      MCPXAPUState *d = container_of(filter, MCPXAPUState, vp.filters[v]);
  
      int sample_count = 0;
-@@ -984,7 +1067,7 @@ static long voice_resample_callback(void *cb_data, float **data)
+-    while (sample_count < NUM_SAMPLES_PER_FRAME) {
++    while (sample_count < NUM_SAMPLES_PER_FRAME && !filter->resample_source_ended) {
+         int active = voice_get_mask(d, v, NV_PAVS_VOICE_PAR_STATE,
+                                     NV_PAVS_VOICE_PAR_STATE_ACTIVE_VOICE);
+         if (!active) {
+@@ -964,13 +1114,13 @@ static long voice_resample_callback(void *cb_data, float **data)
+         int count = voice_get_samples(
+             d, v, &filter->resample_buf[sample_count],
+             NUM_SAMPLES_PER_FRAME - sample_count);
+-        if (count < 0) {
++        if (count <= 0) {
+             break;
+         }
+         sample_count += count;
+     }
+ 
+-    if (sample_count < NUM_SAMPLES_PER_FRAME) {
++    if (sample_count < NUM_SAMPLES_PER_FRAME && !filter->resample_source_ended) {
+         /* Starvation causes SRC to hang on repeated calls. Provide silence. */
+         memset(&filter->resample_buf[sample_count], 0,
+                2 * (NUM_SAMPLES_PER_FRAME - sample_count) * sizeof(float));
+@@ -984,7 +1134,7 @@ static long voice_resample_callback(void *cb_data, float **data)
  static int voice_resample(MCPXAPUState *d, uint16_t v, float samples[][2],
                            int requested_num, float rate)
  {
@@ -1153,7 +1348,16 @@ index 7c36737..9a11bb1 100644
      MCPXAPUVoiceFilter *filter = &d->vp.filters[v];
  
      if (filter->resampler == NULL) {
-@@ -1022,7 +1105,7 @@ static void voice_process(MCPXAPUState *d,
+@@ -1005,7 +1155,7 @@ static int voice_resample(MCPXAPUState *d, uint16_t v, float samples[][2],
+     }
+     if (count != requested_num) {
+         DPRINTF("resample returned fewer than expected: %d\n", count);
+-        if (count == 0) {
++        if (count == 0 && !filter->resample_source_ended) {
+             return -1;
+         }
+     }
+@@ -1022,7 +1172,7 @@ static void voice_process(MCPXAPUState *d,
                            float sample_buf[NUM_SAMPLES_PER_FRAME][2],
                            uint16_t v, int voice_list)
  {
@@ -1162,7 +1366,38 @@ index 7c36737..9a11bb1 100644
      bool stereo = voice_get_mask(d, v, NV_PAVS_VOICE_CFG_FMT,
                                   NV_PAVS_VOICE_CFG_FMT_STEREO) != 0;
      unsigned int channels = stereo ? 2 : 1;
-@@ -1172,7 +1255,7 @@ static void voice_process(MCPXAPUState *d,
+@@ -1067,6 +1217,7 @@ static void voice_process(MCPXAPUState *d,
+     bool multipass = voice_get_mask(d, v, NV_PAVS_VOICE_CFG_FMT,
+                                     NV_PAVS_VOICE_CFG_FMT_MULTIPASS) != 0;
+     dbg->multipass = multipass;
++    bool finished = false;
+ 
+     if (multipass) {
+         /* Read from multipass bin */
+@@ -1097,6 +1248,10 @@ static void voice_process(MCPXAPUState *d,
+              * sat here indefinitely while the title waited in voice_lock. */
+             if (count == 0 && ++empty > 4) break;
+             sample_count += count;
++            if (d->vp.filters[v].resample_source_ended && sample_count < NUM_SAMPLES_PER_FRAME) {
++                finished = true;
++                break;
++            }
+         }
+     }
+ 
+@@ -1141,7 +1296,10 @@ static void voice_process(MCPXAPUState *d,
+         dbg->vol[i] = vol[i];
+     }
+ 
+-    if (voice_should_mute(v)) return;
++    if (voice_should_mute(v)) {
++        if (finished) voice_off(d, v);
++        return;
++    }
+ 
+     /* Low-pass filter */
+     int fmode = voice_get_mask(d, v, NV_PAVS_VOICE_CFG_MISC,
+@@ -1172,7 +1330,7 @@ static void voice_process(MCPXAPUState *d,
      }
  
      /* HRTF processing for 3D voices */
@@ -1171,7 +1406,38 @@ index 7c36737..9a11bb1 100644
          uint16_t hrtf_handle =
              (uint16_t)voice_get_mask(d, v, NV_PAVS_VOICE_CFG_HRTF_TARGET,
                                       NV_PAVS_VOICE_CFG_HRTF_TARGET_HANDLE);
-@@ -1240,12 +1323,132 @@ void mcpx_apu_vp_frame(MCPXAPUState *d,
+@@ -1182,6 +1340,8 @@ static void voice_process(MCPXAPUState *d,
+     }
+ 
+     /* Mix into bins */
++    float trace_peak = 0.0f;
++    bool tracing = voice_trace_pending[v];
+     for (int b = 0; b < 8; b++) {
+         float g = ea_value;
+         float hr;
+@@ -1194,6 +1354,13 @@ static void voice_process(MCPXAPUState *d,
+         for (int i = 0; i < NUM_SAMPLES_PER_FRAME; i++) {
+             mixbins[bin[b]][i] += g * samples[i][b % channels];
+         }
++        if (tracing)
++            for (int i = 0; i < NUM_SAMPLES_PER_FRAME; i++)
++                trace_peak = fmaxf(trace_peak, fabsf(g * samples[i][b % channels]));
++    }
++    if (voice_trace_pending[v] && trace_peak > 0.0f) {
++        trace_voice_event(d, v, "mixed");
++        voice_trace_pending[v] = false;
+     }
+ 
+     /* VP monitor mix */
+@@ -1211,6 +1378,7 @@ static void voice_process(MCPXAPUState *d,
+         }
+     }
+ 
++    if (finished) voice_off(d, v);
+     (void)voice_list;
+ }
+ 
+@@ -1240,16 +1408,136 @@ void mcpx_apu_vp_frame(MCPXAPUState *d,
              }
  
              uint16_t v = (uint16_t)d->regs[current];
@@ -1280,15 +1546,15 @@ index 7c36737..9a11bb1 100644
 +             * title's thread while this walk runs. Seen in between, a voice
 +             * being started read as idle, and the ISR retired it -- a playing
 +             * voice on DirectSound's finished list, freed later while still
-+             * there. In xemu the method and the walk share a lock; here the
-+             * lock bit is read first (both lock operations are interlocked),
-+             * so an unlocked voice's ACTIVE_VOICE is the method's final word.
-+             * A locked idle voice is reported on a later frame. */
++             * there. The per-voice guard makes this check and processing
++             * indivisible with granting the title's lock; locked active
++             * voices wait too, until their data and filters are consistent. */
++            qemu_mutex_lock(&d->vp.voice_guard[v]);
 +            bool locked_now = is_voice_locked(d, v);
-+            MemoryBarrier();
              if (!voice_get_mask(d, v, NV_PAVS_VOICE_PAR_STATE,
                                  NV_PAVS_VOICE_PAR_STATE_ACTIVE_VOICE)) {
 -                fe_method(d, SE2FE_IDLE_VOICE, v);
+-            } else {
 +                /* Frames each voice has sat idle but locked: a title that
 +                 * held the lock while waiting for this report would wait for
 +                 * good, and that should show (once a second is 188 frames). */
@@ -1302,9 +1568,30 @@ index 7c36737..9a11bb1 100644
 +                        fprintf(stderr, "[APU] voice %u has been idle and locked for a second;"
 +                                        " its idle report waits for the unlock\n", v);
 +                }
-             } else {
++            } else if (!locked_now) {
                  /* Process voice directly (single-threaded) */
                  voice_process(d, mixbins, d->vp.sample_buf, v, list);
+             }
++            qemu_mutex_unlock(&d->vp.voice_guard[v]);
+             d->regs[current] = d->regs[next];
+         }
+     }
+@@ -1275,13 +1563,12 @@ void mcpx_apu_vp_frame(MCPXAPUState *d,
+ 
+ void mcpx_apu_vp_init(MCPXAPUState *d)
+ {
+-    /* Single-threaded - no worker dispatch needed */
+-    (void)d;
++    for (unsigned v = 0; v < MCPX_HW_MAX_VOICES; v++) qemu_mutex_init(&d->vp.voice_guard[v]);
+ }
+ 
+ void mcpx_apu_vp_finalize(MCPXAPUState *d)
+ {
+-    (void)d;
++    for (unsigned v = 0; v < MCPX_HW_MAX_VOICES; v++) qemu_mutex_destroy(&d->vp.voice_guard[v]);
+ }
+ 
+ void mcpx_apu_vp_reset(MCPXAPUState *d)
 diff --git a/src/apu/dsp/dsp_cpu.c b/src/apu/dsp/dsp_cpu.c
 index 6f16f8a..22bf9c8 100644
 --- a/src/apu/dsp/dsp_cpu.c
@@ -3787,7 +4074,7 @@ index b8d804a..d7e6957 100644
  						  const float attributes[16][4], float constants[192][4]);
  
 diff --git a/src/kernel/nv2a_gpu_d3d11.cpp b/src/kernel/nv2a_gpu_d3d11.cpp
-index f031faf..2e603ea 100644
+index f031faf..8baf034 100644
 --- a/src/kernel/nv2a_gpu_d3d11.cpp
 +++ b/src/kernel/nv2a_gpu_d3d11.cpp
 @@ -1,6 +1,7 @@
@@ -4442,7 +4729,7 @@ index f031faf..2e603ea 100644
          if (FAILED(result)) {
              std::fprintf(stderr, "[GPU-D3D11] state compile: %s\n", errors ? (const char *)errors->GetBufferPointer() : "failed");
              return 0;
-@@ -738,6 +1181,246 @@ extern "C" int nv2a_gpu_execute_state(const uint32_t program[136][4], const uint
+@@ -738,6 +1181,269 @@ extern "C" int nv2a_gpu_execute_state(const uint32_t program[136][4], const uint
      return 1;
  }
  
@@ -4471,7 +4758,13 @@ index f031faf..2e603ea 100644
 +static std::deque<std::shared_ptr<PixelCompileJob>> pixel_jobs_queued;
 +static std::vector<std::shared_ptr<PixelCompileJob>> pixel_jobs_done;
 +static std::vector<std::array<uint32_t,43>> pixel_jobs_pending;
-+static std::vector<std::vector<uint32_t>> vertex_jobs_pending;
++/* The same program can read differently packed attributes on another draw. */
++using VertexCompileKey = std::pair<std::vector<uint32_t>, uint32_t>;
++static std::vector<VertexCompileKey> vertex_jobs_pending;
++/* A deterministic compiler/device failure is remembered for this run. Without
++ * this, every draw of an unsupported shader can start the same failed job. */
++static std::set<VertexCompileKey> vertex_jobs_failed;
++static std::set<std::array<uint32_t,43>> pixel_jobs_failed;
 +static std::atomic<int> pixel_jobs_finished{0};
 +static ComPtr<ID3D11PixelShader> generic_pixel_shader;
 +static bool generic_pixel_requested;
@@ -4569,7 +4862,7 @@ index f031faf..2e603ea 100644
 +        for (unsigned index = 0; index < threads; index++) std::thread(pixel_compile_worker).detach();
 +    }
 +    std::lock_guard<std::mutex> hold(pixel_jobs_lock);
-+    if (job->vertex) vertex_jobs_pending.push_back(job->vertex_key);
++    if (job->vertex) vertex_jobs_pending.emplace_back(job->vertex_key, job->vertex_mask);
 +    else if (!job->generic) pixel_jobs_pending.push_back(job->key);
 +    if (job->generic) pixel_jobs_queued.push_front(job); else pixel_jobs_queued.push_back(job);
 +    pixel_jobs_signal.notify_one();
@@ -4586,7 +4879,8 @@ index f031faf..2e603ea 100644
 +        pixel_jobs_finished = 0;
 +        for (const auto &job : done) {
 +            if (job->vertex)
-+                vertex_jobs_pending.erase(std::remove(vertex_jobs_pending.begin(), vertex_jobs_pending.end(), job->vertex_key),
++                vertex_jobs_pending.erase(std::remove(vertex_jobs_pending.begin(), vertex_jobs_pending.end(),
++                                                     VertexCompileKey{job->vertex_key, job->vertex_mask}),
 +                                          vertex_jobs_pending.end());
 +            else
 +                pixel_jobs_pending.erase(std::remove(pixel_jobs_pending.begin(), pixel_jobs_pending.end(), job->key),
@@ -4596,6 +4890,7 @@ index f031faf..2e603ea 100644
 +    for (const auto &job : done) {
 +        if (job->vertex) {
 +            if (!job->vertex_shader) {
++                vertex_jobs_failed.emplace(job->vertex_key, job->vertex_mask);
 +                gpu_timing.vertex_shader_failures++;
 +                std::fprintf(stderr, "[GPU-D3D11] vertex compile: %s\n",
 +                             job->errors ? (const char *)job->errors->GetBufferPointer() : "failed");
@@ -4608,10 +4903,12 @@ index f031faf..2e603ea 100644
 +            variant.input_mask = job->vertex_mask;
 +            variant.bytecode_bytes = job->code->GetBufferSize();
 +            gpu_timing.vertex_async_compiles++;
-+            cache_shader_variant(vertex_variants, std::move(variant));
++            if (!cache_shader_variant(vertex_variants, std::move(variant)))
++                vertex_jobs_failed.emplace(job->vertex_key, job->vertex_mask);
 +            continue;
 +        }
 +        if (!job->shader) {
++            if (!job->generic) pixel_jobs_failed.insert(job->key);
 +            gpu_timing.pixel_shader_failures++;
 +            std::fprintf(stderr, "[GPU-D3D11] %s shader compile: %s\n", job->generic ? "generic" : "guest",
 +                         job->errors ? (const char *)job->errors->GetBufferPointer() : "failed");
@@ -4626,7 +4923,7 @@ index f031faf..2e603ea 100644
 +        variant.shader = job->shader;
 +        variant.bytecode_bytes = job->code->GetBufferSize();
 +        gpu_timing.pixel_async_compiles++;
-+        cache_shader_variant(shader_variants, std::move(variant));
++        if (!cache_shader_variant(shader_variants, std::move(variant))) pixel_jobs_failed.insert(job->key);
 +    }
 +}
 +
@@ -4642,17 +4939,21 @@ index f031faf..2e603ea 100644
 +    if (!words) return nullptr;
 +    /* Finished compiles are installed by get_pixel_shader, which runs first:
 +     * installing here could evict the pixel shader this draw just took. */
-+    for (auto &cached : vertex_variants) if (cached.key.size() == words &&
++    for (auto &cached : vertex_variants) if (cached.input_mask == state.attribute_mask && cached.key.size() == words &&
 +        !std::memcmp(cached.key.data(), state.vertex_program + state.vertex_start, words * sizeof(uint32_t))) {
 +        cached.last_used = ++shader_use_serial;
 +        gpu_timing.vertex_shader_hits++;
 +        return &cached;
 +    }
 +    std::vector<uint32_t> key(state.vertex_program[state.vertex_start], state.vertex_program[state.vertex_start] + words);
++    VertexCompileKey compile_key{key, state.attribute_mask};
++    if (vertex_jobs_failed.count(compile_key)) return nullptr;
 +    bool async = pixel_compiles_async();
 +    if (async) {
 +        std::lock_guard<std::mutex> hold(pixel_jobs_lock);
-+        if (std::find(vertex_jobs_pending.begin(), vertex_jobs_pending.end(), key) != vertex_jobs_pending.end()) {
++        if (std::any_of(vertex_jobs_pending.begin(), vertex_jobs_pending.end(), [&](const VertexCompileKey &pending_key) {
++                return pending_key.second == state.attribute_mask && pending_key.first == key;
++            })) {
 +            gpu_timing.vertex_skipped_draws++;
 +            *pending = true;
 +            return nullptr;
@@ -4663,7 +4964,10 @@ index f031faf..2e603ea 100644
 +    auto job = std::make_shared<PixelCompileJob>();
 +    job->vertex = true;
 +    job->vertex_source = vertex_program_source(key, false);
-+    if (job->vertex_source.empty()) return nullptr;
++    if (job->vertex_source.empty()) {
++        vertex_jobs_failed.insert(std::move(compile_key));
++        return nullptr;
++    }
 +    job->vertex_key = std::move(key);
 +    job->vertex_mask = state.attribute_mask;
 +    ComPtr<ID3DBlob> code, errors;
@@ -4675,21 +4979,27 @@ index f031faf..2e603ea 100644
 +            return nullptr;
 +        }
 +        gpu_timing.vertex_shader_failures++;
++        vertex_jobs_failed.insert(std::move(compile_key));
 +        std::fprintf(stderr, "[GPU-D3D11] vertex compile: %s\n", errors ? (const char *)errors->GetBufferPointer() : "failed");
 +        return nullptr;
 +    }
 +    VertexVariant variant;
 +    variant.key = std::move(job->vertex_key);
-+    if (!create_vertex_objects(code.Get(), variant.shader, variant.layout, state.attribute_mask)) return nullptr;
++    if (!create_vertex_objects(code.Get(), variant.shader, variant.layout, state.attribute_mask)) {
++        vertex_jobs_failed.insert(std::move(compile_key));
++        return nullptr;
++    }
 +    variant.input_mask = state.attribute_mask;
 +    variant.bytecode_bytes = code->GetBufferSize();
-+    return cache_shader_variant(vertex_variants, std::move(variant));
++    auto *cached = cache_shader_variant(vertex_variants, std::move(variant));
++    if (!cached) vertex_jobs_failed.insert(std::move(compile_key));
++    return cached;
 +}
 +
  static ID3D11PixelShader *get_pixel_shader(const Nv2aGpuDraw &state, uint32_t window_clip_mode)
  {
      ShaderVariant variant = {};
-@@ -753,14 +1436,29 @@ static ID3D11PixelShader *get_pixel_shader(const Nv2aGpuDraw &state, uint32_t wi
+@@ -753,14 +1459,30 @@ static ID3D11PixelShader *get_pixel_shader(const Nv2aGpuDraw &state, uint32_t wi
          variant.key[4+stage*4] = state.combiners.rgb_input[stage]; variant.key[5+stage*4] = state.combiners.alpha_input[stage];
          variant.key[6+stage*4] = state.combiners.rgb_output[stage]; variant.key[7+stage*4] = state.combiners.alpha_output[stage];
      }
@@ -4703,6 +5013,7 @@ index f031faf..2e603ea 100644
          gpu_timing.pixel_shader_hits++;
          return cached.shader.Get();
      }
++    if (pixel_jobs_failed.count(variant.key)) return generic_pixel_shader.Get();
 +    bool async = pixel_compiles_async();
 +    if (async && generic_pixel_shader) {
 +        std::lock_guard<std::mutex> hold(pixel_jobs_lock);
@@ -4720,7 +5031,7 @@ index f031faf..2e603ea 100644
      values[0] = std::to_string(variant.key[0] & 255u) + "u";
      values[1] = std::to_string(variant.key[0]) + "u"; values[2] = std::to_string(variant.key[1]) + "u";
      values[3] = std::to_string(variant.key[2]) + "u"; values[4] = std::to_string(variant.key[3]) + "u";
-@@ -782,19 +1480,25 @@ static ID3D11PixelShader *get_pixel_shader(const Nv2aGpuDraw &state, uint32_t wi
+@@ -782,27 +1504,38 @@ static ID3D11PixelShader *get_pixel_shader(const Nv2aGpuDraw &state, uint32_t wi
      }
      values[6] += ")";
      values[7] = std::to_string(variant.key[42]) + "u";
@@ -4757,9 +5068,25 @@ index f031faf..2e603ea 100644
 +    ComPtr<ID3DBlob> code = job->code, errors;
 +    if (!code && FAILED(compile_pixel_variant(*job, code, errors))) {
          gpu_timing.pixel_shader_failures++;
++        pixel_jobs_failed.insert(variant.key);
          std::fprintf(stderr, "[GPU-D3D11] guest shader compile: %s\n", errors ? (const char *)errors->GetBufferPointer() : "failed");
-         return nullptr;
-@@ -824,6 +1528,29 @@ static void mark_written_mask(SurfaceType &surface, const D3D11_BOX &region)
+-        return nullptr;
++        return generic_pixel_shader.Get();
++    }
++    if (FAILED(device->CreatePixelShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr, &variant.shader))) {
++        pixel_jobs_failed.insert(variant.key);
++        return generic_pixel_shader.Get();
+     }
+-    if (FAILED(device->CreatePixelShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr, &variant.shader))) return nullptr;
+     variant.bytecode_bytes = code->GetBufferSize();
+     auto *cached = cache_shader_variant(shader_variants, std::move(variant));
+-    return cached ? cached->shader.Get() : nullptr;
++    if (!cached) pixel_jobs_failed.insert(job->key);
++    return cached ? cached->shader.Get() : generic_pixel_shader.Get();
+ }
+ 
+ template<typename SurfaceType>
+@@ -824,6 +1557,29 @@ static void mark_written_mask(SurfaceType &surface, const D3D11_BOX &region)
      }
  }
  
@@ -4789,7 +5116,7 @@ index f031faf..2e603ea 100644
  template<typename SurfaceType>
  static void mark_written_region(SurfaceType &surface, const D3D11_BOX &region)
  {
-@@ -831,6 +1558,10 @@ static void mark_written_region(SurfaceType &surface, const D3D11_BOX &region)
+@@ -831,6 +1587,10 @@ static void mark_written_region(SurfaceType &surface, const D3D11_BOX &region)
      if (!surface.dirty) {
          surface.written_region = region;
          surface.written_mask.clear();
@@ -4800,7 +5127,7 @@ index f031faf..2e603ea 100644
      }
      else {
          auto &written = surface.written_region;
-@@ -938,6 +1669,147 @@ static bool surface_memory_matches(const SurfaceType &surface, uint32_t bytes)
+@@ -938,6 +1698,147 @@ static bool surface_memory_matches(const SurfaceType &surface, uint32_t bytes)
      return true;
  }
  
@@ -4948,7 +5275,7 @@ index f031faf..2e603ea 100644
  static void refresh_surface(Surface &surface)
  {
      if (!surface.needs_refresh) return;
-@@ -968,9 +1840,9 @@ static void refresh_surface(Surface &surface)
+@@ -968,9 +1869,9 @@ static void refresh_surface(Surface &surface)
                  std::memcpy(surface.source_snapshot.data() + (size_t)row * row_bytes + changed.left * 4,
                              surface.memory + (size_t)row * surface.pitch + changed.left * 4,
                              (size_t)(changed.right - changed.left) * 4);
@@ -4961,7 +5288,7 @@ index f031faf..2e603ea 100644
              surface.alias_copy_serial = 0;
              gpu_timing.color_refreshed++;
              gpu_timing.color_refresh_bytes += (uint64_t)(changed.right - changed.left) * (changed.bottom - changed.top) * 4;
-@@ -979,7 +1851,7 @@ static void refresh_surface(Surface &surface)
+@@ -979,7 +1880,7 @@ static void refresh_surface(Surface &surface)
          surface.needs_refresh = false;
          return;
      }
@@ -4970,7 +5297,7 @@ index f031faf..2e603ea 100644
      surface.clear_value_valid = false;
      surface.alias_copy_serial = 0;
      gpu_timing.color_refresh_bytes += (uint64_t)surface.width * surface.height * 4;
-@@ -1015,7 +1887,13 @@ static bool refresh_depth(DepthSurface &surface)
+@@ -1015,7 +1916,13 @@ static bool refresh_depth(DepthSurface &surface)
          encode_depth_row(surface.format, source, destination, surface.width);
      }
      context->Unmap(surface.staging.Get(), 0);
@@ -4985,7 +5312,7 @@ index f031faf..2e603ea 100644
      surface.clear_value_valid = false;
      surface.needs_refresh = false;
      surface.snapshot_valid = false;
-@@ -1023,33 +1901,243 @@ static bool refresh_depth(DepthSurface &surface)
+@@ -1023,33 +1930,243 @@ static bool refresh_depth(DepthSurface &surface)
      return true;
  }
  
@@ -5255,7 +5582,7 @@ index f031faf..2e603ea 100644
  }
  
  static DepthSurface *get_depth(const Nv2aGpuDraw &state, bool preserve = true, TargetExtent extent = {})
-@@ -1066,26 +2154,44 @@ static DepthSurface *get_depth(const Nv2aGpuDraw &state, bool preserve = true, T
+@@ -1066,26 +2183,44 @@ static DepthSurface *get_depth(const Nv2aGpuDraw &state, bool preserve = true, T
                       state.depth_pitch, extent.width, state.depth_format);
          return nullptr;
      }
@@ -5310,7 +5637,7 @@ index f031faf..2e603ea 100644
      if (!target_operation_succeeded("depth", "create staging", device->CreateTexture2D(&description, nullptr, &surface.staging))) return nullptr;
      // Creation-data uploads can round D24 values; use the bit-preserving refresh path.
      surface.needs_refresh = preserve;
-@@ -1094,6 +2200,144 @@ static DepthSurface *get_depth(const Nv2aGpuDraw &state, bool preserve = true, T
+@@ -1094,6 +2229,144 @@ static DepthSurface *get_depth(const Nv2aGpuDraw &state, bool preserve = true, T
      return &depth_surfaces.back();
  }
  
@@ -5455,7 +5782,7 @@ index f031faf..2e603ea 100644
  static void readback_failed(const char *kind, HRESULT result, const char *operation = "map")
  {
      std::fprintf(stderr, "[GPU-D3D11] readback failed: %s %s 0x%08X; device 0x%08X\n",
-@@ -1224,6 +2468,54 @@ static void wait_ordering_completion(void)
+@@ -1224,6 +2497,54 @@ static void wait_ordering_completion(void)
      }
  }
  
@@ -5510,7 +5837,7 @@ index f031faf..2e603ea 100644
  static void gpu_sync_impl(bool publish, const void *only = nullptr, size_t only_bytes = 0)
  {
      GpuTimer sync_timer(gpu_timing.sync);
-@@ -1253,6 +2545,36 @@ static void gpu_sync_impl(bool publish, const void *only = nullptr, size_t only_
+@@ -1253,6 +2574,36 @@ static void gpu_sync_impl(bool publish, const void *only = nullptr, size_t only_
          }
          return;
      }
@@ -5547,7 +5874,7 @@ index f031faf..2e603ea 100644
      ID3D11RenderTargetView *empty = nullptr;
      context->OMSetRenderTargets(1, &empty, nullptr);
      bool has_readback = false;
-@@ -1266,13 +2588,14 @@ static void gpu_sync_impl(bool publish, const void *only = nullptr, size_t only_
+@@ -1266,13 +2617,14 @@ static void gpu_sync_impl(bool publish, const void *only = nullptr, size_t only_
                      has_known_clear = true;
                      continue;
                  }
@@ -5564,7 +5891,7 @@ index f031faf..2e603ea 100644
                      gpu_timing.color_copy_bytes += (uint64_t)surface.width * surface.height * 4;
                  }
                  has_readback = true;
-@@ -1284,7 +2607,7 @@ static void gpu_sync_impl(bool publish, const void *only = nullptr, size_t only_
+@@ -1284,7 +2636,7 @@ static void gpu_sync_impl(bool publish, const void *only = nullptr, size_t only_
                      has_known_clear = true;
                      continue;
                  }
@@ -5573,7 +5900,7 @@ index f031faf..2e603ea 100644
                  has_readback = true;
              }
      }
-@@ -1659,12 +2982,13 @@ static bool stage_flip(const void *presented, size_t bytes, uint32_t va, uint32_
+@@ -1659,12 +3011,13 @@ static bool stage_flip(const void *presented, size_t bytes, uint32_t va, uint32_
  {
      Surface *surface = surface_for_memory(presented);
      if (!surface) return false;
@@ -5589,7 +5916,7 @@ index f031faf..2e603ea 100644
      }
      if (!s_pending_flip.event) {
          D3D11_QUERY_DESC description = {D3D11_QUERY_EVENT, 0};
-@@ -1684,11 +3008,44 @@ static bool stage_flip(const void *presented, size_t bytes, uint32_t va, uint32_
+@@ -1684,11 +3037,44 @@ static bool stage_flip(const void *presented, size_t bytes, uint32_t va, uint32_
      return true;
  }
  
@@ -5634,7 +5961,7 @@ index f031faf..2e603ea 100644
      if (!presented) { nv2a_gpu_flush(); return va; }
      uint32_t show = va;
      if (async_flip_enabled()) {
-@@ -1708,17 +3065,268 @@ extern "C" uint32_t nv2a_gpu_flip(const void *presented, size_t bytes, uint32_t
+@@ -1708,17 +3094,268 @@ extern "C" uint32_t nv2a_gpu_flip(const void *presented, size_t bytes, uint32_t
      } else {
          gpu_sync_impl(true, presented, bytes);
      }
@@ -5911,7 +6238,7 @@ index f031faf..2e603ea 100644
  /* A GPU-engine blit wrote guest RAM a cached surface mirrors. Refresh only the
   * surfaces that overlap those bytes from guest RAM; never bump the global
   * texture-validation serial, which would re-upload GPU-only textures (UI). */
-@@ -1754,8 +3362,11 @@ static bool matches_color_target(const Surface &surface, const Nv2aGpuDraw &stat
+@@ -1754,8 +3391,11 @@ static bool matches_color_target(const Surface &surface, const Nv2aGpuDraw &stat
  
  static bool matches_depth_target(const DepthSurface &surface, const Nv2aGpuDraw &state, TargetExtent extent)
  {
@@ -5924,7 +6251,7 @@ index f031faf..2e603ea 100644
  }
  
  static TargetExtent reusable_target_extent(const Nv2aGpuDraw &state)
-@@ -1894,12 +3505,30 @@ extern "C" int nv2a_gpu_clear(const Nv2aGpuDraw *state, uint32_t flags, uint32_t
+@@ -1894,12 +3534,30 @@ extern "C" int nv2a_gpu_clear(const Nv2aGpuDraw *state, uint32_t flags, uint32_t
          const float rgba[] = {(float)((color >> 16) & 255u) / 255.0f, (float)((color >> 8) & 255u) / 255.0f,
                                (float)(color & 255u) / 255.0f, (float)(color >> 24) / 255.0f};
          context->ClearRenderTargetView(surface->target.Get(), rgba);
@@ -5956,7 +6283,7 @@ index f031faf..2e603ea 100644
      }
      if (surface) {
          mark_written_region(*surface, region);
-@@ -1908,7 +3537,7 @@ extern "C" int nv2a_gpu_clear(const Nv2aGpuDraw *state, uint32_t flags, uint32_t
+@@ -1908,7 +3566,7 @@ extern "C" int nv2a_gpu_clear(const Nv2aGpuDraw *state, uint32_t flags, uint32_t
      if (depth) {
          bool known = known_clears && !partial && (depth->format == 1 ? clear_depth :
              (clear_depth && clear_stencil) || depth->clear_value_valid);
@@ -5965,7 +6292,7 @@ index f031faf..2e603ea 100644
              (clear_depth ? depth_value & 0xFFFFFF00u : depth->clear_value & 0xFFFFFF00u) |
              (clear_stencil ? depth_value & 255u : depth->clear_value & 255u);
          mark_written_region(*depth, region);
-@@ -1928,10 +3557,16 @@ static void release_stream(DynamicStream &stream)
+@@ -1928,10 +3586,16 @@ static void release_stream(DynamicStream &stream)
      }
  }
  
@@ -5986,7 +6313,7 @@ index f031faf..2e603ea 100644
  static bool map_stream(DynamicStream &stream, UINT bytes, UINT bind, const char *kind, UINT &offset)
  {
      if (!stream.buffer || bytes > stream.capacity) {
-@@ -1953,18 +3588,18 @@ static bool map_stream(DynamicStream &stream, UINT bytes, UINT bind, const char
+@@ -1953,18 +3617,18 @@ static bool map_stream(DynamicStream &stream, UINT bytes, UINT bind, const char
          stream.capacity = capacity;
          stream.used = 0;
      }
@@ -6016,7 +6343,7 @@ index f031faf..2e603ea 100644
          gpu_timing.stream_discards++;
      } else {
          gpu_timing.stream_appends++;
-@@ -2029,6 +3664,7 @@ static ID3D11ShaderResourceView *get_feedback_texture(const Surface &destination
+@@ -2029,6 +3693,7 @@ static ID3D11ShaderResourceView *get_feedback_texture(const Surface &destination
          if (FAILED(device->CreateTexture2D(&desc, nullptr, &feedback_texture))) return nullptr;
          if (FAILED(device->CreateShaderResourceView(feedback_texture.Get(), nullptr, &feedback_view))) return nullptr;
      }
@@ -6024,7 +6351,7 @@ index f031faf..2e603ea 100644
      context->CopyResource(feedback_texture.Get(), destination.texture.Get());
      return feedback_view.Get();
  }
-@@ -2050,12 +3686,148 @@ static ID3D11ShaderResourceView *default_white_view()
+@@ -2050,12 +3715,148 @@ static ID3D11ShaderResourceView *default_white_view()
      return view.Get();
  }
  
@@ -6173,7 +6500,7 @@ index f031faf..2e603ea 100644
      static const bool mirror_aliases = []() {
          const char *setting = std::getenv("RECOMP_NV2A_GPU_ALIAS_COPIES");
          return !setting || std::strcmp(setting, "0") != 0;
-@@ -2153,14 +3925,22 @@ static ID3D11ShaderResourceView *get_texture(const Nv2aGpuTexture &binding, cons
+@@ -2153,14 +3954,22 @@ static ID3D11ShaderResourceView *get_texture(const Nv2aGpuTexture &binding, cons
              direct->needs_refresh = true;
              refresh_surface(*direct);
              if (direct->alias_copy_serial != alias_serial) {
@@ -6198,7 +6525,7 @@ index f031faf..2e603ea 100644
                          context->CopySubresourceRegion(direct->texture.Get(), 0, box.left, box.top, 0,
                                                        surface.texture.Get(), 0, &box);
                          direct->clear_value_valid = false;
-@@ -2207,6 +3987,20 @@ static ID3D11ShaderResourceView *get_texture(const Nv2aGpuTexture &binding, cons
+@@ -2207,6 +4016,20 @@ static ID3D11ShaderResourceView *get_texture(const Nv2aGpuTexture &binding, cons
          nv2a_gpu_surface_publish(binding.source, binding.source_bytes);
      }
      if (direct) {
@@ -6219,7 +6546,7 @@ index f031faf..2e603ea 100644
          direct->last_used = ++surface_use_serial;
          if (cloak_debug())
              std::fprintf(stderr, "[CLOAKDBG] direct src=%p %ux%u fmt=%X linear=%u pitch=%u; surf %ux%u pitch=%u dirty=%u needs_refresh=%u snapshot_valid=%u\n",
-@@ -2223,6 +4017,7 @@ static ID3D11ShaderResourceView *get_texture(const Nv2aGpuTexture &binding, cons
+@@ -2223,6 +4046,7 @@ static ID3D11ShaderResourceView *get_texture(const Nv2aGpuTexture &binding, cons
           * GPU stale data -- see RECOMP_SYNC_LIGHT. */
          if (!direct->dirty)
              refresh_surface(*direct);
@@ -6227,7 +6554,7 @@ index f031faf..2e603ea 100644
          return direct->view.Get();
      }
      CachedTexture *refresh = nullptr;
-@@ -2397,6 +4192,20 @@ static ID3D11ShaderResourceView *get_texture(const Nv2aGpuTexture &binding, cons
+@@ -2397,6 +4221,20 @@ static ID3D11ShaderResourceView *get_texture(const Nv2aGpuTexture &binding, cons
      description.MipLevels = levels; description.ArraySize = faces; description.Format = format;
      description.MiscFlags = binding.cube ? D3D11_RESOURCE_MISC_TEXTURECUBE : 0;
      description.SampleDesc.Count = 1; description.BindFlags = D3D11_BIND_SHADER_RESOURCE;
@@ -6248,7 +6575,7 @@ index f031faf..2e603ea 100644
      ComPtr<ID3D11Texture2D> texture;
      CachedTexture entry = {};
      entry.source = binding.source; entry.width = binding.width; entry.height = binding.height; entry.format = binding.format;
-@@ -2515,11 +4324,57 @@ static D3D11_TEXTURE_ADDRESS_MODE texture_address(uint32_t address)
+@@ -2515,11 +4353,57 @@ static D3D11_TEXTURE_ADDRESS_MODE texture_address(uint32_t address)
      }
  }
  
@@ -6306,7 +6633,7 @@ index f031faf..2e603ea 100644
      if (minimum > 6 || maximum > 2) return false;
      D3D11_SAMPLER_DESC description = {};
      description.AddressU = texture_address(binding.address_u);
-@@ -2535,6 +4390,10 @@ static bool make_sampler(const Nv2aGpuTexture &binding, ComPtr<ID3D11SamplerStat
+@@ -2535,6 +4419,10 @@ static bool make_sampler(const Nv2aGpuTexture &binding, ComPtr<ID3D11SamplerStat
      description.MipLODBias = (float)bias / 256.0f;
      if (description.MipLODBias > D3D11_MIP_LOD_BIAS_MAX) return false;
      description.MaxAnisotropy = binding.control0_valid ? 1u << ((binding.control0 >> 4) & 3u) : 1u;
@@ -6317,7 +6644,7 @@ index f031faf..2e603ea 100644
      if (description.MaxAnisotropy > 1) {
          if (maximum != 2 || (minimum != 2 && minimum != 6)) return false;
          description.Filter = D3D11_FILTER_ANISOTROPIC;
-@@ -2673,10 +4532,10 @@ static bool clear_target_rectangle(const Nv2aGpuDraw &state, Surface *surface, D
+@@ -2673,10 +4561,10 @@ static bool clear_target_rectangle(const Nv2aGpuDraw &state, Surface *surface, D
              "float4 ps():SV_Target{return clearColor;}";
          ClearPipeline created;
          ComPtr<ID3DBlob> vertex, pixel, errors;
@@ -6330,7 +6657,7 @@ index f031faf..2e603ea 100644
                                  "ps", "ps_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &pixel, &errors);
          if (FAILED(result)) {
              std::fprintf(stderr, "[GPU-D3D11] rectangle clear shader compile: 0x%08X %s\n",
-@@ -2725,7 +4584,7 @@ static bool clear_target_rectangle(const Nv2aGpuDraw &state, Surface *surface, D
+@@ -2725,7 +4613,7 @@ static bool clear_target_rectangle(const Nv2aGpuDraw &state, Surface *surface, D
      const float constants[8] = {
          (float)((color >> 16) & 255u) / 255.0f, (float)((color >> 8) & 255u) / 255.0f,
          (float)(color & 255u) / 255.0f, (float)(color >> 24) / 255.0f,
@@ -6339,7 +6666,7 @@ index f031faf..2e603ea 100644
              (float)(depth_value >> 8) / 16777215.0f, 0, 0, 0
      };
      D3D11_MAPPED_SUBRESOURCE mapped = {};
-@@ -2735,8 +4594,10 @@ static bool clear_target_rectangle(const Nv2aGpuDraw &state, Surface *surface, D
+@@ -2735,8 +4623,10 @@ static bool clear_target_rectangle(const Nv2aGpuDraw &state, Surface *surface, D
      context->Unmap(pipeline.constants.Get(), 0);
      ID3D11ShaderResourceView *empty[12] = {};
      context->PSSetShaderResources(0, 12, empty);
@@ -6352,7 +6679,7 @@ index f031faf..2e603ea 100644
      context->OMSetBlendState(pipeline.blend[surface ? 1 : 0].Get(), nullptr, UINT_MAX);
      context->OMSetDepthStencilState(pipeline.depth[(clear_depth ? 1 : 0) | (clear_stencil ? 2 : 0)].Get(), depth_value & 255u);
      context->IASetInputLayout(nullptr);
-@@ -2747,8 +4608,13 @@ static bool clear_target_rectangle(const Nv2aGpuDraw &state, Surface *surface, D
+@@ -2747,8 +4637,13 @@ static bool clear_target_rectangle(const Nv2aGpuDraw &state, Surface *surface, D
      ID3D11Buffer *buffer = pipeline.constants.Get();
      context->VSSetConstantBuffers(0, 1, &buffer);
      context->PSSetConstantBuffers(0, 1, &buffer);
@@ -6368,7 +6695,7 @@ index f031faf..2e603ea 100644
      context->RSSetState(pipeline.raster.Get());
      context->RSSetViewports(1, &viewport);
      context->RSSetScissorRects(1, &clip);
-@@ -2764,9 +4630,14 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -2764,9 +4659,14 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
          std::fprintf(stderr, "[GPU-D3D11] rejected: %s\n", reason);
          return 0;
      };
@@ -6385,7 +6712,7 @@ index f031faf..2e603ea 100644
      if (state->topology > NV2A_GPU_TOPOLOGY_POINTS) return reject("primitive topology");
      uint32_t primitive_width = state->topology == NV2A_GPU_TOPOLOGY_TRIANGLES ? 3u :
                                 state->topology == NV2A_GPU_TOPOLOGY_LINES ? 2u : 1u;
-@@ -2856,12 +4727,25 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -2856,12 +4756,25 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
      for (uint32_t vertex = 0; !state->vertex_program && !state->fixed_transform && vertex < count; vertex++)
          if (!nv_cpu_finite(vertices[vertex].position[0]) || !nv_cpu_finite(vertices[vertex].position[1]) ||
              !nv_cpu_finite(vertices[vertex].position[2]) || !nv_cpu_finite(vertices[vertex].position[3])) return 0;
@@ -6413,7 +6740,7 @@ index f031faf..2e603ea 100644
      D3D11_DEPTH_STENCIL_DESC depth_description = {};
      depth_description.DepthEnable = state->depth_enable != 0;
      depth_description.DepthWriteMask = state->depth_mask ? D3D11_DEPTH_WRITE_MASK_ALL : D3D11_DEPTH_WRITE_MASK_ZERO;
-@@ -2903,6 +4787,20 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -2903,6 +4816,20 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
                        (LONG)std::min(state->clip_y + state->clip_height, state->height)};
      if (state->topology == NV2A_GPU_TOPOLOGY_TRIANGLES && state->cull_enable && state->cull_face == 0x408) { clip.right = clip.left; clip.bottom = clip.top; }
      configure_window_clip(*state, constants, clip);
@@ -6434,7 +6761,7 @@ index f031faf..2e603ea 100644
      constants.control[0] = state->combiners.control & 255u; constants.control[1] = state->stage_program;
      constants.control[2] = state->alpha_enable; constants.control[3] = state->alpha_function; constants.misc[0] = state->alpha_reference;
      constants.misc[1] = state->control0;
-@@ -2971,14 +4869,43 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -2971,14 +4898,43 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
              }
          }
      }
@@ -6480,7 +6807,7 @@ index f031faf..2e603ea 100644
      for (uint32_t stage = 0; stage < 8; stage++) {
          constants.stages[stage][0] = state->combiners.rgb_input[stage]; constants.stages[stage][1] = state->combiners.alpha_input[stage];
          constants.stages[stage][2] = state->combiners.rgb_output[stage]; constants.stages[stage][3] = state->combiners.alpha_output[stage];
-@@ -3052,7 +4979,8 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -3052,7 +5008,8 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
              constants.texture_info[stage][3] = 0.0f;
              continue;
          }
@@ -6490,7 +6817,7 @@ index f031faf..2e603ea 100644
              return reject("projective volume texture dimensionality");
          uint32_t sign_mask = binding.filter >> 28;
          uint32_t key_mode = binding.control0_valid ? binding.control0 & 3u : 0;
-@@ -3090,9 +5018,37 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -3090,9 +5047,37 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
              if ((mode == 1 || mode == 2) && vertices[vertex].texture[stage][3] == 0) return reject("zero projective texture coordinate");
          }
          if (!binding.source_bytes) return reject("missing texture data");
@@ -6530,7 +6857,7 @@ index f031faf..2e603ea 100644
          constants.texture_info[stage][0] = (float)binding.width; constants.texture_info[stage][1] = (float)binding.height; constants.texture_info[stage][2] = (float)binding.linear;
          constants.texture_key[stage][0] = binding.color_key;
          constants.texture_key[stage][1] = binding.format == 0x03 || binding.format == 0x07 ||
-@@ -3102,7 +5058,14 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -3102,7 +5087,14 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
          constants.texture_info[stage][3] = (float)((binding.format == 0x1E ? 1u : 0u) | (binding.cube ? 2u : 0u) |
              (binding.address_u == 5 ? 4u : 0u) | (binding.address_v == 5 ? 8u : 0u) |
              (binding.control0_valid && (binding.control0 & 4u) ? 16u : 0u) |
@@ -6546,7 +6873,7 @@ index f031faf..2e603ea 100644
          if (sign_mask) signed_texture_stages++;
          switch (binding.format) {
          case 0x01: case 0x16: case 0x17: case 0x1A: case 0x1B: case 0x20: case 0x28: case 0x29:
-@@ -3111,18 +5074,29 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -3111,18 +5103,29 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
          }
      }
      phase_timer.next_phase(gpu_timing.draw_streams);
@@ -6580,7 +6907,7 @@ index f031faf..2e603ea 100644
      else for (uint32_t vertex = 0; vertex < count; vertex++)
          std::memcpy(vertex_destination + vertex * vertex_stride, &vertices[vertex], offsetof(Nv2aGpuVertex, attributes));
      UINT index_offset = 0;
-@@ -3130,13 +5104,15 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -3130,13 +5133,15 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
          index_offset = vertex_offset + vertex_bytes;
          std::memcpy((uint8_t *)vertex_stream.mapped.pData + index_offset, state->indices, index_bytes);
      }
@@ -6597,7 +6924,7 @@ index f031faf..2e603ea 100644
                  !std::memcmp(&uploaded_constants, &constants, sizeof constants)) {
              /* Same constants as the last upload this frame: rebind its offset. */
              gpu_timing.constant_reuses++;
-@@ -3146,6 +5122,8 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -3146,6 +5151,8 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
              if (!map_stream(constant_stream, kConstantSlot, D3D11_BIND_CONSTANT_BUFFER, "constants", constants_offset))
                  return 0;
              std::memcpy((uint8_t *)constant_stream.mapped.pData + constants_offset, &constants, sizeof constants);
@@ -6606,7 +6933,7 @@ index f031faf..2e603ea 100644
              constant_upload_offset = constants_offset;
              uploaded_constants = constants;
              uploaded_constants_valid = true;
-@@ -3170,20 +5148,31 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -3170,20 +5177,31 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
              constants.texture_key[stage][2] == 3u) uncombined = false;
      ID3D11PixelShader *program = uncombined ? uncombined_shader.Get() : get_pixel_shader(*state, constants.window_clip_control[0]);
      if (!program) return 0;
@@ -6641,7 +6968,7 @@ index f031faf..2e603ea 100644
      context->OMSetDepthStencilState(depth_state.Get(), state->stencil_reference & 255u); context->OMSetBlendState(blending.Get(), blend_color, ~0u);
      context->IASetInputLayout(guest_vertex ? guest_vertex->layout.Get() : input_layout.Get()); context->IASetVertexBuffers(0, 1, buffers, &stride, &offset);
      context->IASetPrimitiveTopology(state->topology == NV2A_GPU_TOPOLOGY_LINES ? D3D11_PRIMITIVE_TOPOLOGY_LINELIST :
-@@ -3192,7 +5181,7 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -3192,7 +5210,7 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
      context->VSSetShader(guest_vertex ? guest_vertex->shader.Get() : vertex_shader.Get(), nullptr, 0);
      ID3D11GeometryShader *geometry = state->topology == NV2A_GPU_TOPOLOGY_LINES ? line_geometry_shader.Get() :
          state->topology == NV2A_GPU_TOPOLOGY_POINTS ? point_geometry_shader.Get() :
@@ -6650,7 +6977,7 @@ index f031faf..2e603ea 100644
      context->GSSetShader(geometry, nullptr, 0);
      context->PSSetShader(program, nullptr, 0);
      if (constants_ring && context1) {
-@@ -3205,12 +5194,13 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -3205,12 +5223,13 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
          context->GSSetConstantBuffers(0, 1, constants_buffer);
      }
      context->PSSetShaderResources(0, 12, resources); context->PSSetSamplers(0, 4, sampler_states);
@@ -6669,7 +6996,7 @@ index f031faf..2e603ea 100644
      if (region.right > state->width) region.right = state->width;
      if (region.bottom > state->height) region.bottom = state->height;
      region.back = 1;
-@@ -3245,7 +5235,7 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -3245,7 +5264,7 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
          if (texture_matrix_used) gpu_timing.texture_matrix_draws++;
      }
      pending_draws = true;
@@ -6678,7 +7005,7 @@ index f031faf..2e603ea 100644
      else gpu_timing.color_masked_draws++;
      bool stencil_writes = state->stencil_enable && (state->stencil_write_mask & 255u) &&
          (state->stencil_fail != 0x1E00 || state->stencil_depth_fail != 0x1E00 || state->stencil_pass != 0x1E00);
-@@ -3260,8 +5250,8 @@ extern "C" int nv2a_gpu_compile(void)
+@@ -3260,8 +5279,8 @@ extern "C" int nv2a_gpu_compile(void)
      if (vertex_shader && uncombined_shader && geometry_shader && line_geometry_shader && point_geometry_shader) return 1;
      if (!nv2a_gpu_available()) return 0;
      ComPtr<ID3DBlob> pixel_code, errors;
@@ -6689,7 +7016,7 @@ index f031faf..2e603ea 100644
      if (FAILED(result)) {
          std::fprintf(stderr, "[GPU-D3D11] shader compile: %s\n", errors ? (const char *)errors->GetBufferPointer() : "failed");
          return 0;
-@@ -3273,8 +5263,8 @@ extern "C" int nv2a_gpu_compile(void)
+@@ -3273,8 +5292,8 @@ extern "C" int nv2a_gpu_compile(void)
          return 0;
      }
      pixel_code.Reset(); errors.Reset();
@@ -6700,7 +7027,7 @@ index f031faf..2e603ea 100644
      if (FAILED(result)) return 0;
      if (FAILED(device->CreatePixelShader(pixel_code->GetBufferPointer(), pixel_code->GetBufferSize(), nullptr, &uncombined_shader))) return 0;
      const struct { const char *entry; ComPtr<ID3D11GeometryShader> *shader; } geometries[] = {
-@@ -3282,8 +5272,8 @@ extern "C" int nv2a_gpu_compile(void)
+@@ -3282,8 +5301,8 @@ extern "C" int nv2a_gpu_compile(void)
      };
      for (const auto &geometry : geometries) {
          pixel_code.Reset(); errors.Reset();
@@ -6711,7 +7038,7 @@ index f031faf..2e603ea 100644
          if (SUCCEEDED(result))
              result = device->CreateGeometryShader(pixel_code->GetBufferPointer(), pixel_code->GetBufferSize(), nullptr,
                                                     geometry.shader->ReleaseAndGetAddressOf());
-@@ -3296,28 +5286,70 @@ extern "C" int nv2a_gpu_compile(void)
+@@ -3296,28 +5315,70 @@ extern "C" int nv2a_gpu_compile(void)
      return 1;
  }
  

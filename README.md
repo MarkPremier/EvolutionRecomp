@@ -120,6 +120,21 @@ still compiling is skipped for those few frames. The first time a scene is
 ever seen may show that briefly; after that it plays without compiling at all.
 `RECOMP_SHADER_CACHE=<folder>` moves the cache (`0` turns it off) and
 `RECOMP_SHADER_ASYNC=0` compiles in the frame instead, as before.
+Vertex layouts are cached separately for each attribute mask. A shader
+that fails compilation or creation is remembered for the rest of the run,
+using the generic pixel shader where available, rather than retried on
+every draw. Restart the program to retry after fixing the compiler or driver.
+
+Audio voice updates synchronize with their own mixer slice: the mixer waits
+while the game has a voice locked for a restart or data change. A one-shot
+sound also drains its resampler before being reported finished, preserving
+short effects and the ends of longer samples.
+An idle notification that became stale after a voice restart is rejected
+by the shared DirectSound completion handler, covering both interrupt and
+synchronous servicing before either can unlink the new playback. This
+matters for rapid repeated effects such as pistol shots. Set
+`RECOMP_APU_EVENT_TRACE=1` to log starts, first mixed contributions and stale
+idle notifications while diagnosing audio.
 
 ## What you need to build it
 
@@ -235,11 +250,34 @@ A pad works as on the console. Keyboard and mouse (on by default,
 | Weapon mode | Right mouse |
 | Jump | Space |
 | Next / previous weapon | Wheel down / up |
+| A weapon directly | 1 to 0 (see below) |
 | Duck | Ctrl |
 | Zoom | Middle mouse |
 | Pause | Esc |
 | Menu select / back | Enter or Space / Esc or Backspace |
 | Menu up / down / left / right | Arrow keys |
+
+The number keys pick a weapon you have, with ammunition, the way the next
+and previous weapon buttons would reach it. Press a number to select its
+slot directly. Press it again to cycle only through that slot's weapons,
+skipping any you do not have or cannot use. Holding the key does not cycle:
+
+| Key | Weapon |
+|-----|--------|
+| 1 | War Club |
+| 2 | Bow, Tek Bow |
+| 3 | Pistol |
+| 4 | Shotgun |
+| 5 | Rocket Launcher |
+| 6 | Plasma Cannon (Tek Weapon) |
+| 7 | Minigun |
+| 8 | Flamethrower |
+| 9 | Gravity Disruptor |
+| 0 | Grenades, Spider Mines, Dark Matter Cube |
+
+The Crossbow also shares key 2 if available. Number keys work in
+single-player and follow `RECOMP_KBM`; in split-screen, change weapon with
+next and previous weapon.
 
 ### Options are saved when you leave the menu
 
@@ -357,7 +395,8 @@ An environment variable set by hand still wins at start-up.
   and fully drawn bows was the exception: it stepped once a frame, so above
   60 fps it wandered faster and further the higher the rate (impossible to
   aim at 120 and up, the pistol scope worst). It now steps at most 60 times
-  a second; at 60 fps and below it is as before.
+  a second per weapon instance, including in split-screen; at 60 fps and
+  below it is as before.
 - **Button icons, pc**: the menus' A and B prompts become the PC release's
   Enter and Esc keys. They are read from a PC install, which you name in
   `turok_settings.ini`: `[paths]` then `pc_game_dir=<folder with data\Textures>`
@@ -423,7 +462,12 @@ An environment variable set by hand still wins at start-up.
   the limit), so kept decals used to stop new effects, such as the blood from
   a severed neck. Now, as an effect nears its share, the oldest kept decals
   and gibs are removed first (`sub_000B98D0` stamps each particle as it is
-  added). The log reports removals and refusals at most every ten seconds.
+  added). The candidates are scanned and sorted at most once per frame,
+  including when none can be removed; further emission requests reuse that
+  result. A new particle at a recycled address is left alone. Definition
+  tracking is cleared when changing worlds, and a reparsed definition
+  replaces its old record. The log reports removals and refusals at most
+  every ten seconds.
 - **Widescreen culling**: the game culls against its 4:3 camera, so blood,
   bullet holes and other effects past the 4:3 edges vanished while on screen.
   While the camera's view planes (`sub_00020EE0`) and the in-view test run, the
@@ -447,6 +491,13 @@ this repository. `RECOMP_VIDEO_OPTIONS=0` removes it and leaves the menus as
 the disc has them. A `patch0.tre` that something else wrote is left alone.
 
 ## Project files
+
+Run `py -3 tools/test_stability.py` on Windows with MSVC installed for the
+decal lifetime, split-screen wobble, particle cleanup, extraction failure,
+shader-cache and audio-voice regression checks. Run after building the
+Release runtime (the audio test links its resampler library). They need no
+disc files; the renderer checks use D3D11 WARP, Microsoft's software device,
+and the audio checks use generated PCM.
 
 | Path | What it is |
 |------|------------|
