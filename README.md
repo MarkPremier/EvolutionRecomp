@@ -382,9 +382,9 @@ boosted to keep explosions visible. Each particle fades out towards its edge
 instead of pasting a square of a low-resolution screen copy over the scene.
 Enhanced omits the dark matter cube's legacy dark overlay, including its
 halo, because that layer exposes a large rectangular backdrop in the final
-flash. Its screen-copy grid also fades before expanding across the view.
-The explosion's bright particles and lighting remain. Xbox retains the full
-original effect. Weapon heat keeps its original animated warp and opacity,
+flash. Its heat distortion follows the game's original lifetime without an
+extra early fade. The explosion's bright particles and lighting remain.
+Xbox retains the full original effect. Weapon heat keeps its original animated warp and opacity,
 including the rocket launcher's barrel haze.
 **Off** removes the screen distortion while keeping the flames, smoke,
 explosion particles and lighting. The setting applies immediately and is

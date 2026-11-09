@@ -77,28 +77,6 @@ int main()
     assert(mapping.transform[0] == 0.5f && mapping.transform[1] == 0.5f);
     assert(mapping.transform[2] == 0.25f && mapping.transform[3] == 0.25f);
     heat_copies.clear();
-    uint32_t colour_program[136][4] = {{0, (1u << 21) | 0x1B, 2u << 26, 0xF800},
-                                      {0, (1u << 21) | (3u << 9) | 0x1B, 2u << 26, 0xF819}};
-    Nv2aGpuDraw grid_state = {};
-    grid_state.vertex_program = colour_program; grid_state.vertex_valid = copy_valid; grid_state.vertex_constants = copy_constants;
-    grid_state.stage_program = 0x1801; grid_state.combiners.control = 0x11102;
-    grid_state.combiners.final_input[0] = 0x0E; grid_state.combiners.final_input[1] = 0x1C80;
-    grid_state.width = 1280; grid_state.height = 480; grid_state.aa_scale_x = 2;
-    Nv2aGpuVertex grid_vertices[240] = {};
-    for (auto &vertex : grid_vertices) {
-        vertex.attributes[0][3] = 1; vertex.attributes[3][0] = 128.0f / 255.0f; vertex.attributes[3][3] = 1;
-    }
-    grid_vertices[239].attributes[0][0] = 320;
-    assert(heat_grid_strength(grid_state, grid_vertices, 240) == 1);
-    grid_vertices[239].attributes[0][0] = 480;
-    assert(heat_grid_strength(grid_state, grid_vertices, 240) == 0.5f);
-    grid_vertices[239].attributes[0][0] = 640;
-    assert(heat_grid_strength(grid_state, grid_vertices, 240) == 0);
-    grid_vertices[0].attributes[3][0] = 0;
-    assert(heat_grid_strength(grid_state, grid_vertices, 240) == 1);
-    assert(heat_grid_strength(grid_state, grid_vertices, 44) == 1);
-    std::puts("PASS: oversized cube-grid fade excludes weapon haze");
-
     std::puts("PASS: screen-copy crop recovery preserves the original animated warp");
 
     const char vertex[] = R"HLSL(
