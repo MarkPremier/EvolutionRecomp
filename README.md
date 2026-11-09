@@ -369,11 +369,28 @@ effect at once and are kept in `turok_settings.ini` beside the exe:
 | Flight speed | 1 to 10 (5 by default; each step 1.4x; the pteranodon's mouse steering; on the PC Settings page, kept with these settings) | |
 | Flight invert | off, on (the mouse up the screen dives instead of climbing; on the PC Settings page, kept with these settings) | |
 | Draw distance | normal, 2x, 4x, 8x (2x by default) | |
-| Heat haze | original, smooth, sharp (the flamethrower and rocket haze: original is the console's blocks; smooth filters the ripple; sharp also copies the screen at full resolution) | `RECOMP_SMOOTH_BUMP=1` (smooth) |
+| Heat haze | off, xbox, enhanced (enhanced by default; off removes distortion; xbox keeps the original effect; enhanced refracts the full-resolution scene with filtered offsets and feathered edges) | |
 | Shadows | xbox, enhanced (enhanced by default; see Shadows above -- the shadow map's size changes when the game next starts) | `RECOMP_SHADOW_EXACT`, `RECOMP_SHADOW_SCALE` override parts |
 | Keep bodies | off, on (off by default; also keeps decals; always off in the flying levels, and bodies are not kept in the stealth level) | |
 
 The page shows ten rows at a time and scrolls: it follows the highlight as you move up and down, and the mouse wheel scrolls it (click a row, or press left and right, to change its value).
+
+For high resolutions, use **Heat haze: Enhanced**. Its signed distortion
+offsets are decoded before filtering, so small ripples do not turn into
+abrupt jumps across texture cells. The filtered refraction movement is
+boosted to keep explosions visible. Each particle fades out towards its edge
+instead of pasting a square of a low-resolution screen copy over the scene.
+Enhanced omits the dark matter cube's legacy dark overlay, including its
+halo, because that layer exposes a large rectangular backdrop in the final
+flash. Its screen-copy grid also fades before expanding across the view.
+The explosion's bright particles and lighting remain. Xbox retains the full
+original effect. Weapon heat keeps its original animated warp and opacity,
+including the rocket launcher's barrel haze.
+**Off** removes the screen distortion while keeping the flames, smoke,
+explosion particles and lighting. The setting applies immediately and is
+saved between runs. `RECOMP_HEAT_TRACE=1` logs the first refraction batches
+for diagnostics.
+Older `original` settings load as Xbox; `smooth` and `sharp` load as Enhanced.
 
 An environment variable set by hand still wins at start-up.
 
@@ -494,7 +511,7 @@ the disc has them. A `patch0.tre` that something else wrote is left alone.
 
 Run `py -3 tools/test_stability.py` on Windows with MSVC installed for the
 decal lifetime, split-screen wobble, particle cleanup, extraction failure,
-shader-cache and audio-voice regression checks. Run after building the
+shader-cache, heat-haze, settings migration and audio-voice regression checks. Run after building the
 Release runtime (the audio test links its resampler library). They need no
 disc files; the renderer checks use D3D11 WARP, Microsoft's software device,
 and the audio checks use generated PCM.

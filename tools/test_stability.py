@@ -17,6 +17,10 @@ def function(source, signature):
 
 
 def game_functions(root, output):
+    settings = (root / "src/video_settings.c").read_text(encoding="utf-8")
+    (output / "video_settings_under_test.inc").write_text(
+        settings[settings.index("enum { SET_RESOLUTION"):settings.index("/* Mouse look's state")] +
+        function(settings, "static int value_index("), encoding="utf-8")
     source = (root / "src/recomp_manual.c").read_text(encoding="utf-8")
     parts = [
         '#define TUROK_MEM32(va) (*(uint32_t *)(memory + (va)))\n',
@@ -66,7 +70,9 @@ def main():
     for name, libraries in (
         ("game_fixes.c", []),
         ("game_files.c", ["user32.lib", "gdi32.lib"]),
+        ("video_settings.c", ["user32.lib", "gdi32.lib"]),
         ("gpu_shader_cache.cpp", ["d3d11.lib", "dxgi.lib", "d3dcompiler.lib", "user32.lib"]),
+        ("gpu_heat_haze.cpp", ["d3d11.lib", "dxgi.lib", "d3dcompiler.lib", "user32.lib"]),
         ("apu_voices.c", [str(root / "build/xboxrecomp/src/apu/Release/xbox_apu.lib")]),
     ):
         if len(sys.argv) > 1 and name not in sys.argv[1:]:

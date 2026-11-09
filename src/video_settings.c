@@ -85,7 +85,9 @@ static const char *const k_frames[] = {"30", "60", "120", "144", "240", "display
 static const char *const k_anisotropy[] = {"off", "2x", "4x", "8x", "16x"};
 static const char *const k_msaa[] = {"off", "2x", "4x", "8x"};
 static const char *const k_distances[] = {"normal", "2x", "4x", "8x"};
-static const char *const k_hazes[] = {"original", "smooth", "sharp"};
+static const char *const k_hazes[] = {"off", "xbox", "enhanced"};
+/* The renderer's API retains its older mode numbers. */
+static const int k_haze_modes[] = {3, 0, 2};
 /* Shadows: the Xbox's own, or every shadow change of the recompilation
  * (video_settings_enhanced_shadows). */
 static const char *const k_shadow_modes[] = {"xbox", "enhanced"};
@@ -103,7 +105,7 @@ static const VideoSetting k_settings[SETTING_COUNT] = {
     {"anisotropy", "anisotropy", k_anisotropy, COUNT(k_anisotropy), 4},
     {"msaa", "msaa", k_msaa, COUNT(k_msaa), 0},
     {"draw_distance", "draw distance", k_distances, COUNT(k_distances), 1},
-    {"heat_haze", "heat haze", k_hazes, COUNT(k_hazes), 0},
+    {"heat_haze", "heat haze", k_hazes, COUNT(k_hazes), 2},
     {"shadows", "shadows", k_shadow_modes, COUNT(k_shadow_modes), 1},
     {"keep_bodies", "keep bodies", k_switches, COUNT(k_switches), 0},
     {"button_icons", "button icons", k_icons, COUNT(k_icons), 0},
@@ -253,6 +255,10 @@ static void apply_bindings(void)
 static int value_index(int setting, const char *text)
 {
     int v;
+    if (setting == SET_HEAT_HAZE && text) {
+        if (!_stricmp(text, "original")) return 1;
+        if (!_stricmp(text, "smooth") || !_stricmp(text, "sharp")) return 2;
+    }
     for (v = 0; text && v < k_settings[setting].count; v++)
         if (!_stricmp(text, k_settings[setting].values[v])) return v;
     return -1;
@@ -1973,7 +1979,7 @@ static void apply_setting(int setting)
     case SET_FRAMES: apply_frames(); break;
     case SET_ANISOTROPY: nv2a_gpu_set_anisotropy(1 << s_values[SET_ANISOTROPY]); break;
     case SET_MSAA: nv2a_gpu_set_msaa(1 << s_values[SET_MSAA]); break;
-    case SET_HEAT_HAZE: nv2a_gpu_set_heat_haze(s_values[SET_HEAT_HAZE]); break;
+    case SET_HEAT_HAZE: nv2a_gpu_set_heat_haze(k_haze_modes[s_values[SET_HEAT_HAZE]]); break;
     case SET_SHADOWS:   /* the rest is read as the game runs (recomp_manual.c) */
         nv2a_gpu_set_shadow_scale(s_values[SET_SHADOWS] ? 4 : 1);
         nv2a_gpu_set_exact_shadows(s_values[SET_SHADOWS]);
@@ -3017,7 +3023,7 @@ void video_settings_start(const char *game_dir)
     apply_setting(SET_ANISOTROPY);
     apply_setting(SET_MSAA);
     apply_setting(SET_SHADOWS);   /* its map scale and exact depth (else only when changed) */
-    apply_setting(SET_HEAT_HAZE); /* likewise: a saved smooth or sharp haze was off until changed */
+    apply_setting(SET_HEAT_HAZE); /* apply the saved haze mode before the first frame */
     apply_setting(SET_ICONS);
     apply_setting(SET_MOUSE_LOOK);
     apply_bindings();
