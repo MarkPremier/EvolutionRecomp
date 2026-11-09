@@ -602,6 +602,14 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
         _putenv_s("RECOMP_USB_NDP", "4");
     if (!getenv("RECOMP_USB_PORT"))
         _putenv_s("RECOMP_USB_PORT", "2");
+    /* Four controller ports, for split-screen. The pads arrive one at a time
+     * on root ports 2, 3, 0, 1 -- the console's controllers 1 to 4 -- and
+     * each answers for the host pad of its number: XInput pads first, then
+     * PlayStation and Switch 2 pads (toolkit hid_pads.c). One with nothing
+     * behind it reports nothing pressed. RECOMP_USB_PADS=1 offers only the
+     * first, as before. */
+    if (!getenv("RECOMP_USB_PADS"))
+        _putenv_s("RECOMP_USB_PADS", "4");
     if (!getenv("RECOMP_XINPUT_SLOT"))
         _putenv_s("RECOMP_XINPUT_SLOT", "auto");
     /* Keyboard and mouse, merged onto controller 1 (a pad keeps working).

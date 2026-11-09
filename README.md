@@ -27,9 +27,16 @@ CPU-renderer build (about 9 fps on the title screen).
   options Start, create/share Back. So does the Switch 2 Pro Controller over
   USB (with Steam closed: Steam holds its USB interface), its buttons placed
   by position as on an Xbox pad (the bottom one is A), plus Start, minus
-  Back. An XInput pad, if present, keeps controller 1 and the other pad
-  takes the next. `RECOMP_HID_PADS=0` turns this off. Both the DualSense
-  and the Switch 2 Pro Controller are tested.
+  Back. `RECOMP_HID_PADS=0` turns this off. Both the DualSense and the
+  Switch 2 Pro Controller are tested.
+- Up to four controllers for split-screen, any mix of kinds (two DualSenses
+  as well as an Xbox pad and a Switch 2 Pro Controller): the game sees all
+  four controller ports, and XInput pads take controllers 1, 2... in
+  Windows' order, then PlayStation and Switch 2 pads in the order they were
+  connected. A pad keeps its number while connected. Each shows it: the
+  DualSense's player lights, the DualShock 4's light bar (blue, red, green,
+  pink) and the Switch 2's player lights. `RECOMP_USB_PADS=1` offers the game
+  only controller 1.
 - Keyboard and mouse work too, merged onto controller 1 (see Controls).
 - Dinosaurs and Turok cast shadows, with filtered (PCF) edges, the Xbox's
   own or enhanced (Shadows, in Video Options; `RECOMP_SHADOWS=0` turns them
