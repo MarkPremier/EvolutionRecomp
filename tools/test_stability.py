@@ -20,8 +20,36 @@ def game_functions(root, output):
     settings = (root / "src/video_settings.c").read_text(encoding="utf-8")
     (output / "video_settings_under_test.inc").write_text(
         settings[settings.index("enum { SET_RESOLUTION"):settings.index("/* Mouse look's state")] +
+        settings[settings.index("#define TEXT_ENTRY"):settings.index("/* Then the controls page's:")] +
         function(settings, "static int value_index("), encoding="utf-8")
     source = (root / "src/recomp_manual.c").read_text(encoding="utf-8")
+    (output / "controller_aim_under_test.inc").write_text(
+        function(source, "static float guest_float(") +
+        source[source.index("extern void sub_00142280_gen(void);"):source.index("/* ── Native mouse look")],
+        encoding="utf-8")
+    generated = root / "src/recomp/gen/recomp_0031.c"
+    integration = ""
+    if generated.exists():
+        lifted = generated.read_text(encoding="utf-8")
+        integration = '#define HAVE_GENERATED_AIM 1\n#include "' + (generated.parent / "recomp_types.h").as_posix() + '"\n'
+        integration += '''
+#undef RECOMP_ABI_CALL
+#define RECOMP_ABI_CALL(va, fn) (fn)()
+#undef RECOMP_ICALL_SAFE_AT
+#define RECOMP_ICALL_SAFE_AT(va, saved, site) (g_esp = (saved))
+#pragma warning(push)
+#pragma warning(disable:4102)
+#define eax g_eax
+#define ecx g_ecx
+#define edx g_edx
+#define esp g_esp
+#define ebx g_ebx
+#define esi g_esi
+#define edi g_edi
+'''
+        integration += function(lifted, "void sub_00142280_gen(void)") + function(lifted, "void sub_00144780(void)")
+        integration += '\n#pragma warning(pop)\n#undef eax\n#undef ecx\n#undef edx\n#undef esp\n#undef ebx\n#undef esi\n#undef edi\n'
+    (output / "controller_aim_generated.inc").write_text(integration, encoding="utf-8")
     parts = [
         '#define TUROK_MEM32(va) (*(uint32_t *)(memory + (va)))\n',
         'typedef void (*recomp_func_t)(void);\n',
@@ -71,6 +99,7 @@ def main():
         ("game_fixes.c", []),
         ("game_files.c", ["user32.lib", "gdi32.lib"]),
         ("video_settings.c", ["user32.lib", "gdi32.lib"]),
+        ("controller_aim.c", []),
         ("gpu_shader_cache.cpp", ["d3d11.lib", "dxgi.lib", "d3dcompiler.lib", "user32.lib"]),
         ("gpu_heat_haze.cpp", ["d3d11.lib", "dxgi.lib", "d3dcompiler.lib", "user32.lib"]),
         ("apu_voices.c", [str(root / "build/xboxrecomp/src/apu/Release/xbox_apu.lib")]),

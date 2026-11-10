@@ -368,6 +368,7 @@ effect at once and are kept in `turok_settings.ini` beside the exe:
 | Flight mouse | on, off (the mouse steers the pteranodon; on the PC Settings page, kept with these settings) | |
 | Flight speed | 1 to 10 (5 by default; each step 1.4x; the pteranodon's mouse steering; on the PC Settings page, kept with these settings) | |
 | Flight invert | off, on (the mouse up the screen dives instead of climbing; on the PC Settings page, kept with these settings) | |
+| Pad aim | original, modern (original by default; on the PC Settings page) | |
 | Draw distance | normal, 2x, 4x, 8x (2x by default) | |
 | Heat haze | off, xbox, enhanced (enhanced by default; off removes distortion; xbox keeps the original effect; enhanced refracts the full-resolution scene with filtered offsets and feathered edges) | |
 | Shadows | xbox, enhanced (enhanced by default; see Shadows above -- the shadow map's size changes when the game next starts) | `RECOMP_SHADOW_EXACT`, `RECOMP_SHADOW_SCALE` override parts |
@@ -393,6 +394,16 @@ for diagnostics.
 Older `original` settings load as Xbox; `smooth` and `sharp` load as Enhanced.
 
 An environment variable set by hand still wins at start-up.
+
+**Pad aim: Modern**, under **Options > PC Settings**, replaces the
+on-foot camera's per-axis deadzone and stepped response with a 15% circular
+deadzone and a linear response. It preserves the stick's direction and
+removes the original per-axis easing. The game's look sensitivity, zoom
+scaling, Invert Look and pitch limits still apply, including in split-screen.
+The setting applies immediately and is saved as `controller_aim=modern` in
+`turok_settings.ini`. Original retains the console behaviour and is the default
+for existing and new settings. Movement, flying and raw mouse look keep their
+existing controls; Mouse look: Stick uses the selected controller response.
 
 - **Widescreen** widens the view rather than stretching it (Hor+): the game's
   3D programs project through c96 (rigid) or c187 (skinned), and that row is
@@ -511,10 +522,12 @@ the disc has them. A `patch0.tre` that something else wrote is left alone.
 
 Run `py -3 tools/test_stability.py` on Windows with MSVC installed for the
 decal lifetime, split-screen wobble, particle cleanup, extraction failure,
-shader-cache, heat-haze, settings migration and audio-voice regression checks. Run after building the
+shader-cache, heat-haze, controller aiming, settings migration and audio-voice
+regression checks. Run after building the
 Release runtime (the audio test links its resampler library). They need no
 disc files; the renderer checks use D3D11 WARP, Microsoft's software device,
-and the audio checks use generated PCM.
+and the audio checks use generated PCM. When generated game code is present,
+the controller checks also run its on-foot update around the native override.
 
 | Path | What it is |
 |------|------------|

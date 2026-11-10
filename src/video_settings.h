@@ -45,4 +45,7 @@ float video_settings_take_mouse_turn(int axis);
 /* Flying: the mouse's steer, axis 0 right, 1 up, in stick deflection. */
 float video_settings_take_mouse_steer(int axis);
 
+/* On-foot controller look; Original remains the default. */
+int video_settings_modern_aim(void);
+
 #endif

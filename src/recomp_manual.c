@@ -1699,6 +1699,44 @@ void sub_0003B110(void)
  * the stick vector's length m: under 0.5 both are scaled by 0.25, under 0.9
  * by 0.3, and above it each is squared (keeping its sign). */
 extern void sub_00142280_gen(void);
+extern int video_settings_modern_aim(void);
+
+/* One radial deadzone, then a continuous linear magnitude. Clamp the radius
+ * at full deflection without changing direction, including square-gate pads. */
+static void modern_look_vector(float *x, float *y)
+{
+    const float deadzone = 0.15f;
+    float radius, gain;
+    if (!isfinite(*x) || !isfinite(*y)) { *x = *y = 0; return; }
+    *x = fmaxf(-1.0f, fminf(1.0f, *x));
+    *y = fmaxf(-1.0f, fminf(1.0f, *y));
+    radius = sqrtf(*x * *x + *y * *y);
+    if (radius <= deadzone) { *x = *y = 0; return; }
+    gain = (fminf(radius, 1.0f) - deadzone) / ((1.0f - deadzone) * radius);
+    *x *= gain;
+    *y *= gain;
+}
+
+static int modern_look_curve(uint32_t ret, uint32_t self, uint32_t xp, uint32_t yp)
+{
+    float x, y;
+    uint32_t xb, yb;
+    /* This curve is also used for movement and vehicles. Only the on-foot
+     * look caller has the axial deadzone and easing being replaced here. */
+    if (ret != 0x00144848u || !video_settings_modern_aim()) return 0;
+    x = guest_float(self + 0x192Cu) - guest_float(self + 0x1928u);
+    y = guest_float(self + 0x1920u) - guest_float(self + 0x1924u);
+    modern_look_vector(&x, &y);
+    memcpy(&xb, &x, 4); memcpy(&yb, &y, 4);
+    TUROK_MEM32(xp) = xb; TUROK_MEM32(yp) = yb;
+    /* The caller eases towards its old per-axis values. Seed those with
+     * this vector to preserve its direction and avoid frame-based delay.
+     * The original yaw/pitch functions still handle dt, sensitivity, zoom,
+     * invert look and pitch limits, and add raw mouse input afterwards. */
+    TUROK_MEM32(self + 0x440u) = xb;
+    TUROK_MEM32(self + 0x444u) = yb;
+    return 1;
+}
 
 void sub_00142280(void)
 {
@@ -1708,7 +1746,8 @@ void sub_00142280(void)
     if (trace < 0) trace = getenv("RECOMP_CURVE_TRACE") != NULL;
     memcpy(&x0, (void *)((uintptr_t)xp + g_xbox_mem_offset), 4);
     memcpy(&y0, (void *)((uintptr_t)yp + g_xbox_mem_offset), 4);
-    sub_00142280_gen();
+    if (modern_look_curve(ret, self, xp, yp)) g_esp += 16;  /* ret 12 */
+    else sub_00142280_gen();
     if (trace && (x0 != 0.0f || y0 != 0.0f)) {
         static unsigned n;
         memcpy(&x1, (void *)((uintptr_t)xp + g_xbox_mem_offset), 4);

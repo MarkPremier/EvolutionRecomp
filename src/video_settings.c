@@ -67,7 +67,8 @@ extern void nv2a_gpu_set_exact_shadows(int on);
  * text). */
 enum { SET_RESOLUTION, SET_ASPECT, SET_DISPLAY, SET_VSYNC, SET_FRAMES, SET_ANISOTROPY, SET_MSAA, SET_DRAW_DISTANCE,
        SET_HEAT_HAZE, SET_SHADOWS, SET_BODIES, SET_ICONS,
-       SET_MOUSE_LOOK, SET_MOUSE_SPEED, SET_FLIGHT_MOUSE, SET_FLIGHT_SPEED, SET_FLIGHT_INVERT, SETTING_COUNT };
+       SET_MOUSE_LOOK, SET_MOUSE_SPEED, SET_FLIGHT_MOUSE, SET_FLIGHT_SPEED, SET_FLIGHT_INVERT,
+       SET_CONTROLLER_AIM, SETTING_COUNT };
 
 typedef struct VideoSetting {
     const char *key, *label;
@@ -93,6 +94,7 @@ static const int k_haze_modes[] = {3, 0, 2};
 static const char *const k_shadow_modes[] = {"xbox", "enhanced"};
 static const char *const k_icons[] = {"xbox", "pc"};
 static const char *const k_mouse_looks[] = {"stick", "raw"};
+static const char *const k_controller_aims[] = {"original", "modern"};
 static const char *const k_speeds[] = {"1", "2", "3", "4", "5", "6", "7", "8", "9", "10"};
 #define COUNT(array) ((int)(sizeof array / sizeof *array))
 
@@ -114,6 +116,7 @@ static const VideoSetting k_settings[SETTING_COUNT] = {
     {"flight_mouse", "flight mouse", k_switches, COUNT(k_switches), 1},
     {"flight_speed", "flight speed", k_speeds, COUNT(k_speeds), 4},
     {"flight_invert", "flight invert", k_switches, COUNT(k_switches), 0},
+    {"controller_aim", "pad aim", k_controller_aims, COUNT(k_controller_aims), 0},
 };
 
 static int s_values[SETTING_COUNT];
@@ -745,19 +748,21 @@ static int values_of(int setting)
     }
 }
 
-/* Shadows' label and values are GameOptions.txm's, keys 14 on (after PC
- * Settings' title, 13): Options.txm has no key left for them. */
+/* Shadows and controller aiming use GameOptions.txm, keys 14 and 17 on
+ * (after PC Settings' title, 13): Options.txm has no keys left for them. */
 #define GAME_TEXT_SHADOWS 14
+#define GAME_TEXT_CONTROLLER_AIM 17
 
 static int in_game_text(int setting)
 {
-    return setting == SET_SHADOWS;
+    return setting == SET_SHADOWS || setting == SET_CONTROLLER_AIM;
 }
 
 static int text_label(int setting)
 {
     int key = TEXT_TITLE + 1, s;
-    if (in_game_text(setting)) return GAME_TEXT_SHADOWS;
+    if (setting == SET_SHADOWS) return GAME_TEXT_SHADOWS;
+    if (setting == SET_CONTROLLER_AIM) return GAME_TEXT_CONTROLLER_AIM;
     for (s = 0; s < setting; s++)
         if (!in_game_text(s)) key += 1 + (values_of(s) == s ? k_settings[s].count : 0);
     return key;
@@ -1991,7 +1996,8 @@ static void apply_setting(int setting)
     case SET_MOUSE_SPEED:
     case SET_FLIGHT_MOUSE:
     case SET_FLIGHT_SPEED:
-    case SET_FLIGHT_INVERT: break;
+    case SET_FLIGHT_INVERT:
+    case SET_CONTROLLER_AIM: break;
     }
 }
 
@@ -2071,6 +2077,11 @@ float video_settings_take_mouse_steer(int axis)
     s_flight_seen = GetTickCount();
     s_mouse_steer[axis & 1] = 0;
     return steer;
+}
+
+int video_settings_modern_aim(void)
+{
+    return s_values[SET_CONTROLLER_AIM] != 0;
 }
 
 float video_settings_take_mouse_turn(int axis)
