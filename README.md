@@ -458,7 +458,10 @@ existing controls; Mouse look: Stick uses the selected controller response.
   reads the two from a block at actor +0x1CC; they are scaled while it runs.
   Butterflies' update distance (AU_D, actor +0x1D0, tested in
   `sub_0003B110`), out to which an actor animates and moves, is scaled with
-  it, so they are not drawn frozen; every other actor keeps the original's.
+  it, so they are not drawn frozen. Visible weapon and item pickups keep
+  updating at every draw-distance setting, so their rotation and bobbing do
+  not freeze beyond the original short update radius. Off-screen pickups
+  and other actors retain their original update limits.
 - **Keep bodies**: the dead stay where they fell. A dead AI actor's update
   (`sub_0013D000`) counts time since death at +0x52C; past 3.5 s it fades
   the body and sinks it into the ground, and at 5 s removes it. With the
@@ -522,12 +525,13 @@ the disc has them. A `patch0.tre` that something else wrote is left alone.
 
 Run `py -3 tools/test_stability.py` on Windows with MSVC installed for the
 decal lifetime, split-screen wobble, particle cleanup, extraction failure,
-shader-cache, heat-haze, controller aiming, settings migration and audio-voice
+shader-cache, heat-haze, controller aiming, pickup animation distance, settings migration and audio-voice
 regression checks. Run after building the
 Release runtime (the audio test links its resampler library). They need no
 disc files; the renderer checks use D3D11 WARP, Microsoft's software device,
 and the audio checks use generated PCM. When generated game code is present,
-the controller checks also run its on-foot update around the native override.
+the controller checks also run its on-foot update around the native override,
+and the pickup checks run the original visibility and update-distance gates.
 
 | Path | What it is |
 |------|------------|

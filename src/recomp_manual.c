@@ -1668,8 +1668,10 @@ void sub_0003C9E0(void)
  * 0 for always), the distance out to which it updates -- its animation, its
  * flight. Levels set it to match A_MDD, where the actor stops being drawn,
  * so with the draw distance setting butterflies were drawn hanging frozen
- * until close. Theirs is scaled with the draw distance; everything else
- * keeps the original's, as more actors updating costs frame rate.
+ * until close. Theirs is scaled with the draw distance. Visible pickups
+ * must also keep updating regardless of the setting, or their rotation and
+ * bobbing freeze a few metres away. Off-screen pickups and other actors
+ * keep the original cutoff, as more actors updating costs frame rate.
  * Butterflies are the FlyingIndigenousAI (vtable 0x21A240) with
  * FlyingPerturb (+0x7F8) 3: no bird, dragonfly or pteranodon has it. */
 extern void sub_0003B110_gen(void);
@@ -1677,17 +1679,19 @@ extern void sub_0003B110_gen(void);
 void sub_0003B110(void)
 {
     float scale = video_settings_draw_distance(), reach;
-    uint32_t actor = TUROK_MEM32(g_esp + 4u), bits;
+    uint32_t actor = TUROK_MEM32(g_esp + 4u), bits, table = actor ? TUROK_MEM32(actor) : 0;
+    int visible_pickup = actor && *(uint8_t *)((uintptr_t)(actor + 0x53u) + g_xbox_mem_offset) &&
+        (table == 0x001FCFB8u || table == 0x00210450u || table == 0x002255F0u); /* Pickup, TurokPickup, MPPickup */
 
-    if (scale == 1.0f || !actor || TUROK_MEM32(actor) != FLYING_INDIGENOUS_AI_VTABLE ||
-        TUROK_MEM32(actor + 0x7F8u) != 3u) {
+    if (!visible_pickup && (scale == 1.0f || table != FLYING_INDIGENOUS_AI_VTABLE ||
+        TUROK_MEM32(actor + 0x7F8u) != 3u)) {
         sub_0003B110_gen();
         return;
     }
     bits = TUROK_MEM32(actor + 0x1D0u);
     memcpy(&reach, &bits, 4);
     if (!(reach > 0.0f)) { sub_0003B110_gen(); return; }
-    reach *= scale;
+    reach = visible_pickup ? 0.0f : reach * scale; /* AU_D zero means unlimited. */
     memcpy((void *)((uintptr_t)(actor + 0x1D0u) + g_xbox_mem_offset), &reach, 4);
     sub_0003B110_gen();
     TUROK_MEM32(actor + 0x1D0u) = bits;
