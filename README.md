@@ -481,6 +481,9 @@ existing controls; Mouse look: Stick uses the selected controller response.
   texture or mesh is a splat, bullet hole, scorch or gore piece get the longer
   life; switching the setting re-applies it at once, and off leaves every
   life as the game has it. `RECOMP_PARTICLE_TRACE=1` lists the definitions.
+  Effect parts with attached emitters keep their original lifetime
+  (`sub_000AF9A0`): some steam controllers reuse a bullet-hole texture, and
+  extending them made pipe steam accumulate and overlap with Keep bodies on.
   Explosion fireballs (`1txt_fireB3_.tga`) are not kept: they play their
   texture over their life, so ten minutes of it hid the explosions and their
   build-up crowded out new effects such as rocket smoke trails. In the flying

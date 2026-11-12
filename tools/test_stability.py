@@ -58,6 +58,9 @@ def game_functions(root, output):
     (output / "pickup_distance_generated.inc").write_text(generated_fixture(
         root / "src/recomp/gen/recomp_0005.c",
         ["void sub_0003B110_gen(void)", "void sub_0003B1B0(void)"], "PICKUP"), encoding="utf-8")
+    (output / "effect_part_generated.inc").write_text(generated_fixture(
+        root / "src/recomp/gen/recomp_0016.c",
+        ["void sub_000AF9A0_gen(void)"], "EFFECT_PART"), encoding="utf-8")
     (output / "pickup_distance_under_test.inc").write_text(
         '#define FLYING_INDIGENOUS_AI_VTABLE 0x0021A240u\n' +
         source[source.index("extern void sub_0003B110_gen(void);"):source.index("/* ── Stick response curve")],
@@ -65,7 +68,7 @@ def game_functions(root, output):
     parts = [
         '#define TUROK_MEM32(va) (*(uint32_t *)(memory + (va)))\n',
         'typedef void (*recomp_func_t)(void);\n',
-        'extern void sub_000AF2A0_gen(void), sub_000B98D0_gen(void);\n',
+        'extern void sub_000AF2A0_gen(void), sub_000AF9A0_gen(void), sub_000B98D0_gen(void);\n',
         'extern int video_settings_keep_decals(void);\n',
         'recomp_func_t recomp_lookup(uint32_t va);\n',
         function(source, "recomp_func_t recomp_lookup_manual(uint32_t xbox_va)\n{"),
@@ -75,6 +78,8 @@ def game_functions(root, output):
         source[source.index("#define AIM_WOBBLE_RATE"):source.index("extern void sub_0011B220_gen")],
         source[source.index("#define KEEP_DECAL_SECONDS"):source.index("static int partdef_is_keepsake")],
         function(source, "void sub_000AF2A0(void)"),
+        function(source, "static void keep_decals_emitter_parent("),
+        function(source, "void sub_000AF9A0(void)"),
         function(source, "static void keep_decals_frame(void)"),
         source[source.index("#define PARTICLE_STAMPS"):source.index("static int32_t particle_capacity")],
     ]

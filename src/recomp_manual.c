@@ -625,20 +625,22 @@ void sub_0013D000(void)
  * loads. Its eighth value is the particle's life in seconds -- 3 to 20 for
  * these -- which the parser stores through sub_000AF2A0 (+0x7C). With Keep
  * decals on, the definitions whose texture or mesh is a splat, a bullet
- * hole, a scorch or a gore piece get ten minutes instead; parents and
- * spawners (num.tga) and every other effect are left alone. Off, they keep
+ * hole, a scorch or a gore piece get ten minutes instead. Effect parts with
+ * attached emitters retain their own life, even if their parent definition
+ * uses a decal texture (as several steam effects do). Off, they keep
  * the game's own lives. Every such definition is remembered with its own
  * life, so switching the setting re-applies at once (keep_decals_frame);
  * particles already out keep the life they were given.
  * RECOMP_PARTICLE_TRACE=1 lists the definitions. */
 extern void sub_000B0110_gen(void);
 extern void sub_000AF2A0_gen(void);
+extern void sub_000AF9A0_gen(void);
 extern int video_settings_keep_decals(void);
 
 #define KEEP_DECAL_SECONDS 600.0f
 #define KEEP_DECAL_DEFS 1024
 static int s_partdef_keepsake;   /* the PARTDEF being parsed is a decal or gib */
-static struct { uint32_t def; float own, set; } s_keep_defs[KEEP_DECAL_DEFS];
+static struct { uint32_t def; float own, set; int emitter_parent; } s_keep_defs[KEEP_DECAL_DEFS];
 static unsigned s_keep_count;
 static int s_keep_applied = -1;  /* the setting the remembered lives reflect */
 
@@ -708,7 +710,7 @@ void sub_000AF2A0(void)
     if (s_partdef_keepsake) {
         float own = fabsf(guest_float(g_esp + 4)), set = own;
         i = s_keep_count;
-        if (video_settings_keep_decals() && own < KEEP_DECAL_SECONDS) {
+        if (i < KEEP_DECAL_DEFS && video_settings_keep_decals() && own < KEEP_DECAL_SECONDS) {
             uint32_t bits;
             set = KEEP_DECAL_SECONDS;
             memcpy(&bits, &set, 4);
@@ -719,9 +721,37 @@ void sub_000AF2A0(void)
             s_keep_defs[i].def = def;
             s_keep_defs[i].own = own;
             s_keep_defs[i].set = set;
+            s_keep_defs[i].emitter_parent = 0;
         }
     }
     sub_000AF2A0_gen();
+}
+
+static void keep_decals_emitter_parent(uint32_t def)
+{
+    unsigned i;
+    for (i = 0; i < s_keep_count; i++) {
+        uint32_t bits;
+        if (s_keep_defs[i].def != def) continue;
+        s_keep_defs[i].emitter_parent = 1;
+        /* Preserve independent edits made by the game. */
+        if (guest_float(def + 0x7Cu) == s_keep_defs[i].set) {
+            memcpy(&bits, &s_keep_defs[i].own, 4);
+            TUROK_MEM32(def + 0x7Cu) = bits;
+            s_keep_defs[i].set = s_keep_defs[i].own;
+        }
+        break;
+    }
+}
+
+void sub_000AF9A0(void)
+{
+    /* Effect-part constructor: (PARTDEF *, emitter *, ...). This binding is
+     * available after parsing and before the first particle is spawned.
+     * Extending a parent keeps its child emitter running for ten minutes. */
+    if (TUROK_MEM32(g_esp + 8))
+        keep_decals_emitter_parent(TUROK_MEM32(g_esp + 4));
+    sub_000AF9A0_gen();
 }
 
 /* Once a frame: apply the setting to this world's definitions. The value
@@ -736,7 +766,8 @@ static void keep_decals_frame(void)
         float now = guest_float(s_keep_defs[i].def + 0x7Cu), want;
         uint32_t bits;
         if (now != s_keep_defs[i].set) continue;
-        want = keep && s_keep_defs[i].own < KEEP_DECAL_SECONDS ? KEEP_DECAL_SECONDS : s_keep_defs[i].own;
+        want = keep && !s_keep_defs[i].emitter_parent && s_keep_defs[i].own < KEEP_DECAL_SECONDS
+            ? KEEP_DECAL_SECONDS : s_keep_defs[i].own;
         memcpy(&bits, &want, 4);
         TUROK_MEM32(s_keep_defs[i].def + 0x7Cu) = bits;
         s_keep_defs[i].set = want;

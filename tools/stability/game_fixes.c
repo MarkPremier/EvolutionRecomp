@@ -9,12 +9,14 @@
 
 static unsigned char memory[8u << 20];
 ptrdiff_t g_xbox_mem_offset;
-__declspec(thread) uint32_t g_eax, g_ecx, g_edx, g_esp, g_esi;
+__declspec(thread) uint32_t g_eax, g_ecx, g_edx, g_esp, g_esi, g_edi;
+__declspec(thread) int g_df;
 static int keep;
 static uint32_t manager = 0x10000u;
 static unsigned killed;
 
 #include "game_overrides_under_test.inc"
+#include "effect_part_generated.inc"
 
 MCPXAPUState *g_apu_state;
 static int idle_valid, idle_held, idle_retired;
@@ -59,6 +61,16 @@ void sub_000AF2A0_gen(void)
     g_esp += 8;
 }
 void sub_000B98D0_gen(void) {}
+#ifndef HAVE_GENERATED_EFFECT_PART
+void sub_000AF9A0_gen(void)
+{
+    g_eax = g_ecx;
+    TUROK_MEM32(g_eax) = TUROK_MEM32(g_esp + 4);
+    TUROK_MEM32(g_eax + 4) = TUROK_MEM32(g_esp + 8);
+    g_ecx = 99;
+    g_esp += 56;
+}
+#endif
 
 static void kill_particle(void)
 {
@@ -107,6 +119,75 @@ static void test_decals(void)
     keep = 0; keep_decals_frame();
     assert(s_keep_count == 0 && guest_float(0x2007C) == 600);
     puts("PASS: decal lifetime reset, live toggles, and reparsed definitions");
+}
+
+static void define_keepsake(uint32_t def, float life)
+{
+    s_partdef_keepsake = 1; g_ecx = def; g_esp = 0x30000;
+    put_float(g_esp + 4, life); sub_000AF2A0();
+}
+
+static void bind_effect(uint32_t def, uint32_t emitter)
+{
+    unsigned i;
+    g_ecx = 0x40000; g_esp = 0x30000;
+    TUROK_MEM32(g_esp + 4) = def;
+    TUROK_MEM32(g_esp + 8) = emitter;
+    TUROK_MEM32(g_esp + 12) = 1;
+    TUROK_MEM32(g_esp + 16) = 0x60000;
+    for (i = 0; i < 16; i++) TUROK_MEM32(0x60000 + i * 4) = 100 + i;
+    for (i = 0; i < 9; i++) TUROK_MEM32(g_esp + 20 + i * 4) = 200 + i;
+    g_esi = 22; g_edi = 33;
+    sub_000AF9A0();
+    assert(g_eax == 0x40000 && g_esp == 0x30038 && g_esi == 22 && g_edi == 33);
+    assert(TUROK_MEM32(0x40000) == def && TUROK_MEM32(0x40004) == emitter);
+#ifdef HAVE_GENERATED_EFFECT_PART
+    assert(TUROK_MEM32(0x40008) == 1);
+    for (i = 0; i < 16; i++) assert(TUROK_MEM32(0x4000C + i * 4) == 100 + i);
+    for (i = 0; i < 9; i++) assert(TUROK_MEM32(0x4004C + i * 4) == 200 + i);
+#endif
+}
+
+static void test_emitter_lifetimes(void)
+{
+    unsigned i;
+    const uint32_t parent = 0x20000, decal = 0x20200;
+    keep_decals_reset(); keep = 1;
+    /* Steam parents reuse a bullet-hole texture; real bullet holes have no emitter. */
+    define_keepsake(parent, 5); define_keepsake(decal, 10);
+    assert(guest_float(parent + 0x7C) == 600);
+    bind_effect(parent, 0x50000); bind_effect(decal, 0);
+    assert(guest_float(parent + 0x7C) == 5);
+    assert(guest_float(decal + 0x7C) == 600);
+    keep_decals_frame();
+    keep = 0; keep_decals_frame();
+    assert(guest_float(parent + 0x7C) == 5 && guest_float(decal + 0x7C) == 10);
+    keep = 1; keep_decals_frame();
+    assert(guest_float(parent + 0x7C) == 5 && guest_float(decal + 0x7C) == 600);
+
+    /* Binding while disabled must still prevent a later toggle extending steam. */
+    keep_decals_reset(); keep = 0;
+    define_keepsake(parent, 1); bind_effect(parent, 0x50000);
+    keep_decals_frame(); keep = 1; keep_decals_frame();
+    assert(guest_float(parent + 0x7C) == 1);
+
+    /* Respect game-side edits, and forget the role if the address is reparsed. */
+    define_keepsake(parent, 5); put_float(parent + 0x7C, 7);
+    bind_effect(parent, 0x50000);
+    keep = 0; keep_decals_frame(); keep = 1; keep_decals_frame();
+    assert(guest_float(parent + 0x7C) == 7);
+    define_keepsake(parent, 3); bind_effect(parent, 0);
+    assert(guest_float(parent + 0x7C) == 600);
+    keep = 0; keep_decals_frame();
+    assert(guest_float(parent + 0x7C) == 3);
+
+    /* Never extend an untracked definition: it could be an emitter parent. */
+    keep_decals_reset(); keep = 1;
+    for (i = 0; i < KEEP_DECAL_DEFS; i++) define_keepsake(0x100000 + i * 0x100, 10);
+    define_keepsake(parent, 5); bind_effect(parent, 0x50000);
+    assert(s_keep_count == KEEP_DECAL_DEFS && guest_float(parent + 0x7C) == 5);
+    keep_decals_reset();
+    puts("PASS: emitter parents retain original lifetimes, live toggles, address reuse, and full tracking table");
 }
 
 static void test_wobble(void)
@@ -192,6 +273,6 @@ static void test_particles(void)
 int main(void)
 {
     g_xbox_mem_offset = (ptrdiff_t)memory;
-    test_idle_handler(); test_decals(); test_wobble(); test_particles();
+    test_idle_handler(); test_decals(); test_emitter_lifetimes(); test_wobble(); test_particles();
     return 0;
 }
