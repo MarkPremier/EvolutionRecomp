@@ -828,6 +828,70 @@ void sub_000AFF50(void)
     sub_000AFF50_gen();
 }
 
+/* ── Shotgun ballistic origin ──────────────────────────────── */
+extern void sub_000966F0_gen(void);
+
+static int shotgun_ballistic_effect(uint32_t address)
+{
+    static const char prefix[] = "marc\\weapons\\shotgun\\";
+    const char *text = (const char *)((uintptr_t)address + g_xbox_mem_offset);
+    char name[192];
+    const char *tail;
+    unsigned i;
+    if (!address) return 0;
+    for (i = 0; i + 1 < sizeof name && text[i]; i++) {
+        char c = text[i];
+        if (c == '/') c = '\\';
+        name[i] = (char)(c >= 'A' && c <= 'Z' ? c + 32 : c);
+    }
+    if (i + 1 == sizeof name) return 0;
+    name[i] = 0;
+    tail = strstr(name, prefix);
+    if (!tail || (tail != name && tail[-1] != '\\')) return 0;
+    tail += sizeof prefix - 1;
+    return !strcmp(tail, "shotgun_01.eff") || !strcmp(tail, "shotgun_2.eff") ||
+           !strcmp(tail, "shotgun_3.eff") || !strcmp(tail, "supershotgun.eff");
+}
+
+void sub_000966F0(void)
+{
+    static int logged;
+    uint32_t matrix = 0, saved[3];
+    unsigned i;
+    /* Actor::SpawnParticle builds the effect transform at 0x43B6D. For a
+     * held shotgun its translation includes the view model's lateral/bob
+     * offset (~21 cm left, 22 cm down in a measured idle frame). Pellets
+     * inherit that offset, so point-blank impacts miss the crosshair.
+     * Recenter only the player's ballistic effect; the existing orientation
+     * and EMI velocity spread remain intact. Shells, flashes, impacts and
+     * enemy weapons keep their original origins. */
+    if (TUROK_MEM32(g_esp) == 0x00043B72u && shotgun_ballistic_effect(TUROK_MEM32(g_esp + 4))) {
+        uint32_t info = TUROK_MEM32(g_esp + 16);
+        uint32_t weapon = info ? TUROK_MEM32(info + 0x10) : 0;
+        if (weapon && TUROK_MEM32(weapon) == 0x002143C8u) {
+            uint32_t player = TUROK_MEM32(weapon + 0x234);
+            uint32_t camera = player ? TUROK_MEM32(player + 0x3CC) : 0;
+            uint32_t transform = TUROK_MEM32(g_esp + 12);
+            /* Weapon::Update has just refreshed this camera's world matrix
+             * via 0x1FFB0. Each local player has its own camera/weapon. */
+            if (camera && transform && TUROK_MEM32(player + 0x1A54) == weapon) {
+                matrix = transform + 0x30;
+                for (i = 0; i < 3; i++) {
+                    saved[i] = TUROK_MEM32(matrix + i * 4u);
+                    TUROK_MEM32(matrix + i * 4u) = TUROK_MEM32(camera + 0x2FC + i * 4u);
+                }
+                if (!logged) {
+                    fprintf(stderr, "[PARTICLES] shotgun ballistic origin follows the aim camera\n");
+                    logged = 1;
+                }
+            }
+        }
+    }
+    sub_000966F0_gen();
+    /* The input transform belongs to the caller, not the particle manager. */
+    if (matrix) for (i = 0; i < 3; i++) TUROK_MEM32(matrix + i * 4u) = saved[i];
+}
+
 /* ── Particle limit (sub_00096EE0, sub_000B98D0, sub_000B9700) ──
  *
  * A level makes one particle manager (sub_000B9D40) for at most the larger

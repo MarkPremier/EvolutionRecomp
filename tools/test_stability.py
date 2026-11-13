@@ -75,8 +75,13 @@ def game_functions(root, output):
         generated_fixture(root / "src/recomp/gen/recomp_0016.c",
                           ["void sub_000AFF50_gen(void)"], "EMITTER_FLAG"), encoding="utf-8")
     (output / "weapon_emission_under_test.inc").write_text(
-        source[source.index("/* ── Player-weapon emitter visibility"):source.index("/* ── Particle limit")],
+        source[source.index("/* ── Player-weapon emitter visibility"):source.index("/* ── Shotgun ballistic origin")],
         encoding="utf-8")
+    (output / "shotgun_origin_under_test.inc").write_text(
+        source[source.index("/* ── Shotgun ballistic origin"):source.index("/* ── Particle limit")],
+        encoding="utf-8")
+    (output / "shotgun_origin_generated.inc").write_text(generated_fixture(
+        root / "src/recomp/gen/recomp_0005.c", ["void sub_000437E0(void)"], "SHOTGUN_ORIGIN"), encoding="utf-8")
     (output / "pickup_distance_under_test.inc").write_text(
         '#define FLYING_INDIGENOUS_AI_VTABLE 0x0021A240u\n' +
         source[source.index("extern void sub_0003B110_gen(void);"):source.index("/* ── Stick response curve")],
@@ -136,6 +141,7 @@ def main():
         ("pickup_distance.c", []),
         ("particle_simulation.c", []),
         ("weapon_emission.c", []),
+        ("shotgun_origin.c", []),
         ("gpu_shader_cache.cpp", ["d3d11.lib", "dxgi.lib", "d3dcompiler.lib", "user32.lib"]),
         ("gpu_heat_haze.cpp", ["d3d11.lib", "dxgi.lib", "d3dcompiler.lib", "user32.lib"]),
         ("apu_voices.c", [str(root / "build/xboxrecomp/src/apu/Release/xbox_apu.lib")]),
