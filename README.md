@@ -512,7 +512,7 @@ existing controls; Mouse look: Stick uses the selected controller response.
   in effect. Gameplay testing confirmed that shots and casings now work at
   point-blank range. That emission fix leaves collision and impact placement
   unchanged; the shotgun alignment correction is described below.
-- **Shotgun impact alignment (gameplay verification pending)**: the original
+- **Shotgun impact alignment**: the original
   pellet effect inherits the held gun's offset from the aim camera. This can
   put point-blank hits below and beside the crosshair. Shotgun ballistic
   effects now start at their player's camera position, retaining their
@@ -520,6 +520,8 @@ existing controls; Mouse look: Stick uses the selected controller response.
   and four-shell attacks share this correction. Shells, muzzle flashes and
   impact effects keep their original positions. A regression runs the real
   actor spawn routine and verifies the origin and guest calling convention.
+  Gameplay testing against the reported wall confirmed the impact pattern
+  is now centred around the crosshair.
 - **Widescreen culling**: the game culls against its 4:3 camera, so blood,
   bullet holes and other effects past the 4:3 edges vanished while on screen.
   While the camera's view planes (`sub_00020EE0`) and the in-view test run, the
