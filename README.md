@@ -502,14 +502,16 @@ existing controls; Mouse look: Stick uses the selected controller response.
   tracking is cleared when changing worlds, and a reparsed definition
   replaces its old record. The log reports removals and refusals at most
   every ten seconds.
-- **Close-range shots (issue #11, gameplay verification pending)**: the original
+- **Close-range shots (issue #11)**: the original
   emitter scheduler can suppress pellets and casings when their source fails
   the camera visibility check, even when the parent effect keeps updating.
   Emitters referencing the player-weapon resource namespace (`marc\\weapons\\`)
   now use the original `NoCull` emission flag. A generated-code regression
   reproduces delayed creation and verifies immediate creation with this flag.
   Emission rates, distance limits, particle budgets and render clipping remain
-  in effect. This candidate does not change collision or decal placement.
+  in effect. Gameplay testing confirmed that shots and casings now work at
+  point-blank range. Collision and decal placement are unchanged; missing
+  bullet holes have not been separately confirmed resolved.
 - **Widescreen culling**: the game culls against its 4:3 camera, so blood,
   bullet holes and other effects past the 4:3 edges vanished while on screen.
   While the camera's view planes (`sub_00020EE0`) and the in-view test run, the
