@@ -233,24 +233,20 @@ static void controls_save(void)
         WritePrivateProfileStringA("controls", k_binds[b].key, k_keys[s_binds[b]].name, s_ini_path);
 }
 
-/* The pad inputs' keys: each action's, and the d-pad its arrow where no
- * action took it (a menu has its arrows either way: RECOMP_KBM_MENU_MAP). */
+/* Only the configured actions reach gameplay. Arrows still navigate menus
+ * through their separate RECOMP_KBM_MENU_MAP bindings. */
 extern void xbox_KbmSetBinding(const char *target, const int *keys, int count);
 
 static void apply_bindings(void)
 {
-    static const struct { const char *target; int code; } dpad[] = {
-        {"UP", VK_UP}, {"DOWN", VK_DOWN}, {"LEFT", VK_LEFT}, {"RIGHT", VK_RIGHT}};
+    static const char *const dpad[] = {"UP", "DOWN", "LEFT", "RIGHT"};
     int b, d;
     for (b = 0; b < BIND_COUNT; b++) {
         int code = k_keys[s_binds[b]].code;
         xbox_KbmSetBinding(k_binds[b].target, &code, code > 0);
     }
     for (d = 0; d < COUNT(dpad); d++) {
-        int code = dpad[d].code;
-        for (b = 0; b < BIND_COUNT; b++)
-            if (k_keys[s_binds[b]].code == code) code = 0;
-        xbox_KbmSetBinding(dpad[d].target, &code, code > 0);
+        xbox_KbmSetBinding(dpad[d], NULL, 0);
     }
 }
 
@@ -1789,7 +1785,9 @@ static void follow_menus(void)
  * FrontEnd\Controls\OSG_bf_a.dds and OSG_bf_bbutton.dds, read from a PC
  * install named by pc_game_dir in turok_settings.ini's [paths], or
  * RECOMP_PC_GAME_DIR) replace the Xbox ones where the renderer meets them:
- * by the hash of the Xbox textures' bytes, DXT3 32x32 with two mips. */
+ * by the hash of the Xbox textures' bytes, DXT3 32x32 with two mips.
+ * Built-in Enter/Esc keycaps are used when those optional PC assets are
+ * unavailable, so the setting also works with an Xbox-only installation. */
 static const struct {
     uint64_t hash;
     const char *file;
@@ -1892,23 +1890,64 @@ static uint32_t *pc_texture(const char *directory, const char *path, uint32_t *w
     return pixels;
 }
 
+/* Original keycap art, independent of either version's game assets. */
+static uint32_t *builtin_pc_icon(int back, uint32_t *width, uint32_t *height)
+{
+    static const unsigned char esc[3][7] = {
+        {31,16,16,30,16,16,31}, {15,16,16,14,1,1,30}, {14,17,16,16,16,17,14}
+    };
+    uint32_t *pixels = (uint32_t *)calloc(64 * 64, 4);
+    const uint32_t ink = 0xFFFFE6BCu;
+    int x, y;
+    if (!pixels) return NULL;
+    *width = *height = 64;
+    for (y = 4; y < 60; y++) for (x = 4; x < 60; x++) {
+        int dx = x < 11 ? 11 - x : x > 52 ? x - 52 : 0;
+        int dy = y < 11 ? 11 - y : y > 52 ? y - 52 : 0;
+        int r = dx * dx + dy * dy;
+        if (r > 49) continue;
+        pixels[y * 64 + x] = x < 7 || x > 56 || y < 7 || y > 56 || r > 16
+            ? 0xFFE6D3A8u : 0xE02A241Cu;
+    }
+    if (back) {
+        int letter, row, col, sx, sy;
+        for (letter = 0; letter < 3; letter++) for (row = 0; row < 7; row++)
+            for (col = 0; col < 5; col++) if (esc[letter][row] & (16 >> col))
+                for (sy = 0; sy < 3; sy++) for (sx = 0; sx < 3; sx++)
+                    pixels[(22 + row * 3 + sy) * 64 + 6 + letter * 18 + col * 3 + sx] = ink;
+    } else {
+        int t, stroke;
+        for (y = 17; y <= 33; y++) for (x = 18; x <= 46; x++)
+            if (x >= 43 || y >= 30) pixels[y * 64 + x] = ink;
+        for (t = 0; t <= 10; t++) for (stroke = -1; stroke <= 1; stroke++) {
+            pixels[(31 - t + stroke) * 64 + 18 + t] = ink;
+            pixels[(31 + t + stroke) * 64 + 18 + t] = ink;
+        }
+    }
+    return pixels;
+}
+
 static int load_pc_icons(void)
 {
     char directory[MAX_PATH], path[MAX_PATH];
     size_t i;
-    int loaded = 0;
-    if (!pc_game_dir(directory, sizeof directory)) return 0;
+    int loaded = 0, builtin = 0;
+    int from_pc = pc_game_dir(directory, sizeof directory);
     for (i = 0; i < sizeof k_pc_icons / sizeof *k_pc_icons; i++) {
-        uint32_t width, height, *pixels;
+        uint32_t width, height, *pixels = NULL;
         snprintf(path, sizeof path, "OnScreenGraphics\\FrontEnd\\Controls\\%s", k_pc_icons[i].file);
-        pixels = pc_texture(directory, path, &width, &height);
+        if (from_pc) pixels = pc_texture(directory, path, &width, &height);
+        if (!pixels) {
+            pixels = builtin_pc_icon(i != 0, &width, &height);
+            if (pixels) builtin++;
+        }
         if (!pixels) continue;
         nv2a_gpu_replace_texture(k_pc_icons[i].hash, pixels, width, height);
         free(pixels);
         loaded++;
     }
-    fprintf(stderr, "[VIDEO] PC button icons: %d of %d from %s\n", loaded,
-            (int)(sizeof k_pc_icons / sizeof *k_pc_icons), directory);
+    fprintf(stderr, "[VIDEO] PC button icons: %d of %d (%d built-in, %d from PC assets)\n", loaded,
+            (int)(sizeof k_pc_icons / sizeof *k_pc_icons), builtin, loaded - builtin);
     return loaded;
 }
 

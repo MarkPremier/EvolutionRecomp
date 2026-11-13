@@ -622,7 +622,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
      *   fire RT = left mouse, weapon mode LT = right mouse, jump A = Space,
      *   next/prev weapon X/Y = wheel down/up or E/Q, duck White = Ctrl or C,
      *   zoom (right stick click) = middle mouse or Z, pause Start = Esc or
-     *   Tab, menu back B = Backspace, menu select A = Enter, d-pad = arrows.
+     *   Tab, menu back B = Backspace, menu select A = Enter. Arrow keys
+     *   navigate menus; in play they only do their configured PC action.
      * At start-up Options > PC Controls (video_settings.c) replaces the
      * actions' keys with its own, one each (defaults as above without the
      * second keys). RECOMP_KBM=0 turns it off; Alt+Esc releases the mouse. */
@@ -644,7 +645,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
         _putenv_s("RECOMP_KBM_MAP",
                   "A=Space|Return,B=Back,X=WheelDown|E,Y=WheelUp|Q,LT=MouseR,RT=MouseL,"
                   "WHITE=Control|C,BLACK=None,START=Escape|Tab,BACK=None,LTHUMB=None,"
-                  "RTHUMB=MouseM|Z,UP=Up,DOWN=Down,LEFT=Left,RIGHT=Right");
+                  "RTHUMB=MouseM|Z,UP=None,DOWN=None,LEFT=None,RIGHT=None");
     /* In menus (the front end and the pause menu) Escape is Back, as in the PC
      * release, whose button icons show it; in play it pauses. Enter or Space
      * selects and the arrows move there whatever Options > PC Controls binds

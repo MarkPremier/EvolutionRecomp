@@ -45,6 +45,14 @@ def generated_fixture(generated, signatures, tag, icall_body="(g_esp = (saved))"
 
 def game_functions(root, output):
     settings = (root / "src/video_settings.c").read_text(encoding="utf-8")
+    input_source = (root.parent / "xboxrecomp_fork/src/input/xinput_device.c").read_text(encoding="utf-8")
+    (output / "controls_settings_under_test.inc").write_text(
+        settings[settings.index("enum { SET_RESOLUTION"):settings.index("/* ── Archives")], encoding="utf-8")
+    (output / "controls_input_under_test.inc").write_text(
+        input_source[input_source.index("extern int xbox_FramebufferMouseDelta"):input_source.index("/* The `nth` HID pad")],
+        encoding="utf-8")
+    (output / "pc_icons_under_test.inc").write_text(
+        settings[settings.index("/* ── PC button icons"):settings.index("static void item_write(")], encoding="utf-8")
     (output / "video_settings_under_test.inc").write_text(
         settings[settings.index("enum { SET_RESOLUTION"):settings.index("/* Mouse look's state")] +
         settings[settings.index("#define TEXT_ENTRY"):settings.index("/* Then the controls page's:")] +
@@ -137,6 +145,8 @@ def main():
         ("game_fixes.c", []),
         ("game_files.c", ["user32.lib", "gdi32.lib"]),
         ("video_settings.c", ["user32.lib", "gdi32.lib"]),
+        ("controls_startup.c", ["user32.lib"]),
+        ("pc_icons.c", ["user32.lib"]),
         ("controller_aim.c", []),
         ("pickup_distance.c", []),
         ("particle_simulation.c", []),

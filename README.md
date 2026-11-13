@@ -425,12 +425,18 @@ existing controls; Mouse look: Stick uses the selected controller response.
   aim at 120 and up, the pistol scope worst). It now steps at most 60 times
   a second per weapon instance, including in split-screen; at 60 fps and
   below it is as before.
-- **Button icons, pc**: the menus' A and B prompts become the PC release's
-  Enter and Esc keys. They are read from a PC install, which you name in
+- **Button icons, pc**: the menus' A and B prompts become Enter and Esc
+  keycaps. Built-in prompts work with an Xbox-only installation. The PC
+  release's icons can optionally be read from a PC install, which you name in
   `turok_settings.ini`: `[paths]` then `pc_game_dir=<folder with data\Textures>`
   (or `RECOMP_PC_GAME_DIR`). They are swapped in the renderer, by a hash of
   the Xbox textures. In menus Escape is Back (and resumes from the pause
   menu); in play it pauses (`RECOMP_KBM_MENU_MAP`).
+
+- **PC Controls**: saved bindings apply before the first input poll,
+  including fire, weapon mode, jump, duck, weapon cycling, zoom and pause.
+  Arrow keys navigate menus independently; in gameplay they only perform
+  an action if you assign them to it in PC Controls.
 
 - **Mouse look, raw** (native mouselook): the view turns by the mouse's
   counts alone, at any frame rate, with no acceleration. The look stick goes
