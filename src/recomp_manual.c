@@ -774,6 +774,60 @@ static void keep_decals_frame(void)
     }
 }
 
+/* ── Player-weapon emitter visibility ──────────────────────── */
+extern void sub_000B4480_gen(void);
+extern void sub_000AFF50_gen(void);
+static int s_weapon_emitter;
+
+static int emitter_is_player_weapon(uint32_t text, uint32_t size)
+{
+    const char *body = (const char *)((uintptr_t)text + g_xbox_mem_offset);
+    uint32_t i = 0;
+    char name[128];
+    if (!text || size > 65536u) return 0;
+    while (i < size) {
+        uint32_t n = 0;
+        while (i < size && body[i] != '"') i++;
+        i++;
+        while (i < size && body[i] != '"' && n + 1 < sizeof name) {
+            char c = body[i++];
+            if (c == '/') c = '\\';
+            name[n++] = (char)(c >= 'A' && c <= 'Z' ? c + 32 : c);
+        }
+        name[n] = 0;
+        i++;
+        if (!strncmp(name, "marc\\weapons\\", 13)) return 1;
+    }
+    return 0;
+}
+
+void sub_000B4480(void)
+{
+    int previous = s_weapon_emitter;
+    s_weapon_emitter = emitter_is_player_weapon(TUROK_MEM32(g_esp + 8), TUROK_MEM32(g_esp + 12));
+    sub_000B4480_gen();
+    s_weapon_emitter = previous;
+}
+
+void sub_000AFF50(void)
+{
+    static int logged;
+    /* This is the emitter's NoCull setter, independent of PARTDEF's
+     * AlwaysUpdate flag. The original scheduler (0x8D4C0) can discard a
+     * weapon's pending birth and reset its emission clock when the muzzle
+     * is outside the camera frustum. Player-weapon particles must be born
+     * regardless of view; render clipping, rates and pool limits still apply.
+     * World and enemy emitters retain their own settings. */
+    if (s_weapon_emitter) {
+        TUROK_MEM32(g_esp + 4) = 1;
+        if (!logged) {
+            fprintf(stderr, "[PARTICLES] player-weapon emitters: camera-independent spawning enabled\n");
+            logged = 1;
+        }
+    }
+    sub_000AFF50_gen();
+}
+
 /* ── Particle limit (sub_00096EE0, sub_000B98D0, sub_000B9700) ──
  *
  * A level makes one particle manager (sub_000B9D40) for at most the larger
