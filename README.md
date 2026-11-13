@@ -502,6 +502,11 @@ existing controls; Mouse look: Stick uses the selected controller response.
   tracking is cleared when changing worlds, and a reparsed definition
   replaces its old record. The log reports removals and refusals at most
   every ten seconds.
+- **Close-range shots (issue #11, under investigation)**: shots and casings
+  can appear delayed or disappear against some walls or enemies. The original
+  particle update can pause culled effects, but the sampled shotgun effects
+  already bypass that optimization. A generated-code regression verifies both
+  paths; no visibility or collision override is enabled for this report.
 - **Widescreen culling**: the game culls against its 4:3 camera, so blood,
   bullet holes and other effects past the 4:3 edges vanished while on screen.
   While the camera's view planes (`sub_00020EE0`) and the in-view test run, the

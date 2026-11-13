@@ -61,6 +61,11 @@ def game_functions(root, output):
     (output / "effect_part_generated.inc").write_text(generated_fixture(
         root / "src/recomp/gen/recomp_0016.c",
         ["void sub_000AF9A0_gen(void)"], "EFFECT_PART"), encoding="utf-8")
+    (output / "particle_simulation_generated.inc").write_text(
+        generated_fixture(root / "src/recomp/gen/recomp_0012.c",
+                          ["void sub_0008A0E0(void)"], "PARTICLE_CULL") +
+        generated_fixture(root / "src/recomp/gen/recomp_0013.c",
+                          ["void sub_00094D00(void)"], "PARTICLE_UPDATE"), encoding="utf-8")
     (output / "pickup_distance_under_test.inc").write_text(
         '#define FLYING_INDIGENOUS_AI_VTABLE 0x0021A240u\n' +
         source[source.index("extern void sub_0003B110_gen(void);"):source.index("/* ── Stick response curve")],
@@ -118,6 +123,7 @@ def main():
         ("video_settings.c", ["user32.lib", "gdi32.lib"]),
         ("controller_aim.c", []),
         ("pickup_distance.c", []),
+        ("particle_simulation.c", []),
         ("gpu_shader_cache.cpp", ["d3d11.lib", "dxgi.lib", "d3dcompiler.lib", "user32.lib"]),
         ("gpu_heat_haze.cpp", ["d3d11.lib", "dxgi.lib", "d3dcompiler.lib", "user32.lib"]),
         ("apu_voices.c", [str(root / "build/xboxrecomp/src/apu/Release/xbox_apu.lib")]),
