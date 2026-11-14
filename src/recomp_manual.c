@@ -2297,3 +2297,115 @@ void sub_00160760(void)
     g_ecx = inventory;
     sub_00160760_gen();
 }
+
+/* ── Surfacing at high frame rates ─────────────────────────────
+ *
+ * Each frame the swim update asks sub_00144B90 whether a point 0.15 above
+ * the head object ([player + 0x3CC] + 0x38) is still in a water volume; under
+ * water (callers 0x14DA48, 0x151D9D) a "no" surfaces the player (state 0x11),
+ * and the surface state then holds them exactly where they are -- it never
+ * moves them up or down. So the head floats above the waterline by however
+ * far the last frame of the climb carried it: at 60 fps up to 0.14 rising with
+ * jump (8-10 units a second), at the console's 30 up to 0.29; uncapped 0.05
+ * or less, and swimming up at an angle with forward (about 4.5 units a second)
+ * even less. Then the head's bob dips the test point back under, the player
+ * drops to state 0x13, sinks 1.6 units, climbs, resurfaces for a moment: the
+ * camera "trapped beneath" the waterline (Chapter 1, pod01_03's lake; deeper
+ * lakes leave more room). Above 60 fps, the frame that surfaces lifts the
+ * player so the head sits 0.15 above the waterline -- taken as half way
+ * through that frame's climb -- through the game's own set-position
+ * (sub_0003F380). At 60 fps and below nothing changes. */
+extern void sub_00144B90_gen(void);
+extern void sub_0003F380(void);
+extern __declspec(thread) uint32_t g_eax, g_edx, g_esp;
+
+static float frame_seconds(void)
+{
+    uint32_t timing = TUROK_MEM32(0x250A84u);
+    return timing ? guest_float(timing + 0x5Cu) : 0.0f;
+}
+
+void sub_00144B90(void)
+{
+    static uint32_t last_player;
+    static float last_head;               /* the head at the last climbing test, still under */
+    static clock_t last_time;
+    uint32_t player = g_ecx, caller = TUROK_MEM32(g_esp), head = TUROK_MEM32(player + 0x3CCu);
+    float dt = frame_seconds(), head_y = head ? guest_float(head + 0x3Cu) : 0.0f, step, lift;
+    clock_t now = clock();
+    int climbing;
+
+    sub_00144B90_gen();
+    /* Only the underwater update's test (0x151D9D) counts: the state-entry
+     * test (0x14DA48) also runs when the player falls in or dives, and a
+     * lift there kept them on top of the water. */
+    if (player != TUROK_MEM32(0x257E90u) || !head || caller != 0x00151D9Du) return;
+    climbing = last_player == player && now - last_time < CLOCKS_PER_SEC / 5 && head_y > last_head;
+    step = head_y - last_head;
+    if (g_eax) {                          /* still under: remember where */
+        last_player = player; last_head = head_y; last_time = now;
+        return;
+    }
+    last_player = 0;
+    if (!climbing || dt <= 0.0f || dt >= 1.0f / 61.0f || step > 0.3f) return;
+    lift = 0.15f - step * 0.5f;
+    if (lift <= 0.0f) return;
+    {
+        /* sub_0003F380 (thiscall, ret 4) with the raised position, from a
+         * vector on the guest stack. */
+        uint32_t saved_eax = g_eax, saved_ecx = g_ecx, saved_edx = g_edx, vec, y_bits;
+        float y = guest_float(player + 0x3Cu) + lift;
+        g_esp -= 12;
+        vec = g_esp;
+        TUROK_MEM32(vec) = TUROK_MEM32(player + 0x38u);
+        memcpy(&y_bits, &y, 4);
+        TUROK_MEM32(vec + 4u) = y_bits;
+        TUROK_MEM32(vec + 8u) = TUROK_MEM32(player + 0x40u);
+        g_esp -= 4; TUROK_MEM32(g_esp) = vec;
+        g_esp -= 4; TUROK_MEM32(g_esp) = 0;
+        g_ecx = player;
+        sub_0003F380();
+        g_esp += 12;
+        g_eax = saved_eax; g_ecx = saved_ecx; g_edx = saved_edx;
+    }
+}
+
+/* ── Water drag at high frame rates ────────────────────────────
+ *
+ * In the swim states (sub_0014FB40, sub_00151D30, sub_00153520) sub_00148950
+ * steers the player's body velocity ([player + 0xFC] + 0x18) along each
+ * swim axis toward its target speed (+0x3D8 strafe, +0x3DC vertical, +0x3E0
+ * forward) by a fixed fraction every frame: 0.03 horizontally, 0.1
+ * vertically -- not scaled by the frame time. A fall into water keeps 90% of
+ * its speed per frame: at 60 fps the plunge carries the player under, but at
+ * 200+ fps it is gone almost the instant they touch the water and they settle
+ * in slowly. Above 60 fps the change the function makes to the velocity is
+ * scaled to what that many frames at 60 fps would make,
+ * (1 - 0.9^(60 dt)) / 0.1 (the same within a few percent for 0.03), so the
+ * water slows the player per second as it does at 60. At 60 fps and below
+ * nothing changes. */
+extern void sub_00148950_gen(void);
+
+void sub_00148950(void)
+{
+    uint32_t player = g_ecx, body = player ? TUROK_MEM32(player + 0xFCu) : 0;
+    float dt = frame_seconds(), before[3], after[3], scale;
+    int i;
+
+    if (!body || dt <= 0.0f || dt >= 1.0f / 61.0f) {
+        sub_00148950_gen();
+        return;
+    }
+    for (i = 0; i < 3; i++) before[i] = guest_float(body + 0x18u + 4u * i);
+    sub_00148950_gen();
+    body = TUROK_MEM32(player + 0xFCu);
+    if (!body) return;
+    scale = (1.0f - powf(0.9f, 60.0f * dt)) / 0.1f;
+    for (i = 0; i < 3; i++) {
+        uint32_t bits;
+        after[i] = guest_float(body + 0x18u + 4u * i);
+        after[i] = before[i] + (after[i] - before[i]) * scale;
+        memcpy(&bits, &after[i], 4);
+        TUROK_MEM32(body + 0x18u + 4u * i) = bits;
+    }
+}
