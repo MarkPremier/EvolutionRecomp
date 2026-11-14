@@ -2409,3 +2409,194 @@ void sub_00148950(void)
         TUROK_MEM32(body + 0x18u + 4u * i) = bits;
     }
 }
+
+/* ── Ladders ──────────────────────────────────────────────────────
+ *
+ * Climbing (movement state 0x0F, update sub_0014D6A0 -> sub_0014A920) aims
+ * the view rather than turning it: sub_0014A920 passes sub_001435C0 a pitch
+ * TARGET, 75 degrees ([0x24E5D4], the view up the ladder) plus, for the look
+ * stick one way, up to 2 x 75 x stick x (pitch sensitivity + 1) / 6, and
+ * sub_001435C0 eases the pitch (player +0x3FC, degrees) towards it at 5 per
+ * second. Nothing limits it: on foot sub_00144560 holds the pitch within
+ * 70 degrees, but here the target reaches 225, past straight up, and the
+ * view goes over the top and turns upside down -- on the Xbox too. Its yaw
+ * (+0x400, the head's, relative to the body) eases towards CLIMB_HORIZ-
+ * VIEWANGLE (+0x894) x the stick and back to 0 when it is let go.
+ *
+ * Always: the target stops at 85 degrees either way, short of vertical, so
+ * the view cannot flip; otherwise the ladder looks as on the Xbox.
+ *
+ * Ladder freelook (PC Settings): the look stick turns the view instead, as
+ * it does on foot, and it stays where it is left: the pitch within the
+ * on-foot limit ([0x221420], 70), the head's yaw within CLIMB_HORIZVIEW-
+ * ANGLE. The stick goes through what the on-foot look does (sub_00144780):
+ * a 0.3 deadzone per axis, the response curve (sub_00142280) and easing
+ * up by a fifth a frame -- or Modern Pad Aim's vector -- and Mouse look
+ * raw adds the mouse's turn. Then the on-foot speeds: yaw TURNSPEED (+0x884)
+ * x 0.75 x min(2 x FOV/90, 1) (sub_00144430), pitch TURNSPEED x 0.5 x
+ * FOV/90 (sub_00144560), each x (sensitivity + 1) / 6, with Invert Look.
+ * Done through the target sub_001435C0 eases to, chosen so that its step
+ * lands exactly on the turned pitch, and its yaw step. */
+extern void sub_001435C0_gen(void);
+extern int video_settings_ladder_freelook(void);
+
+#define LADDER_CALL       0x0014ABBAu   /* sub_0014A920's call */
+static float s_ladder_yaw;              /* the head's yaw after the last ladder turn */
+static int s_ladder_turned;             /* ladder_turn_body has turned the body */
+#define LADDER_TARGET_MAX 85.0f
+static void put_guest_float(uint32_t va, float value)
+{
+    uint32_t bits;
+    memcpy(&bits, &value, 4);
+    TUROK_MEM32(va) = bits;
+}
+
+static float clampf(float value, float low, float high)
+{
+    return value < low ? low : value > high ? high : value;
+}
+
+extern float video_settings_take_mouse_turn(int axis);
+
+/* The on-foot look's stick (sub_00144780): right x, up y. */
+static void ladder_look_stick(uint32_t player, float *x, float *y, float ease[2], float dt)
+{
+    float v[2], m;
+    int i;
+    v[0] = guest_float(player + 0x192Cu) - guest_float(player + 0x1928u);
+    v[1] = guest_float(player + 0x1920u) - guest_float(player + 0x1924u);
+    if (video_settings_modern_aim()) {
+        modern_look_vector(&v[0], &v[1]);
+        ease[0] = v[0]; ease[1] = v[1];
+    } else {
+        for (i = 0; i < 2; i++)
+            v[i] = v[i] > 0.3f ? (v[i] - 0.3f) * (1.0f / 0.7f) : v[i] < -0.3f ? (v[i] + 0.3f) * (1.0f / 0.7f) : 0.0f;
+        m = sqrtf(v[0] * v[0] + v[1] * v[1]);
+        for (i = 0; i < 2; i++) {
+            if (m < 0.5f) v[i] *= 0.25f;
+            else if (m < 0.9f) v[i] *= 0.3f;
+            else v[i] = v[i] < 0.0f ? -v[i] * v[i] : v[i] * v[i];
+            if ((v[i] > 0.0f && v[i] > ease[i]) || (v[i] < 0.0f && v[i] < ease[i]))
+                v[i] = ease[i] + (v[i] - ease[i]) * 0.2f;
+            ease[i] = v[i];
+        }
+    }
+    /* Mouse look raw: the mouse's turn, as the on-foot turn functions add it. */
+    for (i = 0; i < 2; i++) {
+        float turn = video_settings_take_mouse_turn(i);
+        if (dt > 0.0f && dt <= 1.0f) v[i] += turn / dt;
+    }
+    *x = v[0];
+    *y = v[1];
+}
+
+void sub_001435C0(void)
+{
+    uint32_t player = g_ecx, args = g_esp + 4u;
+    static clock_t s_last;
+    static float s_ease[2];
+    float target, yaw_step, dt, pitch, yaw, limit, look_x, look_y, pitch_k, yaw_k;
+    int freelook;
+    clock_t now;
+
+    if (TUROK_MEM32(g_esp) != LADDER_CALL || !player) {
+        sub_001435C0_gen();
+        return;
+    }
+    target = guest_float(args);
+    yaw_step = guest_float(args + 4u);
+    dt = guest_float(args + 8u);
+    pitch = guest_float(player + 0x3FCu);
+    yaw = guest_float(player + 0x400u);
+    freelook = video_settings_ladder_freelook();
+    now = clock();
+    if (now - s_last > CLOCKS_PER_SEC / 2) {
+        s_ease[0] = s_ease[1] = 0.0f;
+        fprintf(stderr, "[LADDER] climbing: pitch %.1f yaw %.1f target %.1f side limit %.1f turn speed %.1f "
+                "fov %.1f flags 0x%X%s\n", pitch, yaw, target, guest_float(player + 0x894u),
+                guest_float(player + 0x884u), guest_float(player + 0x830u), TUROK_MEM32(player + 0x45Cu),
+                freelook ? " (freelook)" : "");
+    }
+    s_last = now;
+
+    if (freelook && dt > 0.0f) {
+        float turn_speed = guest_float(player + 0x884u), fov = guest_float(player + 0x830u) / 90.0f;
+        float pitch_limit = guest_float(0x00221420u), yaw_zoom, turned;
+        if (!(turn_speed > 0.0f && turn_speed < 10000.0f)) turn_speed = 180.0f;
+        if (!(fov > 0.0f && fov < 4.0f)) fov = 1.0f;
+        if (!(pitch_limit > 0.0f && pitch_limit < 90.0f)) pitch_limit = 70.0f;
+        yaw_zoom = fminf(2.0f * fov, 1.0f);
+        ladder_look_stick(player, &look_x, &look_y, s_ease, dt);
+        pitch_k = (float)((int32_t)TUROK_MEM32(player + 0x3C8u) + 1) / 6.0f;
+        yaw_k = (float)((int32_t)TUROK_MEM32(player + 0x3C4u) + 1) / 6.0f;
+        /* sub_00144560: the step is negated without Invert Look (+0x3C0). */
+        {
+            float step = fov * 0.5f * turn_speed * look_y * dt * pitch_k;
+            turned = clampf(pitch + (TUROK_MEM32(player + 0x3C0u) ? step : -step), -pitch_limit, pitch_limit);
+        }
+        /* sub_001435C0 sets pitch += (target - pitch) x dt x 5. */
+        target = pitch + (turned - pitch) / (dt * 5.0f);
+        limit = guest_float(player + 0x894u);
+        if (!(limit > 0.0f && limit < 180.0f)) limit = 90.0f;
+        yaw_step = clampf(yaw - yaw_zoom * 0.75f * turn_speed * look_x * dt * yaw_k, -limit, limit) - yaw;
+    } else {
+        target = clampf(target, -LADDER_TARGET_MAX, LADDER_TARGET_MAX);
+    }
+    put_guest_float(args, target);
+    put_guest_float(args + 4u, yaw_step);
+    sub_001435C0_gen();
+    s_ladder_yaw = guest_float(player + 0x400u);
+}
+
+/* Leaving the ladder: off it the head's yaw (+0x400) goes back to the
+ * front, so with Ladder freelook the view swung back to the ladder. Instead
+ * the body turns by the head's yaw and the head faces forward: the view
+ * stays where it was. The body's yaw is what the on-foot turn
+ * (sub_00144430) turns -- radians at +4 of what sub_00038870 returns, which
+ * also marks the angles changed -- and turns the same way for the same
+ * stick as the head's degrees do. The pitch is the on-foot one already.
+ *
+ * Two ways off: the state's exit (sub_0014D7D0: at the bottom, letting go)
+ * still has the head's yaw; at the top the update (sub_0014D6A0) zeroes it
+ * itself (0x14D7A8) before it hops the player onto the ledge, so there the
+ * yaw is the last the turn left (s_ladder_yaw, sub_001435C0). The hop's
+ * velocity is already in the world by then: turning the body after it does
+ * not change where the player lands. */
+extern void sub_0014D7D0_gen(void);
+extern void sub_0014D6A0_gen(void);
+extern void sub_00038870(void);
+
+static void ladder_turn_body(uint32_t player, float head_yaw, const char *where)
+{
+    uint32_t saved_eax = g_eax, saved_ecx = g_ecx, saved_edx = g_edx, angles;
+    if (!player || !video_settings_ladder_freelook() || head_yaw == 0.0f || !(fabsf(head_yaw) < 180.0f)) return;
+    g_esp -= 4; TUROK_MEM32(g_esp) = 0;   /* return address */
+    g_ecx = player;
+    sub_00038870();                       /* thiscall, ret */
+    angles = g_eax;
+    g_eax = saved_eax; g_ecx = saved_ecx; g_edx = saved_edx;
+    if (!angles) return;
+    put_guest_float(angles + 4u, guest_float(angles + 4u) + head_yaw * 0.017453292f);
+    put_guest_float(player + 0x400u, 0.0f);
+    s_ladder_turned = 1;
+    fprintf(stderr, "[LADDER] off the ladder %s: body turned %.1f degrees with the view\n", where, head_yaw);
+}
+
+void sub_0014D7D0(void)
+{
+    uint32_t player = g_ecx;
+    if (player) ladder_turn_body(player, guest_float(player + 0x400u), "(let go)");
+    sub_0014D7D0_gen();
+}
+
+void sub_0014D6A0(void)
+{
+    uint32_t player = g_ecx;
+    float before = player ? guest_float(player + 0x400u) : 0.0f;
+    s_ladder_yaw = before;
+    s_ladder_turned = 0;
+    sub_0014D6A0_gen();
+    /* Not again if the exit (inside the update) already turned it. */
+    if (player && !s_ladder_turned && before != 0.0f && guest_float(player + 0x400u) == 0.0f)
+        ladder_turn_body(player, s_ladder_yaw, "at the top");
+}

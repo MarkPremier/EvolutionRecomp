@@ -369,6 +369,7 @@ effect at once and are kept in `turok_settings.ini` beside the exe:
 | Flight speed | 1 to 10 (5 by default; each step 1.4x; the pteranodon's mouse steering; on the PC Settings page, kept with these settings) | |
 | Flight invert | off, on (the mouse up the screen dives instead of climbing; on the PC Settings page, kept with these settings) | |
 | Pad aim | original, modern (original by default; on the PC Settings page) | |
+| Ladder freelook | off, on (off by default; the right stick looks around freely on ladders; on the PC Settings page) | |
 | Draw distance | normal, 2x, 4x, 8x (2x by default) | |
 | Heat haze | off, xbox, enhanced (enhanced by default; off removes distortion; xbox keeps the original effect; enhanced refracts the full-resolution scene with filtered offsets and feathered edges) | |
 | Shadows | xbox, enhanced (enhanced by default; see Shadows above -- the shadow map's size changes when the game next starts) | `RECOMP_SHADOW_EXACT`, `RECOMP_SHADOW_SCALE` override parts |
@@ -404,6 +405,18 @@ The setting applies immediately and is saved as `controller_aim=modern` in
 `turok_settings.ini`. Original retains the console behaviour and is the default
 for existing and new settings. Movement, flying and raw mouse look keep their
 existing controls; Mouse look: Stick uses the selected controller response.
+
+**Ladders.** On a ladder the game aims the view up the ladder and adds the
+right stick to that aim without a limit, so pushing the stick up (with Invert
+Look off) took the view over the top and turned it upside down, on the Xbox
+too. The aim now stops at 85 degrees either way, short of vertical; otherwise
+ladders look as they did. **Ladder freelook: On**, under **Options > PC
+Settings**, makes the right stick turn the view on ladders as it does on foot
+(the same deadzone, response, speeds, sensitivity, Invert Look, Pad aim and raw
+mouse look), and the view stays where you leave it: up and down within the
+on-foot limit, sideways within the game's own ladder limit. Climbing off at
+the top or the bottom keeps the view where it was looking. It is saved as
+`ladder_freelook=on` in `turok_settings.ini`.
 
 - **Widescreen** widens the view rather than stretching it (Hor+): the game's
   3D programs project through c96 (rigid) or c187 (skinned), and that row is
@@ -573,7 +586,7 @@ and the pickup checks run the original visibility and update-distance gates.
 | `src/main.c` | Host entry point: loads the XBE, sets the runtime defaults below, calls the game's entry point |
 | `src/game_files.c` | Finds the player's USA disc files, checks `default.xbe`, and extracts a disc image (XDVDFS) into `game` |
 | `src/video_settings.c` | The Video Options page: builds `patch0.tre` from the disc's menus (its `.tre` and screen formats are described there), keeps `turok_settings.ini`, and applies the page's values through the history values the menu writes |
-| `src/recomp_manual.c` | Hand-written overrides: D3D's GetVisibilityTestResult (sub_00194B40) completes unfinished tests as visible; DirectSound's idle-voice handler (sub_001B23DD) ignores voices nobody owns (the emulated APU could report one, and quitting a level crashed); with enhanced shadows, the shadow manager's constructor (sub_0017D5C0) takes its map size from `RECOMP_SHADOW_MAP`, the light camera's fit (sub_0017DAF0, through the camera FOV setter sub_0001FD20) its distance and a wider area around the player, and the shadow caster check (sub_000F21B0) passes creatures out of view; the box-in-view test (sub_00021A90) settles 95% of its calls natively, with the original's x87 roundings (`RECOMP_CULL_VERIFY=1` checks every answer against the original); D3D KickOff (sub_001984B0/sub_00198480) skips the write-combine flush handshake and the vblank handler (sub_0019D580) drops PMC_INTR's PCRTC bit before its acknowledge spin -- both waited on the toolkit's GPU thread; the movement integrator (sub_00042450) takes a flight path's orientation without rotation collision (Escape Flight's ships tumbled at the ceiling at 120 fps); the aim wobble of scoped guns (sub_0011B220) and drawn bows (sub_0011CD30, sub_0011E9E0, and the update sub_00122CD0 through the view turn sub_001421B0 and aim setter sub_00038E10) steps at most 60 times a second; above 60 fps, the swim states' velocity steering (sub_00148950) acts per second as at 60, and surfacing (the underwater test sub_00144B90 from 0x151D9D) lifts the player to a 60 fps clearance through the set-position sub_0003F380 |
+| `src/recomp_manual.c` | Hand-written overrides: D3D's GetVisibilityTestResult (sub_00194B40) completes unfinished tests as visible; DirectSound's idle-voice handler (sub_001B23DD) ignores voices nobody owns (the emulated APU could report one, and quitting a level crashed); with enhanced shadows, the shadow manager's constructor (sub_0017D5C0) takes its map size from `RECOMP_SHADOW_MAP`, the light camera's fit (sub_0017DAF0, through the camera FOV setter sub_0001FD20) its distance and a wider area around the player, and the shadow caster check (sub_000F21B0) passes creatures out of view; the box-in-view test (sub_00021A90) settles 95% of its calls natively, with the original's x87 roundings (`RECOMP_CULL_VERIFY=1` checks every answer against the original); D3D KickOff (sub_001984B0/sub_00198480) skips the write-combine flush handshake and the vblank handler (sub_0019D580) drops PMC_INTR's PCRTC bit before its acknowledge spin -- both waited on the toolkit's GPU thread; the movement integrator (sub_00042450) takes a flight path's orientation without rotation collision (Escape Flight's ships tumbled at the ceiling at 120 fps); the aim wobble of scoped guns (sub_0011B220) and drawn bows (sub_0011CD30, sub_0011E9E0, and the update sub_00122CD0 through the view turn sub_001421B0 and aim setter sub_00038E10) steps at most 60 times a second; above 60 fps, the swim states' velocity steering (sub_00148950) acts per second as at 60, and surfacing (the underwater test sub_00144B90 from 0x151D9D) lifts the player to a 60 fps clearance through the set-position sub_0003F380; on ladders, the view turn (sub_001435C0 from the climb sub_0014A920) holds its pitch target within 85 degrees, or with Ladder freelook turns the view as on foot, and the climb update (sub_0014D6A0) and climb exit (sub_0014D7D0) turn the body to the view on the way off |
 | `seeds/manual_seeds.json` | Functions only reached through pointers (XPP init) |
 | `seeds/recomp_extra_seeds.json` | Functions the disassembler misses, found by the upstream recompiler or at runtime (`tools.seed_from_log` on an `[ICALL] Failed to resolve` log). Includes the player-action thunks (`mov eax,[ecx]; mov [ecx+0x3A4],0; jmp [eax+N]`) reached only through runtime-built tables; without them fire, pause and previous weapon did nothing. `py -3 tools/scan_missed_functions.py <default.xbe> src/recomp/gen` lists code still missing (after switch tables, in gaps) to seed; its remaining five hits are data or interior addresses |
 | `patches/xboxrecomp-aknavj-turok.patch` | The toolkit changes as one diff against aknavj 11a8aa1 |
