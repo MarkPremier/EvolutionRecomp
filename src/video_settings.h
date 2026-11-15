@@ -47,5 +47,7 @@ float video_settings_take_mouse_steer(int axis);
 /* On-foot controller look; Original remains the default. */
 int video_settings_modern_aim(void);
 int video_settings_ladder_freelook(void);
+/* Owned weapons carry over between levels (off: as on the Xbox). */
+int video_settings_keep_weapons(void);
 
 #endif

@@ -68,7 +68,7 @@ extern void nv2a_gpu_set_exact_shadows(int on);
 enum { SET_RESOLUTION, SET_ASPECT, SET_DISPLAY, SET_VSYNC, SET_FRAMES, SET_ANISOTROPY, SET_MSAA, SET_DRAW_DISTANCE,
        SET_HEAT_HAZE, SET_SHADOWS, SET_ICONS,
        SET_MOUSE_LOOK, SET_MOUSE_SPEED, SET_FLIGHT_MOUSE, SET_FLIGHT_SPEED, SET_FLIGHT_INVERT,
-       SET_CONTROLLER_AIM, SET_LADDER_FREELOOK, SETTING_COUNT };
+       SET_CONTROLLER_AIM, SET_LADDER_FREELOOK, SET_KEEP_WEAPONS, SETTING_COUNT };
 
 typedef struct VideoSetting {
     const char *key, *label;
@@ -117,6 +117,7 @@ static const VideoSetting k_settings[SETTING_COUNT] = {
     {"flight_invert", "flight invert", k_switches, COUNT(k_switches), 0},
     {"controller_aim", "pad aim", k_controller_aims, COUNT(k_controller_aims), 0},
     {"ladder_freelook", "ladder freelook", k_switches, COUNT(k_switches), 0},
+    {"keep_weapons", "keep weapons", k_switches, COUNT(k_switches), 0},
 };
 
 static int s_values[SETTING_COUNT];
@@ -743,16 +744,18 @@ static int values_of(int setting)
     }
 }
 
-/* Shadows, controller aiming and ladder freelook use GameOptions.txm, keys
- * 14, 17 and 20 on (after PC Settings' title, 13): Options.txm has no keys
- * left for them. */
+/* Shadows, controller aiming, ladder freelook and keep weapons use
+ * GameOptions.txm, keys 14, 17, 20 and 23 on (after PC Settings' title, 13):
+ * Options.txm has no keys left for them. */
 #define GAME_TEXT_SHADOWS 14
 #define GAME_TEXT_CONTROLLER_AIM 17
 #define GAME_TEXT_LADDER_FREELOOK 20
+#define GAME_TEXT_KEEP_WEAPONS 23
 
 static int in_game_text(int setting)
 {
-    return setting == SET_SHADOWS || setting == SET_CONTROLLER_AIM || setting == SET_LADDER_FREELOOK;
+    return setting == SET_SHADOWS || setting == SET_CONTROLLER_AIM || setting == SET_LADDER_FREELOOK ||
+           setting == SET_KEEP_WEAPONS;
 }
 
 static int text_label(int setting)
@@ -761,6 +764,7 @@ static int text_label(int setting)
     if (setting == SET_SHADOWS) return GAME_TEXT_SHADOWS;
     if (setting == SET_CONTROLLER_AIM) return GAME_TEXT_CONTROLLER_AIM;
     if (setting == SET_LADDER_FREELOOK) return GAME_TEXT_LADDER_FREELOOK;
+    if (setting == SET_KEEP_WEAPONS) return GAME_TEXT_KEEP_WEAPONS;
     for (s = 0; s < setting; s++)
         if (!in_game_text(s)) key += 1 + (values_of(s) == s ? k_settings[s].count : 0);
     return key;
@@ -2038,7 +2042,8 @@ static void apply_setting(int setting)
     case SET_FLIGHT_SPEED:
     case SET_FLIGHT_INVERT:
     case SET_CONTROLLER_AIM:
-    case SET_LADDER_FREELOOK: break;
+    case SET_LADDER_FREELOOK:
+    case SET_KEEP_WEAPONS: break;    /* read at each level's start */
     }
 }
 
@@ -2190,6 +2195,13 @@ int video_settings_enhanced_shadows(void)
 int video_settings_keep_decals(void)
 {
     return !s_flying_level;
+}
+
+/* Keep weapons: the weapons you own stay yours from level to level
+ * (recomp_manual.c, sub_00160BC0). Not in the flying levels. */
+int video_settings_keep_weapons(void)
+{
+    return s_values[SET_KEEP_WEAPONS] != 0 && !s_flying_level;
 }
 
 float video_settings_draw_distance(void)

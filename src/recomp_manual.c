@@ -2362,6 +2362,173 @@ void sub_00160760(void)
     sub_00160760_gen();
 }
 
+/* ── Keep weapons (PC Settings, off by default) ─────────────────
+ *
+ * Each level rebuilds the player's inventory at its start (sub_00160BC0,
+ * this = player + 0x19FC) from the level's weapon set -- an actor whose
+ * properties go to [0x257E14] + 0x198, flag +0x19C: eight WeaponSlotN (the
+ * weapon's ID - 1, +0x234), StartsOffWithWeaponN (+0x294), upgrades and
+ * ammunition -- and the saved weapon state, SaveFile.hst: six items a
+ * weapon from item (ID - 1) * 6 + 1 (owned, upgrade 1, upgrade 2, three
+ * ammunition counts), written from the inventory at each level's end and
+ * save (sub_00101060 -> sub_00160340) and kept in the save. A weapon is
+ * owned (entry +0x20) only if the level starts you with it AND the save
+ * says you own it, so a level can take weapons away but never give them
+ * back; and a weapon outside its eight slots is not in the inventory at
+ * all (its saved state waits for a later level). That is the cut content
+ * showing: weapons vanish between chapters, ammunition for weapons you
+ * cannot have, the All Weapons cheat limited to the level's set.
+ *
+ * With the option on, every weapon the save says you own is yours: owned
+ * if the level has it, otherwise added with its saved ammunition and
+ * upgrades (as the build does for a level without a weapon set), in ID
+ * order. With the All Weapons cheat on, all fourteen are in. This happens
+ * just before the build's last step (sub_0015F400, which pools the bows'
+ * arrows), so that sees them too. Not in the flying levels. Nothing is
+ * written to the save that the game would not write: at the level's end
+ * it saves the inventory as always, now with the weapons kept. */
+extern void sub_00160BC0_gen(void);
+extern void sub_0015F400_gen(void);
+extern void sub_00160A50(void);
+
+static uint32_t s_keep_inventory;     /* the inventory being built, while sub_00160BC0 runs */
+
+/* SaveFile.hst's items (8 bytes each, the value first), or 0. */
+static uint32_t save_history_items(void)
+{
+    static const char name[] = "$\\Data\\History\\SaveFile.hst";
+    uint32_t game = TUROK_MEM32(0x250A84u), manager, first, last, at;
+    if (!game || !(manager = TUROK_MEM32(game + 0x80u))) return 0;
+    first = TUROK_MEM32(manager); last = TUROK_MEM32(manager + 4u);
+    if (last < first || last - first > 1024u) return 0;
+    for (at = first; at < last; at += 4) {
+        uint32_t group = TUROK_MEM32(at), text = group ? TUROK_MEM32(group + 0x14u) : 0, i;
+        if (!text) continue;
+        for (i = 0; i < sizeof name; i++) {
+            char c = *(volatile char *)((uintptr_t)(text + i) + g_xbox_mem_offset), n = name[i];
+            if (c >= 'A' && c <= 'Z') c += 32;
+            if (n >= 'A' && n <= 'Z') n += 32;
+            if (c != n) break;
+        }
+        if (i == sizeof name) {
+            uint32_t begin = TUROK_MEM32(group + 4u), end = TUROK_MEM32(group + 8u);
+            return end >= begin + 85u * 8u ? begin : 0;
+        }
+    }
+    return 0;
+}
+
+static int32_t saved_weapon(uint32_t items, uint32_t id, int field)
+{
+    return (int32_t)TUROK_MEM32(items + ((id - 1u) * 6u + (uint32_t)field) * 8u);
+}
+
+static int find_weapon(uint32_t inventory, uint32_t id)
+{
+    uint32_t begin = TUROK_MEM32(inventory + 4u), end = TUROK_MEM32(inventory + 8u), i;
+    for (i = 0; begin + (i + 1u) * 0x28u <= end && i < 32; i++)
+        if (TUROK_MEM32(begin + i * 0x28u) == id) return (int)i;
+    return -1;
+}
+
+static void keep_weapons(uint32_t inventory)
+{
+    uint32_t items = save_history_items(), player = TUROK_MEM32(inventory + 0x4Cu), id;
+    int cheat = player && TUROK_MEM32(player + 0x3B8u) != 0;   /* All Weapons ([player + 0x3AC] + 0xC) */
+    char kept[64] = "", added[64] = "";
+    if (!items) return;
+    for (id = 2; id <= 14; id++) {
+        uint32_t begin, entry, count, max = 0x002259A0u + id * 16u;
+        int at, position, field;
+        if (saved_weapon(items, id, 0) == 0 && !cheat) continue;
+        /* The Tek Bow replaces the bow (they share arrows): no bow beside it. */
+        if (id == 2 && !cheat && (saved_weapon(items, 3, 0) || find_weapon(inventory, 3) >= 0)) continue;
+        if ((at = find_weapon(inventory, id)) >= 0) {
+            entry = TUROK_MEM32(inventory + 4u) + (uint32_t)at * 0x28u;
+            if (!TUROK_MEM32(entry + 0x20u)) {
+                TUROK_MEM32(entry + 0x20u) = 1;
+                snprintf(kept + strlen(kept), sizeof kept - strlen(kept), " %u", id);
+            }
+            continue;
+        }
+        /* Append it (sub_00160A50(id, 0): this-call, ret 8), then fill it in
+         * as the build does without a weapon set (0x160EE0..0x160FDF). */
+        {
+            uint32_t ecx_saved = g_ecx, eax_saved = g_eax, edx_saved = g_edx;
+            g_esp -= 4; TUROK_MEM32(g_esp) = 0;
+            g_esp -= 4; TUROK_MEM32(g_esp) = id;
+            g_esp -= 4; TUROK_MEM32(g_esp) = 0;      /* return address; its ret 8 pops all three */
+            g_ecx = inventory;
+            sub_00160A50();
+            g_ecx = ecx_saved; g_eax = eax_saved; g_edx = edx_saved;
+        }
+        if ((at = find_weapon(inventory, id)) < 0) continue;
+        begin = TUROK_MEM32(inventory + 4u);
+        entry = begin + (uint32_t)at * 0x28u;
+        if (id == 2 || id == 3 || id == 14) {         /* bows: both arrow kinds */
+            TUROK_MEM32(entry + 0x14u) = 1; TUROK_MEM32(entry + 0x18u) = 1; TUROK_MEM32(entry + 0x24u) = 0;
+        } else {
+            TUROK_MEM32(entry + 0x24u) = (id == 7 || id == 8) ? 0u : 1u;
+        }
+        if (saved_weapon(items, id, 1)) TUROK_MEM32(entry + 0x14u) = 1;
+        if (saved_weapon(items, id, 2)) TUROK_MEM32(entry + 0x18u) = 1;
+        for (field = 0; field < 3; field++) {
+            int32_t ammo = (int32_t)TUROK_MEM32(entry + 4u + 4u * (uint32_t)field) + saved_weapon(items, id, 3 + field);
+            int32_t most = (int32_t)TUROK_MEM32(max + 4u * (uint32_t)field);
+            if (ammo > most) ammo = most;
+            if (ammo < 0) ammo = 0;
+            TUROK_MEM32(entry + 4u + 4u * (uint32_t)field) = (uint32_t)ammo;
+        }
+        if (id == 8) TUROK_MEM32(entry + 0xCu) = 0;
+        TUROK_MEM32(entry + 0x1Cu) = 0;          /* a byte the game uses, and padding it leaves unset */
+        TUROK_MEM32(entry + 0x20u) = 1;
+        snprintf(added + strlen(added), sizeof added - strlen(added), " %u", id);
+
+        /* Move it among the others by ID, so next and previous weapon meet
+         * it in order. The build has chosen nothing yet; indices the
+         * inventory holds (in hand, switching to, to return to) follow. */
+        count = (TUROK_MEM32(inventory + 8u) - begin) / 0x28u;
+        for (position = 0; position < at; position++)
+            if (TUROK_MEM32(begin + (uint32_t)position * 0x28u) > id) break;
+        if (position < at) {
+            uint32_t words[10], k;
+            static const uint32_t index_fields[3] = {0x10u, 0x5Cu, 0x38u};
+            for (k = 0; k < 10; k++) words[k] = TUROK_MEM32(entry + 4u * k);
+            memmove((void *)((uintptr_t)(begin + (uint32_t)(position + 1) * 0x28u) + g_xbox_mem_offset),
+                    (void *)((uintptr_t)(begin + (uint32_t)position * 0x28u) + g_xbox_mem_offset),
+                    (size_t)(at - position) * 0x28u);
+            for (k = 0; k < 10; k++) TUROK_MEM32(begin + (uint32_t)position * 0x28u + 4u * k) = words[k];
+            for (k = 0; k < 3; k++) {
+                uint32_t index = TUROK_MEM32(inventory + index_fields[k]);
+                if (index < count && index >= (uint32_t)position && index < (uint32_t)at)
+                    TUROK_MEM32(inventory + index_fields[k]) = index + 1u;
+            }
+        }
+    }
+    if (*kept || *added)
+        fprintf(stderr, "[WEAPONS] keep weapons: owned again%s; added%s%s\n", *kept ? kept : " none",
+                *added ? added : " none", cheat ? " (All Weapons cheat)" : "");
+}
+
+void sub_00160BC0(void)
+{
+    uint32_t inventory = g_ecx, previous = s_keep_inventory;
+    s_keep_inventory = video_settings_keep_weapons() ? inventory : 0;
+    sub_00160BC0_gen();          /* ends in sub_0015F400 */
+    s_keep_inventory = previous;
+}
+
+void sub_0015F400(void)
+{
+    if (s_keep_inventory && g_ecx == s_keep_inventory) {
+        uint32_t inventory = s_keep_inventory;
+        s_keep_inventory = 0;
+        keep_weapons(inventory);
+        g_ecx = inventory;
+    }
+    sub_0015F400_gen();
+}
+
 /* ── Surfacing at high frame rates ─────────────────────────────
  *
  * Each frame the swim update asks sub_00144B90 whether a point 0.15 above
