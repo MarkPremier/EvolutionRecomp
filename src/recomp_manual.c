@@ -2841,3 +2841,54 @@ void sub_000E7570(void)
     g_eax = a; g_ecx = b; g_edx = out;
     g_esp += 4u;   /* ret */
 }
+
+/* ── Mid-air landings at high frame rates ──────────────────────
+ *
+ * The on-foot movement (sub_0014A020, this-call, ret 4: the frame's
+ * seconds; run by the run and jump states, among others) ends a fall when
+ * the player has moved less than 0.0005 units up or down this frame (the
+ * height +0x3C against the last frame's +0xB0): a stall check, for a fall
+ * caught on something that never reports ground. That is per frame. At 30
+ * fps the frames at the top of a jump move ~0.02, but above ~150 fps they
+ * move less than 0.0005, so the jump "landed" in mid-air: idle, then run,
+ * hanging in the air for seconds while the run state's own fall test (also
+ * per frame) slowly let it sink. The test is made the same speed as at 30
+ * fps -- 0.015 units a second -- by nudging the remembered height for the
+ * check alone: the method the movement calls just before it (vfunc +0x32C,
+ * sub_001425C0, returning to 0x14A4CA) is wrapped; the real height is put
+ * back when the movement returns. At 30 fps and below nothing changes. */
+extern void sub_0014A020_gen(void);
+extern void sub_001425C0_gen(void);
+static float s_move_seconds;
+static uint32_t s_stall_player, s_stall_saved, s_stall_set;
+
+void sub_0014A020(void)
+{
+    uint32_t player = g_ecx;
+    float seconds = s_move_seconds;
+    s_move_seconds = guest_float(g_esp + 4u);
+    s_stall_player = 0;
+    sub_0014A020_gen();
+    if (s_stall_player == player && TUROK_MEM32(player + 0xB0u) == s_stall_set)
+        TUROK_MEM32(player + 0xB0u) = s_stall_saved;
+    s_stall_player = 0;
+    s_move_seconds = seconds;
+}
+
+void sub_001425C0(void)
+{
+    uint32_t player = g_ecx, state = player ? TUROK_MEM32(player + 0x12Cu) : 0;
+    if (TUROK_MEM32(g_esp) == 0x0014A4CAu && state && TUROK_MEM32(state) == 6u &&
+        s_move_seconds > 0.0f && s_move_seconds < 1.0f / 30.0f) {
+        float y = guest_float(player + 0x3Cu), last = guest_float(player + 0xB0u);
+        float moved = fabsf(y - last), still = 0.015f * s_move_seconds;
+        if (moved < 0.0005f && moved >= still) {
+            float nudged = y - 0.001f;   /* reads as falling at the 30 fps rate */
+            s_stall_player = player;
+            s_stall_saved = TUROK_MEM32(player + 0xB0u);
+            memcpy(&s_stall_set, &nudged, 4);
+            TUROK_MEM32(player + 0xB0u) = s_stall_set;
+        }
+    }
+    sub_001425C0_gen();
+}
