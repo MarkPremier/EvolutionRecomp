@@ -2068,8 +2068,16 @@ static float s_mouse_steer[2];         /* flight: right, up, the same units */
 
 void video_settings_mouse_look(void)
 {
+    static DWORD last_frame;
     double gain;
-    int dx = 0, dy = 0, step, speed, flying;
+    int dx = 0, dy = 0, step, speed, flying, stale;
+    DWORD now = GetTickCount();
+    /* After a pause in play (a level or save loading, a cutscene's hold) the
+     * mouse's movement since is not a turn: nothing took it while the game
+     * was away, and the first frame back turned the view by all of it -- a
+     * loaded game began looking at the floor or a wall. */
+    stale = now - last_frame > 250;
+    last_frame = now;
     controls_frame();
     video_scroll();
     menu_pointer();
@@ -2084,6 +2092,7 @@ void video_settings_mouse_look(void)
         int on_foot = s_values[SET_MOUSE_LOOK] == 1 && (s_in_menu || GetTickCount() - s_turn_seen < 300);
         int raw = on_foot || flying;
         if (raw != s_mouse_raw) {
+            if (raw) stale = 1;              /* what moved while the stick had the mouse */
             s_mouse_raw = raw;
             xbox_KbmSetRawMouse(raw);
         }
@@ -2092,6 +2101,11 @@ void video_settings_mouse_look(void)
         if (!raw) return;
     }
     xbox_FramebufferMouseDelta(&dx, &dy);
+    if (stale) {
+        s_mouse_turn[0] = s_mouse_turn[1] = 0;
+        s_mouse_steer[0] = s_mouse_steer[1] = 0;
+        return;
+    }
     if (s_in_menu) {
         s_mouse_turn[0] = s_mouse_turn[1] = 0;
         return;
