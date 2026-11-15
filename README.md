@@ -373,7 +373,6 @@ effect at once and are kept in `turok_settings.ini` beside the exe:
 | Draw distance | normal, 2x, 4x, 8x (2x by default) | |
 | Heat haze | off, xbox, enhanced (enhanced by default; off removes distortion; xbox keeps the original effect; enhanced refracts the full-resolution scene with filtered offsets and feathered edges) | |
 | Shadows | xbox, enhanced (enhanced by default; see Shadows above -- the shadow map's size changes when the game next starts) | `RECOMP_SHADOW_EXACT`, `RECOMP_SHADOW_SCALE` override parts |
-| Keep bodies | off, on (off by default; also keeps decals; always off in the flying levels, and bodies are not kept in the stealth level) | |
 
 The page shows ten rows at a time and scrolls: it follows the highlight as you move up and down, and the mouse wheel scrolls it (click a row, or press left and right, to change its value).
 
@@ -493,33 +492,25 @@ the top or the bottom keeps the view where it was looking. It is saved as
   Off-screen pickups and wildlife, and all enemies, retain their original
   update limits. Any other class seen frozen on screen is named once in the
   log (`[UPDATE] drawn but beyond its update distance`).
-- **Keep bodies**: the dead stay where they fell. A dead AI actor's update
-  (`sub_0013D000`) counts time since death at +0x52C; past 3.5 s it fades
-  the body and sinks it into the ground, and at 5 s removes it. With the
-  setting on that clock is held at 2 s, except for actors that respawn
-  (+0x5AA). Bodies are not kept in the stealth level (pod 05), whose alarms
-  were built around the dead disappearing: an alarm box stands down only 10 s
-  after no alerted Sleg is left near it (`sub_00128380` counts them from the
-  Sleg list, where a kept body stayed), and sends the nearest Sleg to raise
-  it, so with bodies kept the alarm never ended, the security gates stayed
-  shut, and reinforcements and lockdowns misbehaved. Its decals are still
-  kept. `RECOMP_CORPSE_TRACE=1` logs deaths, fades and actor changes;
-  `RECOMP_DEBUG_KILL=<s>` zeroes the dinosaurs' health that long into a level.
-- The same setting keeps decals: blood splats, bullet holes, scorch marks and gibs last ten
-  minutes instead of 3 to 20 seconds. They are particles, each kind a PARTDEF
-  text the particle system parses as a level loads (`sub_000B0110`); its eighth
-  value, the life in seconds, is stored by `sub_000AF2A0`. Definitions whose
-  texture or mesh is a splat, bullet hole, scorch or gore piece get the longer
-  life; switching the setting re-applies it at once, and off leaves every
-  life as the game has it. `RECOMP_PARTICLE_TRACE=1` lists the definitions.
-  Effect parts with attached emitters keep their original lifetime
-  (`sub_000AF9A0`): some steam controllers reuse a bullet-hole texture, and
-  extending them made pipe steam accumulate and overlap with Keep bodies on.
-  Explosion fireballs (`1txt_fireB3_.tga`) are not kept: they play their
-  texture over their life, so ten minutes of it hid the explosions and their
-  build-up crowded out new effects such as rocket smoke trails. In the flying
-  levels (the "flight" chapters, pod 02, 09, 13 and 17) neither bodies nor
-  decals are kept.
+- **Decals last longer**: blood splats, bullet holes, scorch marks and gibs
+  last a minute instead of the game's 3 to 20 seconds. They are particles,
+  each kind a PARTDEF text the particle system parses as a level loads
+  (`sub_000B0110`); its eighth value, the life in seconds, is stored by
+  `sub_000AF2A0`. Definitions whose texture or mesh is a splat, bullet hole,
+  scorch or gore piece get the longer life. `RECOMP_PARTICLE_TRACE=1` lists
+  the definitions. Effect parts with attached emitters keep their original
+  lifetime (`sub_000AF9A0`): some steam controllers reuse a bullet-hole
+  texture, and extending them made pipe steam accumulate and overlap.
+  Explosion fireballs (`1txt_fireB3_.tga`) are not extended: they play their
+  texture over their life. In the flying levels (the "flight" chapters, pod
+  02, 09, 13 and 17) decals keep the game's lives. Dead bodies fade and are
+  removed as on the Xbox: an earlier "Keep bodies" option was dropped
+  because too much of the game waits on them being removed -- the stealth
+  level's alarms (`sub_00128380` counts the Slegs left near an alarm box),
+  and generators (the Senate Chambers' roof drop) that open a door only once
+  their spawns are destroyed. `RECOMP_CORPSE_TRACE=1` logs deaths, fades and
+  actor changes; `RECOMP_DEBUG_KILL=<s>` zeroes the dinosaurs' health that
+  long into a level.
 - **Particle limit**: a level's particle manager holds at least
   `RECOMP_PARTICLES` particles (default 4000, 1000 to 20000; the game asks
   for 1000). Before an effect is emitted (`sub_000B9700`) the game drops it
@@ -592,7 +583,7 @@ and the pickup checks run the original visibility and update-distance gates.
 | `src/main.c` | Host entry point: loads the XBE, sets the runtime defaults below, calls the game's entry point |
 | `src/game_files.c` | Finds the player's USA disc files, checks `default.xbe`, and extracts a disc image (XDVDFS) into `game` |
 | `src/video_settings.c` | The Video Options page: builds `patch0.tre` from the disc's menus (its `.tre` and screen formats are described there), keeps `turok_settings.ini`, and applies the page's values through the history values the menu writes |
-| `src/recomp_manual.c` | Hand-written overrides: D3D's GetVisibilityTestResult (sub_00194B40) completes unfinished tests as visible; DirectSound's idle-voice handler (sub_001B23DD) ignores voices nobody owns (the emulated APU could report one, and quitting a level crashed); with enhanced shadows, the shadow manager's constructor (sub_0017D5C0) takes its map size from `RECOMP_SHADOW_MAP`, the light camera's fit (sub_0017DAF0, through the camera FOV setter sub_0001FD20) its distance and a wider area around the player, and the shadow caster check (sub_000F21B0) passes creatures out of view; the box-in-view test (sub_00021A90) settles 95% of its calls natively, with the original's x87 roundings (`RECOMP_CULL_VERIFY=1` checks every answer against the original); D3D KickOff (sub_001984B0/sub_00198480) skips the write-combine flush handshake and the vblank handler (sub_0019D580) drops PMC_INTR's PCRTC bit before its acknowledge spin -- both waited on the toolkit's GPU thread; the movement integrator (sub_00042450) takes a flight path's orientation without rotation collision (Escape Flight's ships tumbled at the ceiling at 120 fps); the aim wobble of scoped guns (sub_0011B220) and drawn bows (sub_0011CD30, sub_0011E9E0, and the update sub_00122CD0 through the view turn sub_001421B0 and aim setter sub_00038E10) steps at most 60 times a second; above 60 fps, the swim states' velocity steering (sub_00148950) acts per second as at 60, and surfacing (the underwater test sub_00144B90 from 0x151D9D) lifts the player to a 60 fps clearance through the set-position sub_0003F380; on ladders, the view turn (sub_001435C0 from the climb sub_0014A920) holds its pitch target within 85 degrees, or with Ladder freelook turns the view as on foot, and the climb update (sub_0014D6A0) and climb exit (sub_0014D7D0) turn the body to the view on the way off; the walk bob (sub_00149BE0) sees the player's speed smoothed over a tenth of a second, so ground where collision moves the player only every other frame no longer shakes the gun up and down (`RECOMP_BOB_TRACE=1` logs it per frame); the drain of DirectSound's finished-voice list (the pop sub_001AE520 from 0x1B2334) skips an entry whose object is no longer a voice (freed and reused), which crashed in AddRef on the kernel thunk at 0xFE00019C |
+| `src/recomp_manual.c` | Hand-written overrides: D3D's GetVisibilityTestResult (sub_00194B40) completes unfinished tests as visible; DirectSound's idle-voice handler (sub_001B23DD) ignores voices nobody owns (the emulated APU could report one, and quitting a level crashed); with enhanced shadows, the shadow manager's constructor (sub_0017D5C0) takes its map size from `RECOMP_SHADOW_MAP`, the light camera's fit (sub_0017DAF0, through the camera FOV setter sub_0001FD20) its distance and a wider area around the player, and the shadow caster check (sub_000F21B0) passes creatures out of view; the box-in-view test (sub_00021A90) settles 95% of its calls natively, with the original's x87 roundings (`RECOMP_CULL_VERIFY=1` checks every answer against the original); D3D KickOff (sub_001984B0/sub_00198480) skips the write-combine flush handshake and the vblank handler (sub_0019D580) drops PMC_INTR's PCRTC bit before its acknowledge spin -- both waited on the toolkit's GPU thread; the movement integrator (sub_00042450) takes a flight path's orientation without rotation collision (Escape Flight's ships tumbled at the ceiling at 120 fps); the aim wobble of scoped guns (sub_0011B220) and drawn bows (sub_0011CD30, sub_0011E9E0, and the update sub_00122CD0 through the view turn sub_001421B0 and aim setter sub_00038E10) steps at most 60 times a second; above 60 fps, the swim states' velocity steering (sub_00148950) acts per second as at 60, and surfacing (the underwater test sub_00144B90 from 0x151D9D) lifts the player to a 60 fps clearance through the set-position sub_0003F380; on ladders, the view turn (sub_001435C0 from the climb sub_0014A920) holds its pitch target within 85 degrees, or with Ladder freelook turns the view as on foot, and the climb update (sub_0014D6A0) and climb exit (sub_0014D7D0) turn the body to the view on the way off; the walk bob (sub_00149BE0) sees the player's speed smoothed over a tenth of a second, so ground where collision moves the player only every other frame no longer shakes the gun up and down (`RECOMP_BOB_TRACE=1` logs it per frame); the drain of DirectSound's finished-voice list (the pop sub_001AE520 from 0x1B2334) skips an entry whose object is no longer a voice (freed and reused), which crashed in AddRef on the kernel thunk at 0xFE00019C; the scene walk's 4x3 matrix product (sub_000E7570, a fifth of the game thread in dense views) runs natively with the generated code's rounding of each step (`RECOMP_MATRIX_VERIFY=1` runs both and reports any difference) |
 | `seeds/manual_seeds.json` | Functions only reached through pointers (XPP init) |
 | `seeds/recomp_extra_seeds.json` | Functions the disassembler misses, found by the upstream recompiler or at runtime (`tools.seed_from_log` on an `[ICALL] Failed to resolve` log). Includes the player-action thunks (`mov eax,[ecx]; mov [ecx+0x3A4],0; jmp [eax+N]`) reached only through runtime-built tables; without them fire, pause and previous weapon did nothing. `py -3 tools/scan_missed_functions.py <default.xbe> src/recomp/gen` lists code still missing (after switch tables, in gaps) to seed; its remaining five hits are data or interior addresses |
 | `patches/xboxrecomp-aknavj-turok.patch` | The toolkit changes as one diff against aknavj 11a8aa1 |

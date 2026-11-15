@@ -649,46 +649,19 @@ void sub_00038E10(void)   /* set the aim point (this-call, ret 4) */
     sub_00038E10_gen();
 }
 
-/* ── Keep bodies (Video Options) ───────────────────────────────
- *
- * A dead AI actor's update (sub_0013D000, this-call, ret 4, the frame's
- * seconds) counts time since death at +0x52C: past 3.5 s it eases the
- * body's alpha to nothing and sinks it into the ground (0.3 units a
- * second), and at 5 s puts it in state 0x3E, gone -- or, for an actor that
- * respawns (+0x5AA, after a further +0x528 seconds), brings it back. With
- * Keep bodies on, a body that does not respawn has its clock held at two
- * seconds, so it stays where it fell for the rest of the level. Not in the
- * stealth level (video_settings_keep_bodies): there the alarms count and
- * send the Slegs around them, and a body left lying still counted as one. */
-extern void sub_0013D000_gen(void);
-extern int video_settings_keep_bodies(void);
-
-void sub_0013D000(void)
-{
-    uint32_t self = g_ecx;
-    if (video_settings_keep_bodies() && !(TUROK_MEM32(self + 0x5AAu) & 0xFFu) &&
-            guest_float(self + 0x52Cu) > 2.0f) {
-        float hold = 2.0f;
-        uint32_t bits;
-        memcpy(&bits, &hold, 4);
-        TUROK_MEM32(self + 0x52Cu) = bits;
-    }
-    sub_0013D000_gen();
-}
-
-/* ── Keep decals (Video Options) ───────────────────────────────
+/* ── Longer-lasting decals ──────────────────────────────────────
  *
  * Blood splats, bullet holes, scorch marks and gibs are particles: each kind
  * a PARTDEF text (data\particle\...\*.parx) that the particle system
  * parses (sub_000B0110, this-call: ?, the text, its length, ?) as a level
  * loads. Its eighth value is the particle's life in seconds -- 3 to 20 for
- * these -- which the parser stores through sub_000AF2A0 (+0x7C). With Keep
- * decals on, the definitions whose texture or mesh is a splat, a bullet
- * hole, a scorch or a gore piece get ten minutes instead. Effect parts with
- * attached emitters retain their own life, even if their parent definition
- * uses a decal texture (as several steam effects do). Off, they keep
- * the game's own lives. Every such definition is remembered with its own
- * life, so switching the setting re-applies at once (keep_decals_frame);
+ * these -- which the parser stores through sub_000AF2A0 (+0x7C). The
+ * definitions whose texture or mesh is a splat, a bullet hole, a scorch or
+ * a gore piece get a minute instead, except in the flying levels
+ * (video_settings_keep_decals). Effect parts with attached emitters retain
+ * their own life, even if their parent definition uses a decal texture (as
+ * several steam effects do). Every such definition is remembered with its
+ * own life, so the rule re-applies when it changes (keep_decals_frame);
  * particles already out keep the life they were given.
  * RECOMP_PARTICLE_TRACE=1 lists the definitions. */
 extern void sub_000B0110_gen(void);
@@ -696,7 +669,7 @@ extern void sub_000AF2A0_gen(void);
 extern void sub_000AF9A0_gen(void);
 extern int video_settings_keep_decals(void);
 
-#define KEEP_DECAL_SECONDS 600.0f
+#define KEEP_DECAL_SECONDS 60.0f
 #define KEEP_DECAL_DEFS 1024
 static int s_partdef_keepsake;   /* the PARTDEF being parsed is a decal or gib */
 static struct { uint32_t def; float own, set; int emitter_parent; } s_keep_defs[KEEP_DECAL_DEFS];
@@ -807,7 +780,7 @@ void sub_000AF9A0(void)
 {
     /* Effect-part constructor: (PARTDEF *, emitter *, ...). This binding is
      * available after parsing and before the first particle is spawned.
-     * Extending a parent keeps its child emitter running for ten minutes. */
+     * Extending a parent keeps its child emitter running for the extended life. */
     if (TUROK_MEM32(g_esp + 8))
         keep_decals_emitter_parent(TUROK_MEM32(g_esp + 4));
     sub_000AF9A0_gen();
@@ -965,8 +938,8 @@ void sub_000966F0(void)
  * priority * 4: 70, 60, 50 and 40% for priorities 1 to 4, less under
  * load), and always about 5% past it.
  *
- * With Keep bodies on, blood, bullet holes and gibs stay out for ten
- * minutes, so a long fight filled those shares and new effects -- the blood
+ * Blood, bullet holes and gibs kept out for a minute (ten minutes, when
+ * this was written), so a long fight filled those shares and new effects -- the blood
  * from a severed neck among them -- stopped appearing. Now, as an effect
  * comes within 1% of its share, the oldest kept particles are removed (by
  * their own kill, vfunc +0x1C, as the game's make-room sub_000B97D0 does)
@@ -1059,7 +1032,7 @@ void sub_000B98D0(void)
     sub_000B98D0_gen();
 }
 
-/* A particle Keep bodies made long-lived: its definition (+0x48) has the
+/* A particle Keep decals made long-lived: its definition (+0x48) has the
  * long life, and the game has not marked it never to be culled. */
 static int particle_kept(uint32_t particle)
 {
@@ -2762,4 +2735,109 @@ void sub_00149BE0(void)
                 guest_float(player + 0x40Cu), guest_float(player + 0x408u),
                 state ? TUROK_MEM32(state) : 0u, state ? guest_float(state + 0x10u) : 0.0f);
     }
+}
+
+/* ── 4x3 matrix product (sub_000E7570) ─────────────────────────
+ *
+ * cdecl (out, a, b): out = a x b for the game's 4x3 matrices (rows of four
+ * floats, translation in the fourth column). The scene's transform walk
+ * (sub_000E80F0, its only caller) concatenates one for every node it
+ * visits; in dense, far-drawn scenes that was a fifth of the game thread,
+ * each x87 instruction going through the emulated register stack. Done
+ * here with the same products and sums in the same order and the generated
+ * code's rounding of each (RECOMP_FP_PC), reading and writing guest memory
+ * in the original order so an `out` that is also an input behaves the same.
+ * RECOMP_MATRIX_VERIFY=1 runs the original after it and reports any
+ * difference. */
+extern void sub_000E7570_gen(void);
+extern __declspec(thread) uint32_t g_eax, g_edx;
+
+static double mx_round(double x)
+{
+    double ax;
+    int e;
+    if (g_fp_control_word & 0x300u) return x;
+    ax = fabs(x);
+    if ((ax <= 3.4028234663852886e38 && ax >= 1.1754943508222875e-38) || ax == 0.0 || x != x || ax == INFINITY)
+        return (double)(float)x;
+    x = frexp(x, &e);
+    return ldexp((double)(float)x, e);
+}
+
+#define MX(p, i) ((double)guest_float((p) + (uint32_t)(i) * 4u))
+#define MXMUL(x, y) mx_round((x) * (y))
+#define MXADD(x, y) mx_round((x) + (y))
+
+static void mx_store(uint32_t va, double value)
+{
+    float f = (float)value;
+    uint32_t bits;
+    memcpy(&bits, &f, 4);
+    TUROK_MEM32(va) = bits;
+}
+
+/* (p1 + p2) + p3, each term rounded, in the original's order. */
+#define MXSUM3(p1, p2, p3) MXADD(MXADD(p1, p2), p3)
+
+static void matrix_product_native(uint32_t out, uint32_t a, uint32_t b)
+{
+    double v;
+    v = MXSUM3(MXMUL(MX(a, 0), MX(b, 0)), MXMUL(MX(b, 2), MX(a, 8)), MXMUL(MX(b, 1), MX(a, 4)));
+    mx_store(out + 0x00u, v);
+    v = MXSUM3(MXMUL(MX(b, 5), MX(a, 4)), MXMUL(MX(b, 6), MX(a, 8)), MXMUL(MX(a, 0), MX(b, 4)));
+    mx_store(out + 0x04u, v);
+    v = MXSUM3(MXMUL(MX(b, 9), MX(a, 4)), MXMUL(MX(b, 8), MX(a, 0)), MXMUL(MX(a, 8), MX(b, 10)));
+    mx_store(out + 0x08u, v);
+    v = MXSUM3(MXMUL(MX(b, 14), MX(a, 8)), MXMUL(MX(b, 13), MX(a, 4)), MXMUL(MX(b, 12), MX(a, 0)));
+    v = MXADD(v, MX(a, 12));
+    mx_store(out + 0x0Cu, v);
+    v = MXSUM3(MXMUL(MX(a, 1), MX(b, 0)), MXMUL(MX(a, 5), MX(b, 1)), MXMUL(MX(a, 9), MX(b, 2)));
+    mx_store(out + 0x10u, v);
+    v = MXSUM3(MXMUL(MX(a, 5), MX(b, 5)), MXMUL(MX(a, 1), MX(b, 4)), MXMUL(MX(a, 9), MX(b, 6)));
+    mx_store(out + 0x14u, v);
+    v = MXSUM3(MXMUL(MX(a, 9), MX(b, 10)), MXMUL(MX(a, 5), MX(b, 9)), MXMUL(MX(b, 8), MX(a, 1)));
+    mx_store(out + 0x18u, v);
+    v = MXSUM3(MXMUL(MX(b, 14), MX(a, 9)), MXMUL(MX(a, 5), MX(b, 13)), MXMUL(MX(b, 12), MX(a, 1)));
+    v = MXADD(v, MX(a, 13));
+    mx_store(out + 0x1Cu, v);
+    v = MXSUM3(MXMUL(MX(a, 2), MX(b, 0)), MXMUL(MX(a, 10), MX(b, 2)), MXMUL(MX(b, 1), MX(a, 6)));
+    mx_store(out + 0x20u, v);
+    v = MXSUM3(MXMUL(MX(b, 5), MX(a, 6)), MXMUL(MX(a, 2), MX(b, 4)), MXMUL(MX(a, 10), MX(b, 6)));
+    mx_store(out + 0x24u, v);
+    v = MXSUM3(MXMUL(MX(a, 10), MX(b, 10)), MXMUL(MX(b, 8), MX(a, 2)), MXMUL(MX(b, 9), MX(a, 6)));
+    mx_store(out + 0x28u, v);
+    v = MXSUM3(MXMUL(MX(b, 12), MX(a, 2)), MXMUL(MX(a, 10), MX(b, 14)), MXMUL(MX(b, 13), MX(a, 6)));
+    v = MXADD(v, MX(a, 14));
+    mx_store(out + 0x2Cu, v);
+}
+
+void sub_000E7570(void)
+{
+    static int verify = -1;
+    uint32_t out = TUROK_MEM32(g_esp + 4u), a = TUROK_MEM32(g_esp + 8u), b = TUROK_MEM32(g_esp + 12u);
+    if (verify < 0) verify = getenv("RECOMP_MATRIX_VERIFY") != NULL;
+    if (verify) {
+        /* Run both on the same inputs and compare what each wrote. */
+        uint32_t saved_out[12], saved_a[16], saved_b[16], native[12], original[12], i;
+        static unsigned checks, mismatches;
+        for (i = 0; i < 12; i++) saved_out[i] = TUROK_MEM32(out + i * 4u);
+        for (i = 0; i < 16; i++) { saved_a[i] = TUROK_MEM32(a + i * 4u); saved_b[i] = TUROK_MEM32(b + i * 4u); }
+        matrix_product_native(out, a, b);
+        for (i = 0; i < 12; i++) native[i] = TUROK_MEM32(out + i * 4u);
+        for (i = 0; i < 12; i++) TUROK_MEM32(out + i * 4u) = saved_out[i];
+        for (i = 0; i < 16; i++) { TUROK_MEM32(a + i * 4u) = saved_a[i]; TUROK_MEM32(b + i * 4u) = saved_b[i]; }
+        sub_000E7570_gen();   /* pops its return address */
+        for (i = 0; i < 12; i++) original[i] = TUROK_MEM32(out + i * 4u);
+        checks++;
+        if (memcmp(native, original, sizeof native) && mismatches++ < 16)
+            fprintf(stderr, "[MATRIX] native product differs (check %u, control word %04X)\n",
+                    checks, (unsigned)g_fp_control_word);
+        if ((checks & 0xFFFFFu) == 0)
+            fprintf(stderr, "[MATRIX] %u checks, %u differ\n", checks, mismatches);
+        return;
+    }
+    matrix_product_native(out, a, b);
+    /* As the original leaves them. */
+    g_eax = a; g_ecx = b; g_edx = out;
+    g_esp += 4u;   /* ret */
 }

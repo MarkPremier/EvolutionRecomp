@@ -66,7 +66,7 @@ extern void nv2a_gpu_set_exact_shadows(int on);
  * through its values (shown, and written in turok_settings.ini, as their
  * text). */
 enum { SET_RESOLUTION, SET_ASPECT, SET_DISPLAY, SET_VSYNC, SET_FRAMES, SET_ANISOTROPY, SET_MSAA, SET_DRAW_DISTANCE,
-       SET_HEAT_HAZE, SET_SHADOWS, SET_BODIES, SET_ICONS,
+       SET_HEAT_HAZE, SET_SHADOWS, SET_ICONS,
        SET_MOUSE_LOOK, SET_MOUSE_SPEED, SET_FLIGHT_MOUSE, SET_FLIGHT_SPEED, SET_FLIGHT_INVERT,
        SET_CONTROLLER_AIM, SET_LADDER_FREELOOK, SETTING_COUNT };
 
@@ -109,7 +109,6 @@ static const VideoSetting k_settings[SETTING_COUNT] = {
     {"draw_distance", "draw distance", k_distances, COUNT(k_distances), 1},
     {"heat_haze", "heat haze", k_hazes, COUNT(k_hazes), 2},
     {"shadows", "shadows", k_shadow_modes, COUNT(k_shadow_modes), 1},
-    {"keep_bodies", "keep bodies", k_switches, COUNT(k_switches), 0},
     {"button_icons", "button icons", k_icons, COUNT(k_icons), 0},
     {"mouse_look", "mouse look", k_mouse_looks, COUNT(k_mouse_looks), 1},
     {"mouse_speed", "mouse speed", k_speeds, COUNT(k_speeds), 4},
@@ -737,7 +736,6 @@ static int values_of(int setting)
 {
     switch (setting) {
     case SET_MSAA: return SET_ANISOTROPY;          /* off, 2x, 4x, 8x: its first four */
-    case SET_BODIES:
     case SET_FLIGHT_MOUSE:
     case SET_FLIGHT_INVERT: return SET_VSYNC;
     case SET_FLIGHT_SPEED: return SET_MOUSE_SPEED;
@@ -2035,7 +2033,6 @@ static void apply_setting(int setting)
     case SET_ICONS: nv2a_gpu_set_texture_replacements(s_values[SET_ICONS]); break;
     case SET_MOUSE_LOOK: xbox_KbmSetRawMouse(s_values[SET_MOUSE_LOOK]); s_mouse_raw = s_values[SET_MOUSE_LOOK]; break;
     case SET_DRAW_DISTANCE:           /* read each frame */
-    case SET_BODIES:
     case SET_MOUSE_SPEED:
     case SET_FLIGHT_MOUSE:
     case SET_FLIGHT_SPEED:
@@ -2146,25 +2143,17 @@ float video_settings_take_mouse_turn(int axis)
 /* Draw distance: how much further than the game's own distances (A_NDD
  * where an actor starts to fade, A_MDD where it is gone: grass and plants
  * have 15 to 25) actors with one are drawn. */
-/* Keep bodies, which keeps decals too:
+/* Decals -- blood splats, bullet holes, scorch marks and gibs -- last a
+ * minute instead of the game's 3 to 20 seconds, from the next level load
+ * (recomp_manual.c, sub_000B0110). Not in the flying levels (the
+ * pod-02/09/13/17 "flight" chapters): there what is shot down falls out of
+ * sight, and its gibs, kept, only crowd the particles the fighting needs.
  *
- * bodies: the dead stay where they fell instead of fading and sinking away
- * after three and a half seconds (recomp_manual.c, sub_0013D000);
- *
- * decals: blood splats, bullet holes, scorch marks and gibs last ten minutes
- * instead of seconds, from the next level load (recomp_manual.c,
- * sub_000B0110).
- *
- * Not in the flying levels (the pod-02/09/13/17 "flight" chapters): there
- * what is shot down falls out of sight, and its gibs, kept, only crowd the
- * particles the fighting needs.
- *
- * Bodies, not decals, are off in the stealth level (pod 05) too: its alarms
- * stand down only once no alerted Sleg is left near them, and send the
- * nearest Sleg to raise them, and a body left lying still counted as one --
- * the alarm never ended and the security gates stayed shut. */
+ * (The "Keep bodies" option, which held the dead where they fell, and with
+ * it "Keep decals", were removed: too much of the game waits on bodies
+ * being removed -- the stealth level's alarms, generators that open doors
+ * once their spawns are gone -- and kept bodies softlocked it.) */
 static int s_flying_level;
-static int s_stealth_level;
 /* Indoors (the base interiors of pods 05 and 06, Sleg City's pods 10-12): a
  * room under a roof is all in shadow, so the shadow map's edge beside the
  * player shows there (recomp_manual.c, sub_0001FD20). */
@@ -2180,11 +2169,6 @@ void video_settings_level(const char *path)
     s_flying_level = strstr(lower, "-flight") != NULL;
     s_indoor_level = strstr(lower, "\\pod-05-") || strstr(lower, "\\pod-06-") || strstr(lower, "-s-city-");
     if (s_indoor_level) fprintf(stderr, "[VIDEO] indoor level: shadows reach further around the player\n");
-    s_stealth_level = strstr(lower, "\\pod-05-") != NULL;
-    if (s_flying_level && s_values[SET_BODIES])
-        fprintf(stderr, "[VIDEO] flying level: keep bodies is off here\n");
-    if (s_stealth_level && s_values[SET_BODIES])
-        fprintf(stderr, "[VIDEO] stealth level: keep bodies keeps only decals here\n");
 }
 
 int video_settings_indoor_level(void)
@@ -2203,14 +2187,9 @@ int video_settings_enhanced_shadows(void)
 }
 
 
-int video_settings_keep_bodies(void)
-{
-    return s_values[SET_BODIES] && !s_flying_level && !s_stealth_level;
-}
-
 int video_settings_keep_decals(void)
 {
-    return s_values[SET_BODIES] && !s_flying_level;
+    return !s_flying_level;
 }
 
 float video_settings_draw_distance(void)

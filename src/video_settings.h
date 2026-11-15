@@ -32,7 +32,6 @@ float video_settings_draw_distance(void);
 void video_settings_level(const char *path);
 /* The level is one of the indoor ones (pods 05, 06 and 10-12). */
 int video_settings_indoor_level(void);
-int video_settings_keep_bodies(void);
 int video_settings_keep_decals(void);
 float video_settings_wide_factor(void);
 

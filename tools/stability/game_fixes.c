@@ -99,25 +99,25 @@ static void test_decals(void)
     g_ecx = 0x20000; g_esp = 0x30000;
     put_float(g_esp + 4, 3);
     sub_000AF2A0();
-    assert(s_keep_count == 1 && guest_float(0x2007C) == 600);
+    assert(s_keep_count == 1 && guest_float(0x2007C) == 60);
     keep_decals_frame();
     keep = 0; keep_decals_frame();
     assert(guest_float(0x2007C) == 3);
     keep = 1; keep_decals_frame();
-    assert(guest_float(0x2007C) == 600);
+    assert(guest_float(0x2007C) == 60);
 
     /* World teardown followed by another object at exactly the same address. */
     keep_decals_reset();
-    keep = 0; put_float(0x2007C, 600); keep_decals_frame();
-    assert(s_keep_count == 0 && guest_float(0x2007C) == 600);
+    keep = 0; put_float(0x2007C, 60); keep_decals_frame();
+    assert(s_keep_count == 0 && guest_float(0x2007C) == 60);
 
     /* Reparsing a recorded definition as a non-decal also invalidates it. */
     keep = 1; s_partdef_keepsake = 1; g_ecx = 0x20000; g_esp = 0x30000;
     put_float(g_esp + 4, 3); sub_000AF2A0();
     s_partdef_keepsake = 0; g_ecx = 0x20000; g_esp = 0x30000;
-    put_float(g_esp + 4, 600); sub_000AF2A0();
+    put_float(g_esp + 4, 60); sub_000AF2A0();
     keep = 0; keep_decals_frame();
-    assert(s_keep_count == 0 && guest_float(0x2007C) == 600);
+    assert(s_keep_count == 0 && guest_float(0x2007C) == 60);
     puts("PASS: decal lifetime reset, live toggles, and reparsed definitions");
 }
 
@@ -155,15 +155,15 @@ static void test_emitter_lifetimes(void)
     keep_decals_reset(); keep = 1;
     /* Steam parents reuse a bullet-hole texture; real bullet holes have no emitter. */
     define_keepsake(parent, 5); define_keepsake(decal, 10);
-    assert(guest_float(parent + 0x7C) == 600);
+    assert(guest_float(parent + 0x7C) == 60);
     bind_effect(parent, 0x50000); bind_effect(decal, 0);
     assert(guest_float(parent + 0x7C) == 5);
-    assert(guest_float(decal + 0x7C) == 600);
+    assert(guest_float(decal + 0x7C) == 60);
     keep_decals_frame();
     keep = 0; keep_decals_frame();
     assert(guest_float(parent + 0x7C) == 5 && guest_float(decal + 0x7C) == 10);
     keep = 1; keep_decals_frame();
-    assert(guest_float(parent + 0x7C) == 5 && guest_float(decal + 0x7C) == 600);
+    assert(guest_float(parent + 0x7C) == 5 && guest_float(decal + 0x7C) == 60);
 
     /* Binding while disabled must still prevent a later toggle extending steam. */
     keep_decals_reset(); keep = 0;
@@ -177,7 +177,7 @@ static void test_emitter_lifetimes(void)
     keep = 0; keep_decals_frame(); keep = 1; keep_decals_frame();
     assert(guest_float(parent + 0x7C) == 7);
     define_keepsake(parent, 3); bind_effect(parent, 0);
-    assert(guest_float(parent + 0x7C) == 600);
+    assert(guest_float(parent + 0x7C) == 60);
     keep = 0; keep_decals_frame();
     assert(guest_float(parent + 0x7C) == 3);
 
@@ -222,7 +222,7 @@ static void make_particles(unsigned count, int kept)
     for (priority = 0; priority < 5; priority++)
         for (kind = 0; kind < 2; kind++)
             TUROK_MEM32(manager + (kind ? 0x26C8 : 0x1E1C) + priority * 0x1BC + 0x1A4) = 0;
-    put_float(0x6007C, 600);
+    put_float(0x6007C, 60);
     TUROK_MEM32(0x7001C) = 0x123456;
     for (n = 0; n < count; n++) {
         uint32_t at = 0x100000 + n * 0x200;
