@@ -57,6 +57,10 @@ CPU-renderer build (about 9 fps on the title screen).
   - the ambient birds (FlyingIndigenousAI) cast none once more than 10 units
     above the player's height: their blobs landed far below them. Birds
     taking off nearby keep theirs.
+  - the sky stays lit: past the end of the light's depth range (the sky,
+    distant backdrops) the game's compare found nothing nearer than "no
+    caster", and the far sky darkened in a trapezoid over the map's
+    footprint.
 
   The longer reach has a side effect the Xbox never shows: the game draws
   only creatures into the shadow map, not floors, so an enemy on a balcony
@@ -64,7 +68,8 @@ CPU-renderer build (about 9 fps on the title screen).
   hall below. The map's size changes when the game next starts; the rest at
   once. `RECOMP_SHADOW_DISTANCE`, `RECOMP_SHADOW_AROUND`, `RECOMP_SHADOW_MAP`,
   `RECOMP_SHADOW_OFFSCREEN`, `RECOMP_SHADOW_EXACT`, `RECOMP_SHADOW_SCALE`,
-  `RECOMP_SHADOW_BIRD_HEIGHT` and `RECOMP_SHADOW_BIRDS=1` tune Enhanced.
+  `RECOMP_SHADOW_FAR_LIT`, `RECOMP_SHADOW_BIRD_HEIGHT` and
+  `RECOMP_SHADOW_BIRDS=1` tune Enhanced.
 - The window shows frames straight from the GPU through a swap chain, so it
   resizes and maximises freely (the frame stays 4:3, letterboxed), opens at
   the largest multiple of 640x480 that fits the screen, and **Alt+Enter**
@@ -373,7 +378,7 @@ effect at once and are kept in `turok_settings.ini` beside the exe:
 | Keep weapons | off, on (off by default; weapons you own stay yours from level to level; on the PC Settings page) | |
 | Draw distance | normal, 2x, 4x, 8x (2x by default) | |
 | Heat haze | off, xbox, enhanced (enhanced by default; off removes distortion; xbox keeps the original effect; enhanced refracts the full-resolution scene with filtered offsets and feathered edges) | |
-| Shadows | xbox, enhanced (enhanced by default; see Shadows above -- the shadow map's size changes when the game next starts) | `RECOMP_SHADOW_EXACT`, `RECOMP_SHADOW_SCALE` override parts |
+| Shadows | xbox, enhanced (enhanced by default; see Shadows above -- the shadow map's size changes when the game next starts) | `RECOMP_SHADOW_EXACT`, `RECOMP_SHADOW_SCALE`, `RECOMP_SHADOW_FAR_LIT` override parts |
 
 The page shows ten rows at a time and scrolls: it follows the highlight as you move up and down, and the mouse wheel scrolls it (click a row, or press left and right, to change its value).
 
