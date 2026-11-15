@@ -178,6 +178,65 @@ void sub_001B22DA(void)
     sub_001B22DA_gen();
 }
 
+/* The drain of +0x748 itself pops each entry with sub_001AE520 (stdcall,
+ * the node; unlinks it and returns it, from 0x1B2334) and calls its object's
+ * vfunc +0x14 (the object is the node - 0x54). Crashes have still come from
+ * an entry whose object was freed and reused by then: a valid link to an
+ * object that is no longer a voice, whose slot 5 is AddRef (sub_001AEB48),
+ * which reads the kernel thunk at 0xFE00019C and takes the process down. So
+ * each entry is checked as it is popped: its object must be one of
+ * DirectSound's voices (the handle table at +0x330, 256 entries) or have a
+ * vtable a voice there has -- a voice whose handle is already released
+ * still gets its notification. Anything else is unlinked (without writing
+ * into the object) and skipped. */
+extern void sub_001AE520_gen(void);
+extern __declspec(thread) uint32_t g_edi, g_esi;
+
+static int dsound_voice_ok(uint32_t ds, uint32_t obj)
+{
+    static uint32_t tables[16];
+    static int count;
+    uint32_t vt, h, i;
+
+    if (!dsound_link_ok(obj)) return 0;
+    vt = TUROK_MEM32(obj);
+    if (!dsound_link_ok(vt & 0x7FFFFFFFu) || TUROK_MEM32(vt + 0x14u) == 0x001AEB48u) return 0;
+    for (h = 0; h < 0x100u; h++) {
+        uint32_t voice = TUROK_MEM32(ds + 0x330u + h * 4u), t;
+        if (voice == obj) return 1;
+        if (!voice || !dsound_link_ok(voice)) continue;
+        t = TUROK_MEM32(voice);
+        for (i = 0; i < (uint32_t)count && tables[i] != t; i++) {}
+        if (i == (uint32_t)count && count < 16 && TUROK_MEM32(t + 0x14u) != 0x001AEB48u) tables[count++] = t;
+    }
+    for (i = 0; i < (uint32_t)count; i++)
+        if (tables[i] == vt) return 1;
+    return 0;
+}
+
+void sub_001AE520(void)
+{
+    if (TUROK_MEM32(g_esp) == 0x001B2339u && g_edi == g_esi + 0x748u) {
+        uint32_t ds = g_esi, head = g_edi, node = TUROK_MEM32(g_esp + 4u), guard = 0;
+        while (node != head && !dsound_voice_ok(ds, node - 0x54u) && guard++ < 256u) {
+            uint32_t next = TUROK_MEM32(node), prev = TUROK_MEM32(node + 4u);
+            fprintf(stderr, "[DSOUND] skipped a finished-voice entry that is not a voice (object %08X)\n",
+                    node - 0x54u);
+            if (dsound_link_ok(next) && dsound_link_ok(prev) &&
+                TUROK_MEM32(prev) == node && TUROK_MEM32(next + 4u) == node) {
+                TUROK_MEM32(prev) = next;
+                TUROK_MEM32(next + 4u) = prev;
+            } else {
+                TUROK_MEM32(head) = head;
+                TUROK_MEM32(head + 4u) = head;
+            }
+            node = TUROK_MEM32(head);
+        }
+        TUROK_MEM32(g_esp + 4u) = node;
+    }
+    sub_001AE520_gen();
+}
+
 /* ── D3D KickOff without the write-combine handshake ───────────
  *
  * Before publishing DMA_PUT, KickOff (sub_001984B0) and its flush helper
@@ -1819,28 +1878,60 @@ void sub_0003C9E0(void)
  * so with the draw distance setting butterflies were drawn hanging frozen
  * until close. Theirs is scaled with the draw distance. Visible pickups
  * must also keep updating regardless of the setting, or their rotation and
- * bobbing freeze a few metres away. Off-screen pickups and other actors
- * keep the original cutoff, as more actors updating costs frame rate.
+ * bobbing freeze a few metres away. So must visible wildlife -- the frogs,
+ * fish, birds and other critters, whose AU_D is often shorter than the
+ * distance they are drawn at even with the original draw distance (the
+ * Xbox froze them in mid-hop too). +0x53 is set by the actor's draw
+ * (sub_000448D0) when it is drawn this frame, so only what is on screen
+ * gains updates. Off-screen pickups and other actors keep the original
+ * cutoff, as more actors updating costs frame rate, and enemies keep it so
+ * they do not wake from further away.
  * Butterflies are the FlyingIndigenousAI (vtable 0x21A240) with
  * FlyingPerturb (+0x7F8) 3: no bird, dragonfly or pteranodon has it. */
 extern void sub_0003B110_gen(void);
+
+static int wildlife_vtable(uint32_t table)
+{
+    return table == 0x0021B0D0u ||  /* IndigenousAI */
+           table == 0x0021A7B0u ||  /* AquaticIndigenousAI */
+           table == FLYING_INDIGENOUS_AI_VTABLE ||
+           table == 0x0021C0C0u ||  /* AnimalAI */
+           table == 0x0021BAF0u;    /* GroupAnimalAI */
+}
 
 void sub_0003B110(void)
 {
     float scale = video_settings_draw_distance(), reach;
     uint32_t actor = TUROK_MEM32(g_esp + 4u), bits, table = actor ? TUROK_MEM32(actor) : 0;
-    int visible_pickup = actor && *(uint8_t *)((uintptr_t)(actor + 0x53u) + g_xbox_mem_offset) &&
-        (table == 0x001FCFB8u || table == 0x00210450u || table == 0x002255F0u); /* Pickup, TurokPickup, MPPickup */
+    int drawn = actor && *(uint8_t *)((uintptr_t)(actor + 0x53u) + g_xbox_mem_offset);
+    int visible_always = drawn &&
+        (table == 0x001FCFB8u || table == 0x00210450u || table == 0x002255F0u || /* Pickup, TurokPickup, MPPickup */
+         wildlife_vtable(table));
 
-    if (!visible_pickup && (scale == 1.0f || table != FLYING_INDIGENOUS_AI_VTABLE ||
+    if (!visible_always && (scale == 1.0f || table != FLYING_INDIGENOUS_AI_VTABLE ||
         TUROK_MEM32(actor + 0x7F8u) != 3u)) {
         sub_0003B110_gen();
+        /* Name any other class seen frozen on screen, once each, so the
+         * next report of a frozen creature says what it is. */
+        if (drawn && !g_eax) {
+            static uint32_t seen[32];
+            static int count;
+            int i;
+            for (i = 0; i < count && seen[i] != table; i++) {}
+            if (i == count && count < 32) {
+                seen[count++] = table;
+                bits = TUROK_MEM32(actor + 0x1D0u);
+                memcpy(&reach, &bits, 4);
+                fprintf(stderr, "[UPDATE] drawn but beyond its update distance: vtable 0x%06X, AU_D %.1f\n",
+                        table, reach);
+            }
+        }
         return;
     }
     bits = TUROK_MEM32(actor + 0x1D0u);
     memcpy(&reach, &bits, 4);
     if (!(reach > 0.0f)) { sub_0003B110_gen(); return; }
-    reach = visible_pickup ? 0.0f : reach * scale; /* AU_D zero means unlimited. */
+    reach = visible_always ? 0.0f : reach * scale; /* AU_D zero means unlimited. */
     memcpy((void *)((uintptr_t)(actor + 0x1D0u) + g_xbox_mem_offset), &reach, 4);
     sub_0003B110_gen();
     TUROK_MEM32(actor + 0x1D0u) = bits;
@@ -2599,4 +2690,76 @@ void sub_0014D6A0(void)
     /* Not again if the exit (inside the update) already turned it. */
     if (player && !s_ladder_turned && before != 0.0f && guest_float(player + 0x400u) == 0.0f)
         ladder_turn_body(player, s_ladder_yaw, "at the top");
+}
+
+/* ── Walk bob (sub_00149BE0) ───────────────────────────────────
+ *
+ * this-call (the player), arg dt, ret 4. Sets the view model's bob: +0x40C
+ * (vertical) straight from |trig(step phase)| x amplitude x a speed factor,
+ * +0x408 (lateral) eased towards its target. The factor is this frame's
+ * movement (+0x38 minus last frame's position, +0xAC) over the state's
+ * speed x dt, clamped to 0..1. On some ground (Chapter 6's paths, slopes,
+ * seams) collision lets the player move only every other frame or so --
+ * full steps between frames of nothing or a tenth of one -- so the factor
+ * flicked between 1 and 0 and the gun shook up and down by its whole bob
+ * (the sideways bob is eased, so only the vertical shook). The bob now sees
+ * the player's speed over about a tenth of a second: the last position is
+ * moved, for the length of the call, to where that speed would have come
+ * from. Steady walking gives the same bob as before. RECOMP_BOB_TRACE logs
+ * the raw and smoothed movement per frame. */
+extern void sub_00149BE0_gen(void);
+
+#define BOB_SMOOTH_SECONDS 0.1f
+#define BOB_MAX_SPEED      40.0f   /* a teleport or respawn is not walking */
+
+void sub_00149BE0(void)
+{
+    static int trace = -1;
+    static struct { uint32_t player; float vx, vz; } smooth[4];
+    uint32_t player = g_ecx, old_x = 0, old_z = 0, new_x = 0, new_z = 0;
+    float dt = guest_float(g_esp + 4u), dx = 0, dz = 0, vx = 0, vz = 0;
+    int slot = -1, i;
+
+    if (trace < 0) trace = getenv("RECOMP_BOB_TRACE") != NULL;
+    if (player && dt > 0.001f && dt < 0.5f) {
+        float x = guest_float(player + 0x38u), z = guest_float(player + 0x40u), speed, k;
+        for (i = 0; i < 4 && smooth[i].player != player; i++) {}
+        if (i == 4) {   /* a new player: take a free or the first slot, starting from rest */
+            for (i = 0; i < 4 && smooth[i].player; i++) {}
+            if (i == 4) i = 0;
+            smooth[i].player = player;
+            smooth[i].vx = smooth[i].vz = 0;
+        }
+        slot = i;
+        dx = x - guest_float(player + 0xACu);
+        dz = z - guest_float(player + 0xB4u);
+        vx = dx / dt;
+        vz = dz / dt;
+        speed = sqrtf(vx * vx + vz * vz);
+        if (!isfinite(speed) || speed > BOB_MAX_SPEED) vx = vz = 0;
+        k = 1.0f - expf(-dt / BOB_SMOOTH_SECONDS);
+        smooth[slot].vx += (vx - smooth[slot].vx) * k;
+        smooth[slot].vz += (vz - smooth[slot].vz) * k;
+        old_x = TUROK_MEM32(player + 0xACu);
+        old_z = TUROK_MEM32(player + 0xB4u);
+        put_guest_float(player + 0xACu, x - smooth[slot].vx * dt);
+        put_guest_float(player + 0xB4u, z - smooth[slot].vz * dt);
+        new_x = TUROK_MEM32(player + 0xACu);
+        new_z = TUROK_MEM32(player + 0xB4u);
+    }
+    sub_00149BE0_gen();
+    if (slot >= 0) {
+        /* Put the real last position back, unless something in the call set
+         * a new one. */
+        if (TUROK_MEM32(player + 0xACu) == new_x) TUROK_MEM32(player + 0xACu) = old_x;
+        if (TUROK_MEM32(player + 0xB4u) == new_z) TUROK_MEM32(player + 0xB4u) = old_z;
+    }
+    if (trace && player) {
+        uint32_t state = TUROK_MEM32(player + 0x12Cu);
+        fprintf(stderr, "[BOB] dt %.4f move %.4f %.4f (%.2f/s, smoothed %.2f/s) y %.4f x %.4f state %u t %.3f\n",
+                dt, dx, dz, sqrtf(vx * vx + vz * vz),
+                slot >= 0 ? sqrtf(smooth[slot].vx * smooth[slot].vx + smooth[slot].vz * smooth[slot].vz) : 0.0f,
+                guest_float(player + 0x40Cu), guest_float(player + 0x408u),
+                state ? TUROK_MEM32(state) : 0u, state ? guest_float(state + 0x10u) : 0.0f);
+    }
 }

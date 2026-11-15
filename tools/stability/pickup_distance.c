@@ -52,14 +52,23 @@ int main(void)
             assert(!updates(pickups[i], 0, 2, 5));
             TUROK_MEM32(0x10000 + 0x1D4) = 0;
         }
+        {
+            const uint32_t wildlife[] = {0x21B0D0, 0x21A7B0, 0x21C0C0, 0x21BAF0};
+            for (unsigned i = 0; i < sizeof wildlife / sizeof wildlife[0]; i++) {
+                assert(updates(wildlife[i], 1, 1000, 5)); /* On screen: every setting. */
+                assert(updates(wildlife[i], 0, 2, 5));
+                assert(!updates(wildlife[i], 0, 20, 5)); /* Off screen: the original cutoff. */
+            }
+        }
         assert(!updates(0x123456, 1, 20, 5)); /* AI/scenery cutoff is untouched. */
         assert(updates(0x123456, 1, 20, 0)); /* Original unlimited actors. */
         TUROK_MEM32(0x10000 + 0x7F8) = 3;
-        assert(updates(FLYING_INDIGENOUS_AI_VTABLE, 1, 6, 5) == (s > 1));
+        assert(updates(FLYING_INDIGENOUS_AI_VTABLE, 0, 6, 5) == (s > 1)); /* Off-screen butterflies scale. */
         TUROK_MEM32(0x10000 + 0x7F8) = 2;
-        assert(!updates(FLYING_INDIGENOUS_AI_VTABLE, 1, 6, 5));
+        assert(!updates(FLYING_INDIGENOUS_AI_VTABLE, 0, 6, 5));
+        assert(updates(FLYING_INDIGENOUS_AI_VTABLE, 1, 1000, 5)); /* On-screen birds update. */
     }
-    puts("PASS: visible pickups update at all draw distances; hidden actors, AI, butterflies, guest ABI and AU_D are preserved");
+    puts("PASS: visible pickups and wildlife update at all draw distances; hidden actors, AI, butterflies, guest ABI and AU_D are preserved");
     return 0;
 }
 #else
