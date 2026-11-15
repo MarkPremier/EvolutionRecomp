@@ -279,6 +279,17 @@ int turok_software_method_native(uint32_t parameter)
         TUROK_MEM32(registers + 0x324Cu) = TUROK_MEM32(registers + 0x401A88u);
         return 1;
     }
+    if (type == 5) {
+        /* RECOMP_BLOCK_WATCH_TEST=<n>: lose every n-th BlockOnTime wake-up,
+         * as the GET race does (see d3d_wait.c), to exercise the watcher. */
+        static int every = -1;
+        static unsigned count;
+        if (every < 0) {
+            const char *value = getenv("RECOMP_BLOCK_WATCH_TEST");
+            every = value ? atoi(value) : 0;
+        }
+        return every > 0 && ++count % (unsigned)every == 0;
+    }
     if (type != 3 && type != 4) return 0;
     descriptor = (parameter >> 5) | 0x80000000u;
     list = TUROK_MEM32(descriptor);
@@ -317,6 +328,19 @@ void sub_0019D580(void)
     if (regs)
         TUROK_MEM32(regs + 0x100u) &= ~0x01000000u;
     sub_0019D580_gen();
+}
+
+/* BlockOnTime (sub_00198650, stdcall: GPU time, flags) with a watcher that
+ * releases a wait whose wake-up was lost: d3d_wait.c. */
+extern void sub_00198650_gen(void);
+extern int d3d_wait_begin(uint32_t time);
+extern void d3d_wait_end(void);
+
+void sub_00198650(void)
+{
+    int watched = d3d_wait_begin(TUROK_MEM32(g_esp + 4u));
+    sub_00198650_gen();
+    if (watched) d3d_wait_end();
 }
 
 void sub_00198480(void)
@@ -2255,6 +2279,157 @@ void sub_00042450(void)
     if (lift) TUROK_MEM32(actor + 0x34u) = flags | 4u;
     sub_00042450_gen();
     if (lift) TUROK_MEM32(actor + 0x34u) &= ~4u;
+}
+
+/* ── Path component trace (RECOMP_PATH_TRACE=1) ──
+ * A path component (vtable 0x1FBE48) moves an actor along a path: lifts,
+ * doors, flight paths. +4 the path, +8 the position on it (points 0..n-1),
+ * +0x24 the direction (1 forward), +0x25 paused. Its update (sub_00080EE0,
+ * thiscall: actor, dt, ...) runs the follower; SetDirection
+ * (sub_0007F820, vtable +0x20) and the command handler (sub_00080240,
+ * vtable +4: a bit mask, 0x40 forward, 0x80 back, 0x100 reverse) turn it.
+ * Logs each direction change and command with the return addresses on the
+ * stack, and moving components twice a second. */
+extern void sub_0007F820_gen(void);
+extern void sub_00080240_gen(void);
+extern void sub_00080EE0_gen(void);
+static int path_trace(void)
+{
+    static int trace = -1;
+    if (trace < 0) {
+        const char *value = getenv("RECOMP_PATH_TRACE");
+        trace = value && *value && *value != '0';
+    }
+    return trace;
+}
+static unsigned s_path_lines;
+static uint32_t path_ms(void) { return (uint32_t)((double)clock() * 1000.0 / CLOCKS_PER_SEC); }
+static void path_callers(char *out, size_t size)
+{
+    size_t used = 0;
+    int found = 0;
+    out[0] = 0;
+    for (uint32_t at = g_esp; at < g_esp + 0x400u && found < 14; at += 4) {
+        uint32_t value = TUROK_MEM32(at);
+        if (value >= 0x11000u && value < 0x1F0000u) {
+            int n = snprintf(out + used, size - used, " %08X", value);
+            if (n < 0 || (size_t)n >= size - used) break;
+            used += (size_t)n;
+            found++;
+        }
+    }
+}
+/* A trigger action (sub_00163180, thiscall: ..., ..., target) opens
+ * (+0x28 == 0) or closes a door; the trace logs it with the stack. */
+extern void sub_00163180_gen(void);
+void sub_00163180(void)
+{
+    uint32_t action = g_ecx, target = TUROK_MEM32(g_esp + 0xCu);
+    if (path_trace() && s_path_lines < 20000u) {
+        char callers[160];
+        path_callers(callers, sizeof callers);
+        s_path_lines++;
+        fprintf(stderr, "[PATH] door action %08X %s target %08X (vtable %08X), tick %lu; stack%s\n",
+                action, TUROK_MEM32(action + 0x28u) ? "close" : "open", target, target ? TUROK_MEM32(target) : 0u,
+                (unsigned long)path_ms(), callers);
+    }
+    sub_00163180_gen();
+}
+
+/* ── Trigger zones: a point on a box zone's face counts as inside ──
+ * An actor's zone membership (sub_00046480, every frame) tests its position
+ * in each nearby zone's space against the zone's shapes (sub_000832A0); a
+ * box shape (sub_000B6490, this +0x34.. the half sizes, arg the point)
+ * holds it when -half <= p <= half on every axis. The Senate Chambers' end
+ * lift is started by a zone whose box ends exactly at the shaft wall, and a
+ * player riding against that wall sits on its face: at 144 fps the
+ * collision rests the player 0.0001 inside going up and 0.0004 outside going down,
+ * so the zone's leave and enter events (close and open the lift) took turns
+ * and the lift bounced in the shaft for ever, short of the top. For zone
+ * tests only (the call from 0x832F0), a box holds points within a
+ * hundredth of a unit of its faces. RECOMP_ZONE_TOLERANCE=0 turns it off. */
+extern void sub_000B6490_gen(void);
+void sub_000B6490(void)
+{
+    static int enabled = -1;
+    if (enabled < 0) {
+        const char *value = getenv("RECOMP_ZONE_TOLERANCE");
+        enabled = !(value && *value == '0');
+    }
+    if (enabled && TUROK_MEM32(g_esp) == 0x000832F0u) {
+        uint32_t box = g_ecx, point = TUROK_MEM32(g_esp + 4u);
+        int axis, inside = 1;
+        for (axis = 0; axis < 3; axis++) {
+            float p = guest_float(point + 4u * (uint32_t)axis);
+            float half = guest_float(box + 0x34u + 4u * (uint32_t)axis) + 0.01f;
+            if (!(p >= -half && p <= half)) inside = 0;
+        }
+        g_eax = (uint32_t)inside;
+        g_esp += 8;   /* ret 4 */
+        return;
+    }
+    sub_000B6490_gen();
+}
+
+void sub_0007F820(void)
+{
+    uint32_t component = g_ecx;
+    uint32_t direction = TUROK_MEM32(g_esp + 4u) & 0xFFu;
+    uint32_t before = component ? TUROK_MEM32(component + 0x24u) & 0xFFu : direction;
+    if (path_trace() && component && before != direction && s_path_lines < 20000u) {
+        char callers[160];
+        path_callers(callers, sizeof callers);
+        s_path_lines++;
+        fprintf(stderr, "[PATH] %08X direction %u -> %u at %.4f, paused %u, tick %lu; stack%s\n",
+                component, before, direction, guest_float(component + 8u),
+                (TUROK_MEM32(component + 0x24u) >> 8) & 0xFFu, (unsigned long)path_ms(), callers);
+    }
+    sub_0007F820_gen();
+}
+void sub_00080240(void)
+{
+    uint32_t component = g_ecx;
+    uint32_t command = TUROK_MEM32(g_esp + 4u), value = TUROK_MEM32(g_esp + 8u);
+    if (path_trace() && component && command && s_path_lines < 20000u) {
+        char callers[160];
+        path_callers(callers, sizeof callers);
+        s_path_lines++;
+        fprintf(stderr, "[PATH] %08X command %X value %X at %.4f, direction %u, paused %u, tick %lu; stack%s\n",
+                component, command, value, guest_float(component + 8u),
+                TUROK_MEM32(component + 0x24u) & 0xFFu, (TUROK_MEM32(component + 0x24u) >> 8) & 0xFFu,
+                (unsigned long)path_ms(), callers);
+    }
+    sub_00080240_gen();
+}
+void sub_00080EE0(void)
+{
+    static uint32_t seen[16], last_tick[16];
+    uint32_t component = g_ecx, actor = TUROK_MEM32(g_esp + 4u);
+    float dt = guest_float(g_esp + 8u), before = component ? guest_float(component + 8u) : 0.0f;
+    sub_00080EE0_gen();
+    if (path_trace() && component && s_path_lines < 20000u) {
+        float after = guest_float(component + 8u);
+        uint32_t now = path_ms();
+        unsigned slot;
+        if (after == before) return;
+        for (slot = 0; slot < 16 && seen[slot] && seen[slot] != component; slot++) {}
+        if (slot == 16) {                       /* all taken: reuse the one quiet longest */
+            unsigned oldest = 0;
+            for (slot = 1; slot < 16; slot++)
+                if (now - last_tick[slot] > now - last_tick[oldest]) oldest = slot;
+            slot = oldest;
+            seen[slot] = 0;
+        }
+        if (seen[slot] && now - last_tick[slot] < 500u) return;
+        seen[slot] = component;
+        last_tick[slot] = now;
+        s_path_lines++;
+        fprintf(stderr, "[PATH] %08X moving %.4f -> %.4f of %u points, direction %u, actor %08X (vtable %08X) at %.3f %.3f %.3f, dt %.5f, tick %lu\n",
+                component, before, after, TUROK_MEM32(TUROK_MEM32(component + 4u) + 0x14u),
+                TUROK_MEM32(component + 0x24u) & 0xFFu, actor, actor ? TUROK_MEM32(actor) : 0u,
+                actor ? guest_float(actor + 0x38u) : 0.0f, actor ? guest_float(actor + 0x3Cu) : 0.0f,
+                actor ? guest_float(actor + 0x40u) : 0.0f, dt, (unsigned long)now);
+    }
 }
 
 

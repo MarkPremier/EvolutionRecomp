@@ -3401,10 +3401,26 @@ index 9f71e6b..8479265 100644
  int     xbox_IrqlEnterInterrupt(int level);     /* around host-run ISRs and DPCs */
  void    xbox_IrqlLeaveInterrupt(int saved);
 diff --git a/src/kernel/kernel_bridge.c b/src/kernel/kernel_bridge.c
-index 2f6660a..7e6fdbc 100644
+index 2f6660a..2b70401 100644
 --- a/src/kernel/kernel_bridge.c
 +++ b/src/kernel/kernel_bridge.c
-@@ -2164,10 +2164,10 @@ static int kernel_run_dpc(uint32_t dpc_va, uint32_t arg1, uint32_t arg2)
+@@ -1623,6 +1623,15 @@ int xbox_KeObjectSignal(uint32_t guest_va)
+     if (!guest_va)
+         return -1;
+ 
++    {   /* An event the title built itself (see ke_guest_event): its state
++         * lives in guest memory, as bridge_KeSetEvent keeps it. */
++        int type;
++        HANDLE ge = ke_guest_event(guest_va, &type);
++        if (ge) {
++            BRIDGE_MEM32(guest_va + 4) = 1;
++            return SetEvent(ge) ? 0 : -1;
++        }
++    }
+     h = ke_shadow_lookup(guest_va);
+     if (!h) {
+         h = CreateEventW(NULL, FALSE, FALSE, NULL);
+@@ -2164,10 +2173,10 @@ static int kernel_run_dpc(uint32_t dpc_va, uint32_t arg1, uint32_t arg2)
   * ran -- the same failure as an unqueued DPC, and just as quiet: the driver
   * asks for exclusive access, is told it did not get it, and skips the work.
   *
@@ -3419,7 +3435,7 @@ index 2f6660a..7e6fdbc 100644
   */
  static void bridge_KeSynchronizeExecution(void)
  {
-@@ -2189,7 +2189,17 @@ static void bridge_KeSynchronizeExecution(void)
+@@ -2189,7 +2198,17 @@ static void bridge_KeSynchronizeExecution(void)
       * the dummy return address and the argument, so g_esp needs no fixup. */
      g_esp -= 4; BRIDGE_MEM32(g_esp) = context;
      g_esp -= 4; BRIDGE_MEM32(g_esp) = 0;
@@ -3437,7 +3453,7 @@ index 2f6660a..7e6fdbc 100644
      /* g_eax is whatever the routine returned, which is this call's result. */
  }
  
-@@ -2372,21 +2382,132 @@ static int kernel_raise_interrupt(uint32_t vector)
+@@ -2372,21 +2391,132 @@ static int kernel_raise_interrupt(uint32_t vector)
  #define NV2A_PCRTC_INTR_VBLANK (1u << 0)
  #define NV2A_VECTOR            3u
  
@@ -3578,7 +3594,7 @@ index 2f6660a..7e6fdbc 100644
  
      if (!xbox_GetConnectedInterrupt(NV2A_VECTOR))
          return;
-@@ -2910,12 +3031,26 @@ static DWORD WINAPI kernel_timer_thread(LPVOID unused)
+@@ -2910,12 +3040,26 @@ static DWORD WINAPI kernel_timer_thread(LPVOID unused)
          long long now;
          int i;
  
@@ -3605,7 +3621,7 @@ index 2f6660a..7e6fdbc 100644
          kernel_drain_dpcs();   /* deferred work, before due timers */
          now = (long long)GetTickCount64();
  
-@@ -2949,6 +3084,8 @@ static DWORD WINAPI kernel_timer_thread(LPVOID unused)
+@@ -2949,6 +3093,8 @@ static DWORD WINAPI kernel_timer_thread(LPVOID unused)
                  }
              }
          }
@@ -3614,7 +3630,7 @@ index 2f6660a..7e6fdbc 100644
      }
  }
  
-@@ -3784,6 +3921,25 @@ static int bridge_async_io_enabled(void)
+@@ -3784,6 +3930,25 @@ static int bridge_async_io_enabled(void)
      return on;
  }
  
@@ -3640,7 +3656,7 @@ index 2f6660a..7e6fdbc 100644
  /* ── NtReadFile (ordinal 219, 8 args = 32 bytes) ──────── */
  static void bridge_NtReadFile(void)
  {
-@@ -3807,13 +3963,30 @@ static void bridge_NtReadFile(void)
+@@ -3807,13 +3972,30 @@ static void bridge_NtReadFile(void)
          off.HighPart = (LONG)BRIDGE_MEM32(offset_va + 4);
          poff = &off;
      }
@@ -3675,7 +3691,7 @@ index 2f6660a..7e6fdbc 100644
          const uint8_t *p = (const uint8_t *)XBOX_TO_NATIVE(buffer_va);
          uint32_t got = (uint32_t)ios.Information;
          /* The offset matters as much as the length. A title streaming a pack
-@@ -9849,10 +10022,15 @@ static void kernel_thunk_dispatch_body(void)
+@@ -9849,10 +10031,15 @@ static void kernel_thunk_dispatch_body(void)
      }
  
      {
