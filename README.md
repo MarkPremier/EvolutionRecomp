@@ -637,5 +637,11 @@ Useful while debugging:
   immutable D3D11 buffer and later draws bind it (99% hits, ~70 MB; the
   same spot ran at 120 fps). `RECOMP_GEOMETRY_CACHE=0` turns it off,
   `RECOMP_GEOMETRY_STATS=<s>` logs hits, entries and size
+- `RECOMP_GPU_PROFILE=<s>` (toolkit) times draws on the GPU and logs the ten
+  costliest kinds every <s> seconds -- combiner stages, textures, blending,
+  pixels shaded. Point-blank rocket explosions turned out to be ~26 Mpix per
+  sprite batch at 1920p: the game draws its 3D view into a surface twice the
+  screen's width (its own anti-aliasing), so 4x scale renders 5120x1920.
+  1440p roughly halves that cost.
 - `RECOMP_DRAW_ONLY=<first>-<last>`, `RECOMP_BATCH_INFO=<s>:<first>-<last>`
   and `RECOMP_DEPTH_DUMP=<s>` isolate, describe and dump GPU batches
