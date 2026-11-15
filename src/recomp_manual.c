@@ -333,14 +333,15 @@ void sub_0019D580(void)
 /* BlockOnTime (sub_00198650, stdcall: GPU time, flags) with a watcher that
  * releases a wait whose wake-up was lost: d3d_wait.c. */
 extern void sub_00198650_gen(void);
-extern int d3d_wait_begin(uint32_t time);
-extern void d3d_wait_end(void);
+extern int d3d_wait_begin(uint32_t time, uint32_t outer[3]);
+extern void d3d_wait_end(const uint32_t outer[3]);
 
 void sub_00198650(void)
 {
-    int watched = d3d_wait_begin(TUROK_MEM32(g_esp + 4u));
+    uint32_t outer[3];
+    int watched = d3d_wait_begin(TUROK_MEM32(g_esp + 4u), outer);
     sub_00198650_gen();
-    if (watched) d3d_wait_end();
+    if (watched) d3d_wait_end(outer);
 }
 
 void sub_00198480(void)
