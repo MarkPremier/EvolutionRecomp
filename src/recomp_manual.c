@@ -2860,6 +2860,8 @@ void sub_000E7570(void)
 extern void sub_0014A020_gen(void);
 extern void sub_001425C0_gen(void);
 static float s_move_seconds;
+static uint32_t s_move_frames;        /* on-foot movement updates so far */
+static float s_last_move_seconds;
 static uint32_t s_stall_player, s_stall_saved, s_stall_set;
 
 void sub_0014A020(void)
@@ -2867,6 +2869,8 @@ void sub_0014A020(void)
     uint32_t player = g_ecx;
     float seconds = s_move_seconds;
     s_move_seconds = guest_float(g_esp + 4u);
+    s_move_frames++;
+    s_last_move_seconds = s_move_seconds;
     s_stall_player = 0;
     sub_0014A020_gen();
     if (s_stall_player == player && TUROK_MEM32(player + 0xB0u) == s_stall_set)
@@ -2877,8 +2881,10 @@ void sub_0014A020(void)
 
 void sub_001425C0(void)
 {
+    static int enabled = -1;   /* RECOMP_FALL_STALL_FIX=0: the per-frame test as the game has it */
     uint32_t player = g_ecx, state = player ? TUROK_MEM32(player + 0x12Cu) : 0;
-    if (TUROK_MEM32(g_esp) == 0x0014A4CAu && state && TUROK_MEM32(state) == 6u &&
+    if (enabled < 0) enabled = !(getenv("RECOMP_FALL_STALL_FIX") && *getenv("RECOMP_FALL_STALL_FIX") == '0');
+    if (enabled && TUROK_MEM32(g_esp) == 0x0014A4CAu && state && TUROK_MEM32(state) == 6u &&
         s_move_seconds > 0.0f && s_move_seconds < 1.0f / 30.0f) {
         float y = guest_float(player + 0x3Cu), last = guest_float(player + 0xB0u);
         float moved = fabsf(y - last), still = 0.015f * s_move_seconds;
@@ -2891,4 +2897,61 @@ void sub_001425C0(void)
         }
     }
     sub_001425C0_gen();
+}
+
+/* ── Ground lost on stair edges at high frame rates ────────────
+ *
+ * After its collision the player's update (sub_0014E960) asks whether the
+ * surface it touched counts as ground: its normal within 45 degrees of
+ * straight up (sub_00142170, stdcall: the normal; 1 = ground). If not, it
+ * clears the on-ground flag (+0x45C bit 0, setting 0x40), gravity starts to
+ * build, and a frame later the player is falling (state 6, from 0x14EE46 or
+ * the movement's own test). On a step's edge the normal leans further than
+ * 45 degrees. At 30 fps a frame carries the player onto the step's top
+ * before the next test; at 300+ the player touches the edge for many tiny
+ * frames, so every step of a staircase (the Senate's slatted steps) dropped
+ * it into the fall state, where it has no forward control and the gun's
+ * bob is left where the fall found it: it stalled at each step, the gun
+ * warped. A surface too steep to stand on now counts as ground until it has
+ * been so for 1/30 s of on-foot movement -- one Xbox frame. A real slope or
+ * ledge is let go no later than at 30 fps. RECOMP_GROUND_GRACE=0: as the
+ * game has it.
+ *
+ * RECOMP_STATE_TRACE=1 logs the player's state changes, through the generic
+ * set-state (sub_00039FF0, this-call, ret 4: the state): who asked, height,
+ * flags and the gun's offsets. */
+extern void sub_00039FF0_gen(void);
+extern void sub_00142170_gen(void);
+
+void sub_00142170(void)
+{
+    static int enabled = -1;
+    static uint32_t last_frame;
+    static float steep;
+    uint32_t caller = TUROK_MEM32(g_esp);
+    if (enabled < 0) enabled = !(getenv("RECOMP_GROUND_GRACE") && *getenv("RECOMP_GROUND_GRACE") == '0');
+    sub_00142170_gen();
+    if (!enabled || caller != 0x0014ED9Du || !(s_last_move_seconds > 0.0f && s_last_move_seconds < 1.0f / 30.0f))
+        return;
+    if (g_eax) { steep = 0.0f; return; }                       /* ground */
+    if (last_frame + 1u != s_move_frames && last_frame != s_move_frames) steep = 0.0f;   /* a new edge */
+    if (last_frame != s_move_frames) steep += s_last_move_seconds;
+    last_frame = s_move_frames;
+    if (steep < 1.0f / 30.0f) g_eax = 1;                         /* still ground, for now */
+}
+
+void sub_00039FF0(void)
+{
+    static int trace = -1;
+    uint32_t actor = g_ecx;
+    if (trace < 0) trace = getenv("RECOMP_STATE_TRACE") != NULL;
+    if (trace && actor && TUROK_MEM32(actor) == 0x00222CE8u) {
+        uint32_t state = TUROK_MEM32(actor + 0x12Cu);
+        fprintf(stderr, "[STATE] %u -> %u from %08X y %.4f flags %X gun %.4f %.4f %.4f move %u dt %.4f\n",
+                state ? TUROK_MEM32(state) : 0u, TUROK_MEM32(g_esp + 4u), TUROK_MEM32(g_esp),
+                guest_float(actor + 0x3Cu), TUROK_MEM32(actor + 0x45Cu),
+                guest_float(actor + 0x408u), guest_float(actor + 0x40Cu), guest_float(actor + 0x410u),
+                s_move_frames, s_last_move_seconds);
+    }
+    sub_00039FF0_gen();
 }
