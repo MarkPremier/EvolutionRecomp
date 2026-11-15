@@ -636,5 +636,15 @@ Useful while debugging:
   seconds. Use it to measure speed: a hitch threshold that most frames
   cross logs a line per frame, and those writes slow the game down
   considerably (a run that measured 40 fps that way ran at over 100)
+- Geometry cache (toolkit, `nv2a_pb_exec.c` / `nv2a_gpu_d3d11.cpp`): every
+  vertex-program draw's vertices were converted to floats and uploaded on
+  the GPU-command thread each time, and dense jungle at 4x draw distance
+  draws the same plant meshes thousands of times a frame (Chapter 6: that
+  thread at 93%, 44% of it converting; 54 fps). Each draw is now keyed by
+  its vertex bytes (inline data by content, memory buffers also by
+  address), formats and index list; a key seen twice is kept as an
+  immutable D3D11 buffer and later draws bind it (99% hits, ~70 MB; the
+  same spot ran at 120 fps). `RECOMP_GEOMETRY_CACHE=0` turns it off,
+  `RECOMP_GEOMETRY_STATS=<s>` logs hits, entries and size
 - `RECOMP_DRAW_ONLY=<first>-<last>`, `RECOMP_BATCH_INFO=<s>:<first>-<last>`
   and `RECOMP_DEPTH_DUMP=<s>` isolate, describe and dump GPU batches
