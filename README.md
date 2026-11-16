@@ -130,6 +130,16 @@ that fails compilation or creation is remembered for the rest of the run,
 using the generic pixel shader where available, rather than retried on
 every draw. Restart the program to retry after fixing the compiler or driver.
 
+On a PC with more than one GPU the game takes the high-performance one;
+`RECOMP_GPU_ADAPTER=<part of its name>` (`AMD`, `Intel`, `RTX`...) takes
+another. The log's `[GPU-D3D11] adapter:` line names the GPU in use, its
+vendor and device IDs and its driver version -- worth quoting with any
+report of a rendering fault. A pixel's depth is worked out from values that
+every driver interpolates alike, also on triangles it has to clip (the ground
+at the player's feet); `RECOMP_DEPTH_INTERP=screen` goes back to the earlier
+way, which is suspected of dropping such a triangle for a frame (black
+flicker) on some AMD cards.
+
 Audio voice updates synchronize with their own mixer slice: the mixer waits
 while the game has a voice locked for a restart or data change. A one-shot
 sound also drains its resampler before being reported finished, preserving
