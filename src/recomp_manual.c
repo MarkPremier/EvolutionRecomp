@@ -674,6 +674,85 @@ void sub_00038E10(void)   /* set the aim point (this-call, ret 4) */
     sub_00038E10_gen();
 }
 
+/* ── Enemy fire chance at high frame rates (issue #20) ───────────
+ *
+ * Two enemy kinds decide to shoot with a coin toss EVERY FRAME, with no
+ * reload or cool-down after it:
+ *   - FlyingEnemyAI (vtable 0x2116F8; the flying levels' fighters with red
+ *     lasers): its attack update sub_0011A3B0 (this-call, ret 4) draws
+ *     rand(0, 0x8000) / 32767 (sub_000D04D0, [0x1FAB4C]) and, below SHOOTFR
+ *     (+0x834), fires (sub_00119750, called only from there, 0x0011A67F).
+ *   - turrets (props TurretType/EnemyTurretType...; SFre at +0x494):
+ *     sub_001267D0 (this-call, ret) draws the same and, below SFre, enters
+ *     the "Fire" state and returns 1. Called from the turret update
+ *     sub_00126940 (0x126976, 0x1269A1) and the player's turret state
+ *     (0x149161).
+ * So shots a second grew with the frame rate: four times the fire at 240 fps.
+ * Now each enemy gets at most 60 tosses a second, by the game's frame time:
+ * at 60 fps and below one a frame, as before (the Xbox ran at 60 or less);
+ * above, the frames in between skip the toss. Every toss is independent, so
+ * the shots a second are those of 60 fps. RECOMP_ENEMY_FIRE_RATE=0: as the
+ * original (one toss a frame). */
+static float frame_seconds(void);   /* the game's frame time, below */
+
+#define ENEMY_FIRE_RATE   60.0f
+#define ENEMY_FIRE_CLOCKS 256u
+
+static struct { uint32_t self; float owed; } s_fire_clocks[ENEMY_FIRE_CLOCKS];
+static __declspec(thread) int s_fly_fire_held;   /* this frame's toss is not due */
+
+static int enemy_fire_due(uint32_t self)
+{
+    static int enabled = -1;
+    unsigned first = (self >> 4) & (ENEMY_FIRE_CLOCKS - 1u), at = first, tries;
+    float seconds;
+    if (enabled < 0) {
+        const char *value = getenv("RECOMP_ENEMY_FIRE_RATE");
+        enabled = !(value && *value == '0');
+    }
+    if (!enabled) return 1;
+    seconds = frame_seconds();
+    if (!(seconds > 0.0f) || seconds >= 1.0f / ENEMY_FIRE_RATE) return 1;
+    for (tries = 0; tries < ENEMY_FIRE_CLOCKS; tries++, at = (at + 1u) & (ENEMY_FIRE_CLOCKS - 1u))
+        if (!s_fire_clocks[at].self || s_fire_clocks[at].self == self) break;
+    if (tries == ENEMY_FIRE_CLOCKS) {
+        at = first;   /* bounded storage; a new enemy starts with a fresh clock */
+        s_fire_clocks[at].owed = 0.0f;
+    } else if (s_fire_clocks[at].self != self) {
+        s_fire_clocks[at].owed = 0.0f;
+    }
+    s_fire_clocks[at].self = self;
+    s_fire_clocks[at].owed += seconds * ENEMY_FIRE_RATE;
+    if (s_fire_clocks[at].owed < 0.999f) return 0;
+    s_fire_clocks[at].owed -= 1.0f;
+    if (s_fire_clocks[at].owed > 1.0f) s_fire_clocks[at].owed = 0.0f;
+    return 1;
+}
+
+extern void sub_0011A3B0_gen(void);
+extern void sub_00119750_gen(void);
+extern void sub_001267D0_gen(void);
+
+void sub_0011A3B0(void)   /* FlyingEnemyAI attack update (this-call, ret 4: frame seconds) */
+{
+    int held = s_fly_fire_held;
+    s_fly_fire_held = !enemy_fire_due(g_ecx);
+    sub_0011A3B0_gen();
+    s_fly_fire_held = held;
+}
+
+void sub_00119750(void)   /* FlyingEnemyAI fire (this-call, ret) */
+{
+    if (s_fly_fire_held && TUROK_MEM32(g_esp) == 0x0011A67Fu) { g_esp += 4; return; }
+    sub_00119750_gen();
+}
+
+void sub_001267D0(void)   /* turret fire toss (this-call, ret; 1 = fired) */
+{
+    if (!enemy_fire_due(g_ecx)) { g_eax = 0; g_esp += 4; return; }
+    sub_001267D0_gen();
+}
+
 /* ── Longer-lasting decals ──────────────────────────────────────
  *
  * Blood splats, bullet holes, scorch marks and gibs are particles: each kind
@@ -2569,10 +2648,10 @@ extern void sub_00160A50(void);
 
 static uint32_t s_keep_inventory;     /* the inventory being built, while sub_00160BC0 runs */
 
-/* SaveFile.hst's items (8 bytes each, the value first), or 0. */
-static uint32_t save_history_items(void)
+/* A history group's items (8 bytes each, the value first; item k at k - 1)
+ * if it has at least `least`, or 0. */
+static uint32_t history_items(const char *name, size_t name_size, uint32_t least)
 {
-    static const char name[] = "$\\Data\\History\\SaveFile.hst";
     uint32_t game = TUROK_MEM32(0x250A84u), manager, first, last, at;
     if (!game || !(manager = TUROK_MEM32(game + 0x80u))) return 0;
     first = TUROK_MEM32(manager); last = TUROK_MEM32(manager + 4u);
@@ -2580,18 +2659,37 @@ static uint32_t save_history_items(void)
     for (at = first; at < last; at += 4) {
         uint32_t group = TUROK_MEM32(at), text = group ? TUROK_MEM32(group + 0x14u) : 0, i;
         if (!text) continue;
-        for (i = 0; i < sizeof name; i++) {
+        for (i = 0; i < name_size; i++) {
             char c = *(volatile char *)((uintptr_t)(text + i) + g_xbox_mem_offset), n = name[i];
             if (c >= 'A' && c <= 'Z') c += 32;
             if (n >= 'A' && n <= 'Z') n += 32;
             if (c != n) break;
         }
-        if (i == sizeof name) {
+        if (i == name_size) {
             uint32_t begin = TUROK_MEM32(group + 4u), end = TUROK_MEM32(group + 8u);
-            return end >= begin + 85u * 8u ? begin : 0;
+            return end >= begin + least * 8u ? begin : 0;
         }
     }
     return 0;
+}
+
+/* SaveFile.hst: six items a weapon, 85 in all. */
+static uint32_t save_history_items(void)
+{
+    static const char name[] = "$\\Data\\History\\SaveFile.hst";
+    return history_items(name, sizeof name, 85u);
+}
+
+/* The All Weapons cheat, Cheats.hst item 2. The level start (sub_00153A00)
+ * copies it to the player (+0x3B8) only AFTER it has built the inventory
+ * (0x153B59 vs 0x153EEF), so during the build the player's copy is still
+ * the old value (none on a fresh player) -- read the history itself. */
+static int all_weapons_cheat(uint32_t player)
+{
+    static const char name[] = "$\\Data\\History\\Cheats.hst";
+    uint32_t items = history_items(name, sizeof name, 2u);
+    if (items) return TUROK_MEM32(items + 8u) != 0;
+    return player && TUROK_MEM32(player + 0x3B8u) != 0;
 }
 
 static int32_t saved_weapon(uint32_t items, uint32_t id, int field)
@@ -2610,15 +2708,16 @@ static int find_weapon(uint32_t inventory, uint32_t id)
 static void keep_weapons(uint32_t inventory)
 {
     uint32_t items = save_history_items(), player = TUROK_MEM32(inventory + 0x4Cu), id;
-    int cheat = player && TUROK_MEM32(player + 0x3B8u) != 0;   /* All Weapons ([player + 0x3AC] + 0xC) */
+    int cheat = all_weapons_cheat(player);
     char kept[64] = "", added[64] = "";
     if (!items) return;
     for (id = 2; id <= 14; id++) {
         uint32_t begin, entry, count, max = 0x002259A0u + id * 16u;
         int at, position, field;
         if (saved_weapon(items, id, 0) == 0 && !cheat) continue;
-        /* The Tek Bow replaces the bow (they share arrows): no bow beside it. */
-        if (id == 2 && !cheat && (saved_weapon(items, 3, 0) || find_weapon(inventory, 3) >= 0)) continue;
+        /* The bow stays beside the Tek Bow: the game holds both (level sets
+         * such as BrandWheel/bWheel1 list both; sub_0015F400 pools the
+         * arrows of the bow, the Tek Bow and the crossbow). */
         if ((at = find_weapon(inventory, id)) >= 0) {
             entry = TUROK_MEM32(inventory + 4u) + (uint32_t)at * 0x28u;
             if (!TUROK_MEM32(entry + 0x20u)) {
