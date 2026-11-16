@@ -2680,16 +2680,21 @@ static uint32_t save_history_items(void)
     return history_items(name, sizeof name, 85u);
 }
 
-/* The All Weapons cheat, Cheats.hst item 2. The level start (sub_00153A00)
- * copies it to the player (+0x3B8) only AFTER it has built the inventory
- * (0x153B59 vs 0x153EEF), so during the build the player's copy is still
- * the old value (none on a fresh player) -- read the history itself. */
+/* The All Weapons cheat, Cheats.hst key 1 (its first item; key 2 is
+ * Unlimited Ammo -- the PC release's data\history\cheats.hst names them).
+ * The level start (sub_00153A00) copies them to the player, All Weapons to
+ * +0x3BC and Unlimited Ammo to +0x3B8, only AFTER it has built the
+ * inventory (0x153B59 vs 0x153EE3), so during the build the player's copies
+ * still hold the old values (none on a fresh player) -- read the history
+ * itself. Attachments need nothing more: with +0x3BC set the weapon-mode
+ * lookup (sub_0015F1E0) takes every mode of a weapon in the inventory as
+ * available. */
 static int all_weapons_cheat(uint32_t player)
 {
     static const char name[] = "$\\Data\\History\\Cheats.hst";
-    uint32_t items = history_items(name, sizeof name, 2u);
-    if (items) return TUROK_MEM32(items + 8u) != 0;
-    return player && TUROK_MEM32(player + 0x3B8u) != 0;
+    uint32_t items = history_items(name, sizeof name, 1u);
+    if (items) return TUROK_MEM32(items) != 0;
+    return player && TUROK_MEM32(player + 0x3BCu) != 0;
 }
 
 static int32_t saved_weapon(uint32_t items, uint32_t id, int field)

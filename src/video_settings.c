@@ -57,6 +57,7 @@ extern void nv2a_gpu_set_texture_replacements(int on);
 extern void nv2a_gpu_set_anisotropy(int level);
 extern void nv2a_gpu_set_msaa(int samples);
 extern void nv2a_gpu_set_heat_haze(int mode);
+extern void nv2a_gpu_set_alpha_coverage(int on);
 extern void nv2a_gpu_set_shadow_scale(int factor);
 extern void nv2a_gpu_set_exact_shadows(int on);
 
@@ -65,7 +66,8 @@ extern void nv2a_gpu_set_exact_shadows(int on);
 /* The page's rows, in order; row n is Video.hst item n + 1. Each steps
  * through its values (shown, and written in turok_settings.ini, as their
  * text). */
-enum { SET_RESOLUTION, SET_ASPECT, SET_DISPLAY, SET_VSYNC, SET_FRAMES, SET_ANISOTROPY, SET_MSAA, SET_DRAW_DISTANCE,
+enum { SET_RESOLUTION, SET_ASPECT, SET_DISPLAY, SET_VSYNC, SET_FRAMES, SET_ANISOTROPY, SET_MSAA, SET_FOLIAGE_AA,
+       SET_DRAW_DISTANCE,
        SET_HEAT_HAZE, SET_SHADOWS, SET_ICONS,
        SET_MOUSE_LOOK, SET_MOUSE_SPEED, SET_FLIGHT_MOUSE, SET_FLIGHT_SPEED, SET_FLIGHT_INVERT,
        SET_CONTROLLER_AIM, SET_LADDER_FREELOOK, SET_KEEP_WEAPONS, SETTING_COUNT };
@@ -106,6 +108,9 @@ static const VideoSetting k_settings[SETTING_COUNT] = {
     {"frame_limit", "frame limit", k_frames, COUNT(k_frames), 1},
     {"anisotropy", "anisotropy", k_anisotropy, COUNT(k_anisotropy), 4},
     {"msaa", "msaa", k_msaa, COUNT(k_msaa), 0},
+    /* With MSAA: alpha-tested edges (grass, leaves, fences) antialiased too
+     * (nv2a_gpu_set_alpha_coverage; ~5% of a GPU-bound frame). */
+    {"foliage_aa", "foliage aa", k_switches, COUNT(k_switches), 1},
     {"draw_distance", "draw distance", k_distances, COUNT(k_distances), 1},
     {"heat_haze", "heat haze", k_hazes, COUNT(k_hazes), 2},
     {"shadows", "shadows", k_shadow_modes, COUNT(k_shadow_modes), 1},
@@ -744,18 +749,19 @@ static int values_of(int setting)
     }
 }
 
-/* Shadows, controller aiming, ladder freelook and keep weapons use
- * GameOptions.txm, keys 14, 17, 20 and 23 on (after PC Settings' title, 13):
- * Options.txm has no keys left for them. */
+/* Shadows, controller aiming, ladder freelook, keep weapons and foliage aa
+ * use GameOptions.txm, keys 14, 17, 20, 23 and 26 on (after PC Settings'
+ * title, 13): Options.txm has no keys left for them. */
 #define GAME_TEXT_SHADOWS 14
 #define GAME_TEXT_CONTROLLER_AIM 17
 #define GAME_TEXT_LADDER_FREELOOK 20
 #define GAME_TEXT_KEEP_WEAPONS 23
+#define GAME_TEXT_FOLIAGE_AA 26
 
 static int in_game_text(int setting)
 {
     return setting == SET_SHADOWS || setting == SET_CONTROLLER_AIM || setting == SET_LADDER_FREELOOK ||
-           setting == SET_KEEP_WEAPONS;
+           setting == SET_KEEP_WEAPONS || setting == SET_FOLIAGE_AA;
 }
 
 static int text_label(int setting)
@@ -765,6 +771,7 @@ static int text_label(int setting)
     if (setting == SET_CONTROLLER_AIM) return GAME_TEXT_CONTROLLER_AIM;
     if (setting == SET_LADDER_FREELOOK) return GAME_TEXT_LADDER_FREELOOK;
     if (setting == SET_KEEP_WEAPONS) return GAME_TEXT_KEEP_WEAPONS;
+    if (setting == SET_FOLIAGE_AA) return GAME_TEXT_FOLIAGE_AA;
     for (s = 0; s < setting; s++)
         if (!in_game_text(s)) key += 1 + (values_of(s) == s ? k_settings[s].count : 0);
     return key;
@@ -1675,11 +1682,21 @@ static int write_patch(const char *game_dir)
     files[GAME_TEXT].key = tree_key("data\\text\\gameoptions.txm");
     if (!trees_read(&trees, "data\\text\\gameoptions.txm", &files[GAME_TEXT].data)) goto done;
     add_text(&files[GAME_TEXT].data, GAME_TEXT_SETTINGS_TITLE, "PC Settings");
-    for (s = 0; s < SETTING_COUNT; s++) {
-        if (!in_game_text(s)) continue;
-        add_text(&files[GAME_TEXT].data, text_label(s), k_settings[s].label);
-        for (i = 0; i < k_settings[s].count; i++)
-            add_text(&files[GAME_TEXT].data, text_label(s) + 1 + i, k_settings[s].values[i]);
+    /* In key order, not row order: the game reads a .txm's entries as they
+     * come, and a row whose keys came after higher ones (Foliage AA's 26
+     * ahead of Shadows' 14) left Shadows blank. */
+    {
+        int key, next;
+        for (key = 0;; key = next) {
+            int found = -1;
+            next = 1 << 30;
+            for (s = 0; s < SETTING_COUNT; s++)
+                if (in_game_text(s) && text_label(s) > key && text_label(s) < next) next = text_label(s), found = s;
+            if (found < 0) break;
+            add_text(&files[GAME_TEXT].data, text_label(found), k_settings[found].label);
+            for (i = 0; i < k_settings[found].count; i++)
+                add_text(&files[GAME_TEXT].data, text_label(found) + 1 + i, k_settings[found].values[i]);
+        }
     }
     for (i = 0; i < KEY_COUNT; i++) add_title_text(&files[OPTIONS_TEXT].data, TEXT_KEYS + i, k_keys[i].name);
 
@@ -2029,6 +2046,7 @@ static void apply_setting(int setting)
     case SET_FRAMES: apply_frames(); break;
     case SET_ANISOTROPY: nv2a_gpu_set_anisotropy(1 << s_values[SET_ANISOTROPY]); break;
     case SET_MSAA: nv2a_gpu_set_msaa(1 << s_values[SET_MSAA]); break;
+    case SET_FOLIAGE_AA: nv2a_gpu_set_alpha_coverage(s_values[SET_FOLIAGE_AA]); break;
     case SET_HEAT_HAZE: nv2a_gpu_set_heat_haze(k_haze_modes[s_values[SET_HEAT_HAZE]]); break;
     case SET_SHADOWS:   /* the rest is read as the game runs (recomp_manual.c) */
         nv2a_gpu_set_shadow_scale(s_values[SET_SHADOWS] ? 4 : 1);
@@ -3089,6 +3107,7 @@ void video_settings_start(const char *game_dir)
     load_pc_cursor();
     apply_setting(SET_ANISOTROPY);
     apply_setting(SET_MSAA);
+    apply_setting(SET_FOLIAGE_AA);
     apply_setting(SET_SHADOWS);   /* its map scale and exact depth (else only when changed) */
     apply_setting(SET_HEAT_HAZE); /* apply the saved haze mode before the first frame */
     apply_setting(SET_ICONS);

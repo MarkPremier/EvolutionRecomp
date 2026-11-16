@@ -377,6 +377,7 @@ effect at once and are kept in `turok_settings.ini` beside the exe:
 | Frame limit | 30, 60, 120, 144, 240, display (its refresh rate), off | |
 | Anisotropy | off, 2x, 4x, 8x, 16x (16x by default) | |
 | MSAA | off, 2x, 4x, 8x | |
+| Foliage AA | off, on (on by default; with MSAA, the edges of grass, leaves and other cut-out textures are smoothed too; about 5% of the frame rate when the GPU is the limit) | |
 | Button icons | xbox, pc | |
 | Mouse look | raw, stick (raw falls back to stick in vehicles and turrets; on the PC Settings page, kept with these settings) | |
 | Mouse speed | 1 to 10 (5 by default; each step 1.4x; on the PC Settings page, kept with these settings) | |
@@ -441,7 +442,7 @@ is how the Xbox game plays, and stays the default. **Keep weapons: On**, under
 **Options > PC Settings**, keeps every weapon your save says you own: a weapon
 the level has stays yours, and one it lacks is added back with its saved
 ammunition and upgrades. The bow stays beside the Tek Bow (they share
-arrows); with the All Weapons cheat all fourteen weapons are in. Not in the flying
+arrows); with the All Weapons cheat all fourteen weapons are in, with all their attachments (Unlimited Ammo on its own adds none). Not in the flying
 levels. It takes effect when a level starts or a save loads; the game then
 saves the kept weapons with your progress as it saves any weapon. Saved as
 `keep_weapons=on` in `turok_settings.ini`.
