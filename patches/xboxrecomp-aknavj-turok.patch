@@ -410,7 +410,7 @@ index c5c8a86..843b28c 100644
      }
  }
 diff --git a/src/apu/apu_dsp.c b/src/apu/apu_dsp.c
-index 5f65480..8f60a48 100644
+index 5f65480..4db60f4 100644
 --- a/src/apu/apu_dsp.c
 +++ b/src/apu/apu_dsp.c
 @@ -30,12 +30,14 @@
@@ -444,6 +444,15 @@ index 5f65480..8f60a48 100644
  /* ── Engine selection ────────────────────────────────────────────────────
   *
   * Default ON: the DSP56300 interpreter runs the guest-downloaded GP/EP
+@@ -144,7 +155,7 @@ void mcpx_apu_dsp_ack_frame(MCPXAPUState *d)
+                         s_dsp_ack[i].offset, last);
+                 exit(EXIT_FAILURE);
+             }
+-            uint32_t base = ldl_le_phys(address_space_memory, (uint64_t)table + page * NV_PSGE_SIZE) & 0xFFFFF000u;
++            uint32_t base = ds_ldl((uint64_t)table + page * NV_PSGE_SIZE) & 0xFFFFF000u;
+             if (!base) continue;
+             physical = (uint64_t)base + (s_dsp_ack[i].offset & 0xFFFu);
+         }
 @@ -252,6 +263,33 @@ static void dsp_frame_stub(MCPXAPUState *d,
      g_dbg.ep.cycles = 0;
  }
@@ -478,13 +487,17 @@ index 5f65480..8f60a48 100644
  /* ============================================================
   * Real GP/EP DSP56300 pipeline (ported from xemu gp_ep.c)
   * ============================================================ */
-@@ -298,13 +336,32 @@ static void scatter_gather_rw(MCPXAPUState *d, hwaddr sge_base,
+@@ -298,13 +336,49 @@ static void scatter_gather_rw(MCPXAPUState *d, hwaddr sge_base,
      unsigned int bytes_to_copy = TARGET_PAGE_SIZE - offset_in_page;
  
      (void)d;
 -    (void)max_sge;
  
      while (len > 0) {
+-        uint32_t prd_address = ldl_le_phys(address_space_memory,
+-                                           sge_base + page_entry * 8 + 0);
+-        uint8_t *guest = dsp_ram_address(prd_address + offset_in_page,
+-                                                 TARGET_PAGE_SIZE);
 +        /* Past the end of the page table: xemu asserts here. Writes are
 +         * dropped and reads return silence, rather than taking whatever
 +         * follows the table as a physical address. */
@@ -499,10 +512,25 @@ index 5f65480..8f60a48 100644
 +            if (!dir) memset(ptr, 0, len);
 +            return;
 +        }
-         uint32_t prd_address = ldl_le_phys(address_space_memory,
-                                            sge_base + page_entry * 8 + 0);
--        uint8_t *guest = dsp_ram_address(prd_address + offset_in_page,
--                                                 TARGET_PAGE_SIZE);
++        /* The page table is DirectSound's contiguous allocation: read it as
++         * the voice processor reads its SGE and SSL tables (ds_ldl), where a
++         * live contiguous block owning the page wins. Through the general
++         * mapper a later ordinary retag of that page number made the DSP read
++         * ordinary RAM as its table -- garbage page addresses, so it mixed
++         * from nowhere (static) and wrote its scratch over whatever RAM they
++         * named (pushbuffer desyncs, its own program). Flight multiplayer
++         * above 60 fps, where the title retags pages far more often. */
++        uint32_t prd_address = ds_ldl(sge_base + page_entry * 8 + 0);
++        {
++            uint32_t general = ldl_le_phys(address_space_memory, sge_base + page_entry * 8 + 0);
++            static unsigned int differed;
++            if (general != prd_address && differed < 8) {
++                differed++;
++                fprintf(stderr, "[APU-DSP] page table %08llX entry %u: contiguous %08X, general lookup %08X "
++                                "(would have been used before)\n", (unsigned long long)sge_base, page_entry,
++                        prd_address, general);
++            }
++        }
 +        if (bytes_to_copy > len) {
 +            bytes_to_copy = len;
 +        }
@@ -514,7 +542,7 @@ index 5f65480..8f60a48 100644
  
          /* Diagnostic: force DSP payload writes to ordinary RAM instead of the
           * contiguous redirect, to test whether the write to the window is what
-@@ -319,10 +376,6 @@ static void scatter_gather_rw(MCPXAPUState *d, hwaddr sge_base,
+@@ -319,10 +393,6 @@ static void scatter_gather_rw(MCPXAPUState *d, hwaddr sge_base,
              }
          }
  
@@ -525,7 +553,7 @@ index 5f65480..8f60a48 100644
          if (dir) {
              static int nowrite = -1;
              if (nowrite < 0) nowrite = getenv("RECOMP_APU_DMA_NOWRITE") != NULL;
-@@ -344,10 +397,79 @@ static void scatter_gather_rw(MCPXAPUState *d, hwaddr sge_base,
+@@ -344,10 +414,79 @@ static void scatter_gather_rw(MCPXAPUState *d, hwaddr sge_base,
      }
  }
  
@@ -543,7 +571,7 @@ index 5f65480..8f60a48 100644
 +    if (on < 0) on = getenv("RECOMP_APU_SCRATCH_TRACE") != NULL;
 +    if (!on || n >= 400) return;
 +    {
-+        uint32_t prd = ldl_le_phys(address_space_memory, sge_base + (addr / TARGET_PAGE_SIZE) * 8);
++        uint32_t prd = ds_ldl(sge_base + (addr / TARGET_PAGE_SIZE) * 8);
 +        fprintf(stderr, "[SCRATCH] %s %s off %06X len %5zu -> phys %08X host %p\n", who, dir ? "write" : "read ",
 +                addr, len, prd + addr % TARGET_PAGE_SIZE,
 +                (void *)dsp_ram_address(prd + addr % TARGET_PAGE_SIZE, 4));
@@ -605,7 +633,7 @@ index 5f65480..8f60a48 100644
      scatter_gather_rw(d, d->regs[NV_PAPU_GPSADDR], d->regs[NV_PAPU_GPSMAXSGE],
                        ptr, addr, len, dir);
  }
-@@ -355,11 +477,32 @@ static void gp_scratch_rw(void *opaque, uint8_t *ptr, uint32_t addr, size_t len,
+@@ -355,11 +494,32 @@ static void gp_scratch_rw(void *opaque, uint8_t *ptr, uint32_t addr, size_t len,
  static void ep_scratch_rw(void *opaque, uint8_t *ptr, uint32_t addr, size_t len,
                            bool dir)
  {
@@ -638,7 +666,7 @@ index 5f65480..8f60a48 100644
  static uint32_t circular_scatter_gather_rw(MCPXAPUState *d, hwaddr sge_base,
                                             unsigned int max_sge, uint8_t *ptr,
                                             uint32_t base, uint32_t end,
-@@ -396,6 +539,7 @@ static uint32_t circular_scatter_gather_rw(MCPXAPUState *d, hwaddr sge_base,
+@@ -396,6 +556,7 @@ static uint32_t circular_scatter_gather_rw(MCPXAPUState *d, hwaddr sge_base,
  static void gp_fifo_rw(void *opaque, uint8_t *ptr, unsigned int index,
                         size_t len, bool dir)
  {
@@ -646,7 +674,7 @@ index 5f65480..8f60a48 100644
      MCPXAPUState *d = opaque;
      uint32_t base;
      uint32_t end;
-@@ -418,8 +562,12 @@ static void gp_fifo_rw(void *opaque, uint8_t *ptr, unsigned int index,
+@@ -418,8 +579,12 @@ static void gp_fifo_rw(void *opaque, uint8_t *ptr, unsigned int index,
  
      uint32_t cur = GET_MASK(d->regs[cur_reg], NV_PAPU_GPOFCUR0_VALUE);
  
@@ -660,7 +688,7 @@ index 5f65480..8f60a48 100644
      if (cur < base) {
          cur = base;
      }
-@@ -448,6 +596,7 @@ static bool ep_sink_samples(MCPXAPUState *d, uint8_t *ptr, size_t len)
+@@ -448,6 +613,7 @@ static bool ep_sink_samples(MCPXAPUState *d, uint8_t *ptr, size_t len)
  static void ep_fifo_rw(void *opaque, uint8_t *ptr, unsigned int index,
                         size_t len, bool dir)
  {
@@ -668,7 +696,7 @@ index 5f65480..8f60a48 100644
      MCPXAPUState *d = opaque;
      uint32_t base;
      uint32_t end;
-@@ -473,12 +622,15 @@ static void ep_fifo_rw(void *opaque, uint8_t *ptr, unsigned int index,
+@@ -473,12 +639,15 @@ static void ep_fifo_rw(void *opaque, uint8_t *ptr, unsigned int index,
      if (dir && index == 0) {
          bool did_sink = ep_sink_samples(d, ptr, len);
          if (did_sink) {
@@ -687,7 +715,7 @@ index 5f65480..8f60a48 100644
      /* DSP hangs if current >= end; but forces current >= base */
      if (cur >= end) {
          cur = cur % (end - base);
-@@ -619,10 +771,52 @@ void mcpx_apu_ep_write(void *opaque, hwaddr addr, uint64_t val, unsigned int siz
+@@ -619,10 +788,52 @@ void mcpx_apu_ep_write(void *opaque, hwaddr addr, uint64_t val, unsigned int siz
      }
  }
  
@@ -740,7 +768,7 @@ index 5f65480..8f60a48 100644
  
      /* Write VP results to the GP DSP MIXBUF */
      for (int mixbin = 0; mixbin < NUM_MIXBINS; mixbin++) {
-@@ -642,10 +836,16 @@ static void dsp_frame_engine(MCPXAPUState *d,
+@@ -642,10 +853,16 @@ static void dsp_frame_engine(MCPXAPUState *d,
          dsp_start_frame(d->gp.dsp);
          d->gp.dsp->core.is_idle = false;
          d->gp.dsp->core.cycle_count = 0;
@@ -758,7 +786,7 @@ index 5f65480..8f60a48 100644
          mcpx_apu_dsp_gp_runs++;
          if (!logged_gp) {
              logged_gp = true;
-@@ -675,8 +875,10 @@ static void dsp_frame_engine(MCPXAPUState *d,
+@@ -675,8 +892,10 @@ static void dsp_frame_engine(MCPXAPUState *d,
              d->ep.dsp->core.cycle_count = 0;
              do {
                  dsp_run(d->ep.dsp, 1000);
@@ -770,7 +798,7 @@ index 5f65480..8f60a48 100644
              mcpx_apu_dsp_ep_runs++;
              if (!logged_ep) {
                  logged_ep = true;
-@@ -734,7 +936,18 @@ void mcpx_apu_update_dsp_preference(MCPXAPUState *d)
+@@ -734,7 +953,18 @@ void mcpx_apu_update_dsp_preference(MCPXAPUState *d)
      }
  
      if (preference) {

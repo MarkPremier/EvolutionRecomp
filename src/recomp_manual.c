@@ -2495,12 +2495,89 @@ void sub_00080240(void)
     }
     sub_00080240_gen();
 }
+static int fall_trace(void);   /* RECOMP_FALL_TRACE, below */
+static uint32_t s_player_path;  /* the local player's path component, last seen */
+
+/* ── A path event re-fired on contact at high frame rates (issue #25) ──
+ *
+ * The "put on a path" event (sub_000A7F50, this-call (?, ?, actor), ret 0xC;
+ * +0x28 bit 1, the path at +0x30) gives the actor's path component
+ * ([actor+0x1F4]+0x20) the path and starts it from 0, then commands it.
+ * Withering Heights' trampolines (TreehouseJumpers) fire it on contact: the
+ * player is carried up an arc to the next level. At 60 fps the first step
+ * of the arc lifts the player clear of the pad; at 400+ fps the first steps
+ * are so small that the player still touches it, the contact fires the event
+ * again, and the arc restarts from 0 -- dozens of times, the player held on
+ * the pad (and, snapped down each restart, killed by "fall" damage). Above
+ * 60 fps, the same event firing again for the same actor while its path has
+ * run under a quarter of a second is ignored. At 60 fps and below nothing
+ * changes. RECOMP_PATH_RESTART_FIX=0 runs every firing. */
+extern void sub_000A7F50_gen(void);
+void sub_000A7F50(void)
+{
+    static int enabled = -1;
+    static uint32_t last_event, last_actor;
+    uint32_t event = g_ecx, actor = TUROK_MEM32(g_esp + 0xCu);
+    if (enabled < 0) enabled = !(getenv("RECOMP_PATH_RESTART_FIX") && *getenv("RECOMP_PATH_RESTART_FIX") == '0');
+    if (enabled && event && actor && (TUROK_MEM32(event + 0x28u) & 2u)) {
+        uint32_t holder = TUROK_MEM32(actor + 0x1F4u), component = holder ? TUROK_MEM32(holder + 0x20u) : 0u;
+        float seconds = frame_seconds(), at = component ? guest_float(component + 8u) : 0.0f;
+        if (event == last_event && actor == last_actor && component && at > 0.0f && at < 0.25f &&
+            seconds > 0.0f && seconds < 1.0f / 60.0f) {
+            if (fall_trace()) {
+                static unsigned shown;
+                if (shown++ < 50u)
+                    fprintf(stderr, "[PATHSTART] repeat of event %08X ignored at %.5f\n", event, at);
+            }
+            g_esp += 16u;   /* ret 0xC */
+            return;
+        }
+        last_event = event;
+        last_actor = actor;
+    }
+    sub_000A7F50_gen();
+}
+
+/* The path position setter (sub_0007FA50, this-call (position), ret 4) on the
+ * local player's path under RECOMP_FALL_TRACE: each set to the start (0)
+ * with the code addresses on the guest stack -- the first 200. */
+extern void sub_0007FA50_gen(void);
+void sub_0007FA50(void)
+{
+    static unsigned shown;
+    uint32_t component = g_ecx;
+    if (fall_trace() && component && component == s_player_path && guest_float(g_esp + 4u) == 0.0f &&
+        shown < 200u) {
+        char callers[160];
+        shown++;
+        path_callers(callers, sizeof callers);
+        fprintf(stderr, "[PATHSTART] %08X from %.5f; frame %.5f s; stack%s\n", component,
+                guest_float(component + 8u), frame_seconds(), callers);
+    }
+    sub_0007FA50_gen();
+}
+
 void sub_00080EE0(void)
 {
     static uint32_t seen[16], last_tick[16];
     uint32_t component = g_ecx, actor = TUROK_MEM32(g_esp + 4u);
     float dt = guest_float(g_esp + 8u), before = component ? guest_float(component + 8u) : 0.0f;
     sub_00080EE0_gen();
+    /* The local player on a path (a trampoline's arc): every update, moving
+     * or not, the first 1500 -- under RECOMP_FALL_TRACE as well. */
+    if ((path_trace() || fall_trace()) && component && actor && actor == TUROK_MEM32(0x257E90u)) {
+        static unsigned shown;
+        s_player_path = component;
+        if (shown++ < 1500u)
+            fprintf(stderr, "[PATHP] %08X %.5f -> %.5f of %u points, direction %u paused %u, dt %.5f, "
+                            "at %.3f %.3f %.3f; words %08X %08X %08X %08X %08X %08X\n",
+                    component, before, guest_float(component + 8u),
+                    TUROK_MEM32(TUROK_MEM32(component + 4u) + 0x14u), TUROK_MEM32(component + 0x24u) & 0xFFu,
+                    (TUROK_MEM32(component + 0x24u) >> 8) & 0xFFu, dt, guest_float(actor + 0x38u),
+                    guest_float(actor + 0x3Cu), guest_float(actor + 0x40u), TUROK_MEM32(component + 0xCu),
+                    TUROK_MEM32(component + 0x10u), TUROK_MEM32(component + 0x14u), TUROK_MEM32(component + 0x18u),
+                    TUROK_MEM32(component + 0x1Cu), TUROK_MEM32(component + 0x20u));
+    }
     if (path_trace() && component && s_path_lines < 20000u) {
         float after = guest_float(component + 8u);
         uint32_t now = path_ms();
@@ -3366,6 +3443,76 @@ void sub_0014CA80(void)
     }
 }
 
+/* ── Trampoline trace (RECOMP_FALL_TRACE=1; issue #25) ─────────
+ *
+ * A Bouncer (Withering Heights' TreehouseJumpers) bounces what touches it
+ * through sub_00088BC0 (this-call (?, bouncee, ?), ret 0xC; this = the
+ * bounce settings: +0 BounceKind, +8 BounceAdjust, +0x14 Bounce, +0x64/+0x68
+ * BounceNK/NP, +0x6C Recharge). The trampolines are kind 2: the touching
+ * actor keeps its horizontal velocity (body +0x18/+0x20) and gets 25 up
+ * (+0x1C). Players stuck inside them at high frame rates: this logs each
+ * bounce of the local player with the frame time and the velocity before
+ * and after -- every one of the first 300, then one in 500. */
+extern void sub_00088BC0_gen(void);
+extern void sub_00088C60_gen(void);
+
+static void bounce_call(void (*gen)(void), int which)
+{
+    static unsigned count;
+    uint32_t self = g_ecx, bouncee = TUROK_MEM32(g_esp + 8u), body;
+    float before[3] = { 0 };
+    int i;
+    if (!fall_trace() || !bouncee) {
+        gen();
+        return;
+    }
+    body = TUROK_MEM32(bouncee + 0xFCu);
+    for (i = 0; i < 3 && body; i++) before[i] = guest_float(body + 0x18u + 4u * i);
+    gen();
+    if (++count <= 300u || count % 500u == 0u)
+        fprintf(stderr, "[BOUNCE] %c #%u kind %u: actor %08X (vtable %08X%s, type flags %08X, wants %08X) velocity "
+                        "%.2f %.2f %.2f -> %.2f %.2f %.2f (bounced %u); at %.2f %.2f %.2f; frame %.5f s; recharge %.3f\n",
+                which ? 'T' : 'C', count, TUROK_MEM32(self), bouncee, TUROK_MEM32(bouncee),
+                bouncee == TUROK_MEM32(0x257E90u) ? ", you" : "", TUROK_MEM32(bouncee + 0x24u),
+                TUROK_MEM32(self + 0x60u), before[0], before[1], before[2],
+                body ? guest_float(body + 0x18u) : 0.0f, body ? guest_float(body + 0x1Cu) : 0.0f,
+                body ? guest_float(body + 0x20u) : 0.0f, g_eax, guest_float(bouncee + 0x38u),
+                guest_float(bouncee + 0x3Cu), guest_float(bouncee + 0x40u), frame_seconds(),
+                guest_float(self + 0x6Cu));
+}
+
+/* The set-position (sub_0003F380, this-call (position *), ret 4: +0x38..+0x40)
+ * for the local player under RECOMP_FALL_TRACE: each time it puts the player
+ * more than 0.02 lower, the height before and after and the code addresses
+ * on the guest stack (callers, innermost first) -- the first 400. */
+extern void sub_0003F380_gen(void);
+
+void sub_0003F380(void)
+{
+    static unsigned shown;
+    uint32_t self = g_ecx, position = TUROK_MEM32(g_esp + 4u), esp = g_esp;
+    if (fall_trace() && self && self == TUROK_MEM32(0x257E90u) && position && shown < 400u) {
+        float before = guest_float(self + 0x3Cu), after = guest_float(position + 4u);
+        if (after < before - 0.02f) {
+            unsigned i, found = 0;
+            shown++;
+            fprintf(stderr, "[SETPOS] y %.4f -> %.4f; frame %.5f s; callers", before, after, frame_seconds());
+            for (i = 0; i < 96u && found < 8u; i++) {
+                uint32_t v = TUROK_MEM32(esp + 4u * i);
+                if (v >= 0x00011000u && v < 0x00190000u) {
+                    fprintf(stderr, " %06X", v);
+                    found++;
+                }
+            }
+            fprintf(stderr, "\n");
+        }
+    }
+    sub_0003F380_gen();
+}
+
+void sub_00088BC0(void) { bounce_call(sub_00088BC0_gen, 0); }
+void sub_00088C60(void) { bounce_call(sub_00088C60_gen, 1); }
+
 /* ── The stuck-flier kill at high frame rates (sub_00148E30; issue #25) ──
  *
  * sub_00148E30 (this-call (seconds), ret 4), called by the player update
@@ -3467,6 +3614,9 @@ void sub_00155920(void) { hurt_call(sub_00155920_gen); }
 /* Once a frame (sub_00104600): the local player's health, every change, and
  * a write trap on it (the toolkit's RECOMP_WATCH, printing the guest return
  * addresses of whatever changes it). */
+extern void vy_watch_arm(uint32_t guest);
+extern void vy_watch_report(const char *label);
+
 static void hurt_frame(void)
 {
     static uint32_t last_player, last_health_va, frames;
@@ -3484,11 +3634,58 @@ static void hurt_frame(void)
         fprintf(stderr, "[LIFE] %.2f s frame %u: player %08X (vtable %08X) health at %08X = %.1f\n",
                 (double)(clock() - start) / CLOCKS_PER_SEC, frames, self, self ? TUROK_MEM32(self) : 0u,
                 health_va, health);
-        if (health_va && self && TUROK_MEM32(self) == MP_PLAYER_VTABLE) xbox_WatchArmVa(health_va);
+        if (health_va && self && TUROK_MEM32(self) == MP_PLAYER_VTABLE && !getenv("RECOMP_VY_WATCH"))
+            xbox_WatchArmVa(health_va);
     } else if (health != last_health) {
         fprintf(stderr, "[LIFE] %.2f s frame %u: health %.1f -> %.1f; frame %.5f s;",
                 (double)(clock() - start) / CLOCKS_PER_SEC, frames, last_health, health, frame_seconds());
         hurt_where(self);
+    }
+    /* Falling (state 6) for over 0.3 s: every frame of it, up to 4000. */
+    if (self) {
+        static float falling;
+        static unsigned shown;
+        uint32_t state = TUROK_MEM32(self + 0x12Cu), body = TUROK_MEM32(self + 0xFCu);
+        float seconds = frame_seconds();
+        falling = state && TUROK_MEM32(state) == 6u ? falling + seconds : 0.0f;
+        if (falling > 0.3f && shown < 4000u) {
+            shown++;
+            fprintf(stderr, "[AIR] %.3f s falling: y %.4f vy %.3f flags %X at %.2f %.2f; frame %.5f s\n", falling,
+                    guest_float(self + 0x3Cu), body ? guest_float(body + 0x1Cu) : 0.0f, TUROK_MEM32(self + 0x45Cu),
+                    guest_float(self + 0x38u), guest_float(self + 0x40u), seconds);
+        }
+    }
+    /* RECOMP_VY_WATCH=1: a data breakpoint on the player's vertical speed
+     * (body +0x1C); =y on the player's height (+0x3C). Reported every
+     * quarter second (src/vy_watch.c). */
+    {
+        static int on = -1;
+        static uint32_t armed;
+        static float since;
+        uint32_t body = self ? TUROK_MEM32(self + 0xFCu) : 0u;
+        if (on < 0) {
+            const char *mode = getenv("RECOMP_VY_WATCH");
+            on = !mode ? 0 : *mode == 'y' ? 2 : *mode == 'p' ? 3 : 1;
+        }
+        if (on) {
+            uint32_t target = on == 3 ? (s_player_path ? s_player_path + 8u : 0u)
+                            : on == 2 ? (self ? self + 0x3Cu : 0u) : (body ? body + 0x1Cu : 0u);
+            if (target != armed) {
+                vy_watch_arm(target);
+                armed = target;
+            }
+            since += frame_seconds();
+            if (since >= 0.25f && self) {
+                char label[160];
+                uint32_t state = TUROK_MEM32(self + 0x12Cu);
+                since = 0.0f;
+                snprintf(label, sizeof label, "%.2f s state %u y %.3f at %.2f %.2f frame %.5f s",
+                         (double)(clock() - start) / CLOCKS_PER_SEC, state ? TUROK_MEM32(state) : 0u,
+                         guest_float(self + 0x3Cu), guest_float(self + 0x38u), guest_float(self + 0x40u),
+                         frame_seconds());
+                vy_watch_report(label);
+            }
+        }
     }
     last_player = self, last_health_va = health_va, last_health = health;
 }
@@ -4037,11 +4234,19 @@ void sub_000765B0(void)
  * fps the frames at the top of a jump move ~0.02, but above ~150 fps they
  * move less than 0.0005, so the jump "landed" in mid-air: idle, then run,
  * hanging in the air for seconds while the run state's own fall test (also
- * per frame) slowly let it sink. The test is made the same speed as at 30
- * fps -- 0.015 units a second -- by nudging the remembered height for the
- * check alone: the method the movement calls just before it (vfunc +0x32C,
- * sub_001425C0, returning to 0x14A4CA) is wrapped; the real height is put
- * back when the movement returns. At 30 fps and below nothing changes. */
+ * per frame) slowly let it sink. Above 30 fps the test is made over a 30th
+ * of a second instead of a frame: a frame that moved under 0.0005 lets the
+ * fall end only once the player has moved under 0.0005 over the last 1/30 s
+ * -- what a 30 fps frame would have measured. Until then the check is
+ * passed by nudging the remembered height for it alone: the method the
+ * movement calls just before it (vfunc +0x32C, sub_001425C0, returning to
+ * 0x14A4CA) is wrapped; the real height is put back when the movement
+ * returns. (It used to hold the check to 0.015 units a second, a 30 fps
+ * frame's 0.0005 as a speed. A fall that starts from rest -- the top of a
+ * jump, the step after a landing -- is slower than that for its first
+ * frames above ~500 fps, so jumps hovered and Withering Heights' trampolines
+ * buzzed without lifting the player: issue #25.) At 30 fps and below nothing
+ * changes. */
 extern void sub_0014A020_gen(void);
 extern void sub_001425C0_gen(void);
 static float s_move_seconds;
@@ -4068,17 +4273,38 @@ void sub_001425C0(void)
 {
     static int enabled = -1;   /* RECOMP_FALL_STALL_FIX=0: the per-frame test as the game has it */
     uint32_t player = g_ecx, state = player ? TUROK_MEM32(player + 0x12Cu) : 0;
+    /* From the movement directly, or (multiplayer players, vtable 0x225020)
+     * through their own vfunc +0x32C, sub_001573D0, which calls this first
+     * (returning to 0x1573D8, with the movement's 0x14A4CA two slots up). */
+    uint32_t caller = TUROK_MEM32(g_esp);
+    int from_move = caller == 0x0014A4CAu || (caller == 0x001573D8u && TUROK_MEM32(g_esp + 8u) == 0x0014A4CAu);
+    static uint32_t window_player, window_frame;
+    static float window_seconds, window_y;   /* the stalled frames so far, and the height before them */
     if (enabled < 0) enabled = !(getenv("RECOMP_FALL_STALL_FIX") && *getenv("RECOMP_FALL_STALL_FIX") == '0');
-    if (enabled && TUROK_MEM32(g_esp) == 0x0014A4CAu && state && TUROK_MEM32(state) == 6u &&
+    if (enabled && from_move && state && TUROK_MEM32(state) == 6u &&
         s_move_seconds > 0.0f && s_move_seconds < 1.0f / 30.0f) {
         float y = guest_float(player + 0x3Cu), last = guest_float(player + 0xB0u);
-        float moved = fabsf(y - last), still = 0.015f * s_move_seconds;
-        if (moved < 0.0005f && moved >= still) {
-            float nudged = y - 0.001f;   /* reads as falling at the 30 fps rate */
-            s_stall_player = player;
-            s_stall_saved = TUROK_MEM32(player + 0xB0u);
-            memcpy(&s_stall_set, &nudged, 4);
-            TUROK_MEM32(player + 0xB0u) = s_stall_set;
+        if (fabsf(y - last) < 0.0005f) {
+            if (window_player != player || window_frame + 1u != s_move_frames) {
+                window_player = player;
+                window_seconds = 0.0f;
+                window_y = last;
+            }
+            window_frame = s_move_frames;
+            window_seconds += s_move_seconds;
+            if (window_seconds < 1.0f / 30.0f || fabsf(y - window_y) >= 0.0005f) {
+                float nudged = y - 0.001f;   /* reads as falling */
+                if (window_seconds >= 1.0f / 30.0f) {   /* moved enough over a 30 fps frame: start another */
+                    window_seconds = 0.0f;
+                    window_y = y;
+                }
+                s_stall_player = player;
+                s_stall_saved = TUROK_MEM32(player + 0xB0u);
+                memcpy(&s_stall_set, &nudged, 4);
+                TUROK_MEM32(player + 0xB0u) = s_stall_set;
+            }
+        } else {
+            window_player = 0;
         }
     }
     sub_001425C0_gen();
@@ -4130,7 +4356,7 @@ void sub_00039FF0(void)
     static int trace = -1;
     uint32_t actor = g_ecx;
     if (trace < 0) trace = getenv("RECOMP_STATE_TRACE") != NULL;
-    if (trace && actor && TUROK_MEM32(actor) == 0x00222CE8u) {
+    if (trace && actor && (TUROK_MEM32(actor) == 0x00222CE8u || TUROK_MEM32(actor) == 0x00225020u)) {
         uint32_t state = TUROK_MEM32(actor + 0x12Cu);
         fprintf(stderr, "[STATE] %u -> %u from %08X y %.4f flags %X gun %.4f %.4f %.4f move %u dt %.4f\n",
                 state ? TUROK_MEM32(state) : 0u, TUROK_MEM32(g_esp + 4u), TUROK_MEM32(g_esp),
