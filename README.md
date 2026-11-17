@@ -443,7 +443,7 @@ is how the Xbox game plays, and stays the default. **Keep weapons: On**, under
 **Options > PC Settings**, keeps every weapon your save says you own: a weapon
 the level has stays yours, and one it lacks is added back with its saved
 ammunition and upgrades. The bow stays beside the Tek Bow (they share
-arrows); with the All Weapons cheat all fourteen weapons are in, with all their attachments (Unlimited Ammo on its own adds none). Not in the flying
+arrows); with the All Weapons cheat all fourteen weapons are in, with all their attachments and full ammunition, so each is there to pick at the level's start (Unlimited Ammo on its own adds none). Not in the flying
 levels. It takes effect when a level starts or a save loads; the game then
 saves the kept weapons with your progress as it saves any weapon. Saved as
 `keep_weapons=on` in `turok_settings.ini`.
@@ -528,8 +528,11 @@ saves the kept weapons with your progress as it saves any weapon. Saved as
   each kind a PARTDEF text the particle system parses as a level loads
   (`sub_000B0110`); its eighth value, the life in seconds, is stored by
   `sub_000AF2A0`. Definitions whose texture or mesh is a splat, bullet hole,
-  scorch or gore piece get the longer life. `RECOMP_PARTICLE_TRACE=1` lists
-  the definitions. Effect parts with attached emitters keep their original
+  scorch or gore piece get the longer life -- blood only when it is laid on
+  the surface hit (`COLLIDE`): the spurts thrown from a wound (turned as
+  their `PARENT`) stand up off the ground where they land, and keep the
+  game's 3 to 5 seconds, as do camera-facing (`SCREEN`) sprites.
+  `RECOMP_PARTICLE_TRACE=1` lists the definitions. Effect parts with attached emitters keep their original
   lifetime (`sub_000AF9A0`): some steam controllers reuse a bullet-hole
   texture, and extending them made pipe steam accumulate and overlap.
   Explosion fireballs (`1txt_fireB3_.tga`) are not extended: they play their
@@ -633,6 +636,21 @@ and the pickup checks run the original visibility and update-distance gates.
 | `RECOMP_PRESENT_SCANOUT=1` | Shows the display buffer the game registered, not whichever surface was drawn last |
 | `RECOMP_FPS_CAP=vblank` | One flip per emulated vblank; the title overlay only draws on frames that saw one |
 | `RECOMP_USB=1`, `RECOMP_USB_NDP=4`, `RECOMP_USB_PORT=2`, `RECOMP_XINPUT_SLOT=auto` | Emulated USB controller fed by an XInput pad, on the root port XAPI calls controller 1 |
+
+Native rewrites. A few of the game's hottest functions run as native code
+instead of the generated code, each checked against the original over
+millions of calls: animation-channel decoding (`sub_000765B0`), a 4x4 matrix
+product (`sub_000230E0`) and object lighting (`sub_00036D00`, lifted again
+from the game's instructions by `tools/x86_lift.py` with registers and x87
+values in locals; the lifted file, like `src/recomp/gen`, is made from the
+XBE and not kept here, and without it the generated code runs). Together a
+sixth more frame rate where the game thread is the limit.
+
+| Variable | What it does |
+|----------|--------------|
+| `RECOMP_NATIVE=0` | Runs the generated code for all of them (`run_original_code.bat`), to tell whether one is behind a problem |
+| `RECOMP_NATIVE_ANIM=0`, `RECOMP_NATIVE_MATRIX4=0`, `RECOMP_NATIVE_LIGHTING=0` | The same for one |
+| `RECOMP_ANIM_VERIFY=1`, `RECOMP_MATRIX_VERIFY=1`, `RECOMP_LIGHTING_VERIFY=<n>` | Run both and report any difference (lighting: every nth call, from guest RAM snapshots; `RECOMP_LIGHTING_VERIFY_AFTER=<s>` starts it later, `RECOMP_LIGHTING_TRACE=1` with the traced copies from `tools/lift_trace.py` names the first differing block and store) |
 
 Useful while debugging:
 

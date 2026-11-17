@@ -795,11 +795,18 @@ static int partdef_is_keepsake(uint32_t text, uint32_t size)
     /* Not explosions\1txt_fireb3_.tga: those are explosion fireballs, which
      * play their texture over their life -- ten minutes of it left the
      * explosions barely there, and their lingering took the room of new
-     * effects such as the rockets' smoke trails. */
+     * effects such as the rockets' smoke trails.
+     * The value before the texture is how a particle is turned: COLLIDE
+     * (laid on the surface hit), PARENT (as what made it), SCREEN (facing
+     * the camera). Blood with the splat texture turned as its PARENT is the
+     * spurt thrown from a wound -- standing up off the ground where it fell,
+     * gone after 3-5 s on the Xbox -- and a SCREEN one is a sprite: neither
+     * is a decal. Bullet holes and scorches turned as their parent are (the
+     * impact effect lies on the surface). */
     static const char *const kinds[] = {"splat", "_bh_", "scortch", "biggib\\", "bird_pieces\\",
                                         "brain_chunks\\"};
     const char *body = (const char *)((uintptr_t)text + g_xbox_mem_offset);
-    char name[128];
+    char name[128], before[128] = "";
     uint32_t i = 0, k;
     if (!text || size > 65536u) return 0;
     while (i < size) {
@@ -812,7 +819,12 @@ static int partdef_is_keepsake(uint32_t text, uint32_t size)
         }
         name[n] = 0;
         i++;
-        if (!strstr(name, ".tga") && !strstr(name, ".mtf")) continue;
+        if (!strstr(name, ".tga") && !strstr(name, ".mtf")) {
+            memcpy(before, name, n + 1);
+            continue;
+        }
+        if (!strcmp(before, "screen")) return 0;
+        if (strstr(name, "blood\\") && strcmp(before, "collide")) return 0;
         for (k = 0; k < sizeof kinds / sizeof *kinds; k++)
             if (strstr(name, kinds[k])) return 1;
         return 0;   /* the first texture or mesh decides */
@@ -2785,9 +2797,25 @@ static void keep_weapons(uint32_t inventory)
             }
         }
     }
-    if (*kept || *added)
+    /* All Weapons: every weapon also full. One never picked up came in with
+     * no ammunition, and the game passes over an empty weapon when you
+     * change weapons, so the cheat looked as if it gave nothing (unless
+     * Unlimited Ammo was on too). Each ammunition kind goes to its maximum
+     * (the table at 0x2259A0, 16 bytes a weapon: three maximums and the
+     * number of modes); the bows' shared arrows are pooled after this
+     * (sub_0015F400). */
+    if (cheat) {
+        uint32_t begin = TUROK_MEM32(inventory + 4u), end = TUROK_MEM32(inventory + 8u), i;
+        for (i = 0; begin + (i + 1u) * 0x28u <= end && i < 32; i++) {
+            uint32_t entry = begin + i * 0x28u, weapon = TUROK_MEM32(entry), field;
+            if (weapon < 2 || weapon > 14 || !TUROK_MEM32(entry + 0x20u)) continue;
+            for (field = 0; field < 3; field++)
+                TUROK_MEM32(entry + 4u + 4u * field) = TUROK_MEM32(0x002259A0u + weapon * 16u + 4u * field);
+        }
+    }
+    if (*kept || *added || cheat)
         fprintf(stderr, "[WEAPONS] keep weapons: owned again%s; added%s%s\n", *kept ? kept : " none",
-                *added ? added : " none", cheat ? " (All Weapons cheat)" : "");
+                *added ? added : " none", cheat ? " (All Weapons cheat: all full)" : "");
 }
 
 void sub_00160BC0(void)
@@ -3286,6 +3314,498 @@ void sub_000E7570(void)
     matrix_product_native(out, a, b);
     /* As the original leaves them. */
     g_eax = a; g_ecx = b; g_edx = out;
+    g_esp += 4u;   /* ret */
+}
+
+/* ── Native rewrites: the switch back ───────────────────────────
+ *
+ * RECOMP_NATIVE=0 runs the generated code again for every native rewrite
+ * below that names it (animation decoding, the 4x4 product, object
+ * lighting); each also has its own switch. For telling whether one of them
+ * is behind a new problem. */
+static int native_enabled(const char *own)
+{
+    const char *all = getenv("RECOMP_NATIVE"), *one = getenv(own);
+    int on = !(all && *all == '0') && !(one && *one == '0');
+    if (!on) fprintf(stderr, "[NATIVE] %s off: the generated code runs\n", own);
+    return on;
+}
+
+/* ── Object lighting (sub_00036D00) ────────────────────────────
+ *
+ * thiscall (ecx = the light set; five arguments, ret 0x14): gathers the
+ * lights reaching an object -- each light's position, colour and range
+ * against the object's -- sets the ambient, and folds them into the three
+ * 4x4 light matrices the object is drawn with (merging the nearest pairs
+ * while there are more than four). Run for every lit object every frame: a
+ * tenth of the game thread in the Chapter 1 jungle, almost all of it the
+ * generated code's register and x87-stack traffic.
+ *
+ * src/native/sub_00036D00.c is the same instructions lifted again by
+ * tools/x86_lift.py, registers and x87 slots in locals (see there).
+ * RECOMP_NATIVE_LIGHTING=0 (or RECOMP_NATIVE=0) runs the generated code.
+ * RECOMP_LIGHTING_VERIFY=<n>: every nth call runs both from the same guest
+ * RAM and registers and reports any byte or register that differs (another
+ * thread writing RAM in that moment shows up too: look at the addresses). */
+extern void sub_00036D00_gen(void);
+#ifdef RECOMP_HAVE_LIFTED_LIGHTING
+extern void sub_00036D00_native(void);
+extern __declspec(thread) uint32_t g_ebx, g_esi, g_edi, g_seh_ebp;
+extern __declspec(thread) int g_fp_top;
+extern __declspec(thread) double g_fp_stack[8];
+extern __declspec(thread) uint16_t g_fp_cc;
+
+#define LIGHTING_RAM (64u << 20)
+
+typedef struct LightingRegs {
+    uint32_t r[8];
+    int top;
+    double stack[8];
+    uint16_t cc;
+} LightingRegs;
+
+static void lighting_regs_save(LightingRegs *s)
+{
+    s->r[0] = g_eax; s->r[1] = g_ecx; s->r[2] = g_edx; s->r[3] = g_ebx;
+    s->r[4] = g_esi; s->r[5] = g_edi; s->r[6] = g_esp; s->r[7] = g_seh_ebp;
+    s->top = g_fp_top; memcpy(s->stack, g_fp_stack, sizeof s->stack); s->cc = g_fp_cc;
+}
+
+static void lighting_regs_load(const LightingRegs *s)
+{
+    g_eax = s->r[0]; g_ecx = s->r[1]; g_edx = s->r[2]; g_ebx = s->r[3];
+    g_esi = s->r[4]; g_edi = s->r[5]; g_esp = s->r[6]; g_seh_ebp = s->r[7];
+    g_fp_top = s->top; memcpy(g_fp_stack, s->stack, sizeof s->stack); g_fp_cc = s->cc;
+}
+
+/* RECOMP_LIGHTING_TRACE=1 (with the verify): the traced copies of both
+ * (tools/lift_trace.py) record registers at each label; the first record
+ * that differs names the block the lifted code got wrong. */
+typedef struct LiftRecord { uint32_t at, r[7]; double top; int fp_top; uint32_t frame; } LiftRecord;
+#define LIFT_RECORDS 200000
+static LiftRecord *s_lift_records[2];
+static int s_lift_side = -1, s_lift_count[2];
+void lift_trace(uint32_t at, uint32_t a, uint32_t c, uint32_t d, uint32_t b, uint32_t si, uint32_t di, uint32_t sp,
+                double top, int fp_top)
+{
+    LiftRecord *r;
+    if (s_lift_side < 0 || s_lift_count[s_lift_side] >= LIFT_RECORDS) return;
+    r = &s_lift_records[s_lift_side][s_lift_count[s_lift_side]++];
+    r->at = at; r->r[0] = a; r->r[1] = c; r->r[2] = d; r->r[3] = b; r->r[4] = si; r->r[5] = di; r->r[6] = sp;
+    r->top = top; r->fp_top = fp_top & 7;
+    {   /* the frame: 0x200 bytes up from esp */
+        uint32_t h = 2166136261u, k;
+        for (k = 0; k < 0x200u; k += 4) { h ^= TUROK_MEM32(sp + k); h *= 16777619u; }
+        r->frame = h;
+    }
+}
+typedef struct LiftStore { uint32_t address, value, after; } LiftStore;
+static LiftStore *s_lift_stores[2];
+static int s_lift_store_count[2];
+void lift_store(uint32_t address, uint32_t value)
+{
+    LiftStore *r;
+    int side = s_lift_side;
+    if (side < 0 || !s_lift_stores[side] || s_lift_store_count[side] >= LIFT_RECORDS) return;
+    r = &s_lift_stores[side][s_lift_store_count[side]++];
+    r->address = address; r->value = value;
+    r->after = s_lift_count[side] ? s_lift_records[side][s_lift_count[side] - 1].at : 0;
+}
+#ifdef RECOMP_HAVE_LIFT_TRACE
+extern void sub_00036D00_tracelift(void);
+extern void sub_00036D00_tracegen(void);
+#else
+#define sub_00036D00_tracelift sub_00036D00_native
+#define sub_00036D00_tracegen sub_00036D00_gen
+#endif
+
+static void lift_trace_compare(int entry_top)
+{
+    static unsigned reported;
+    int n = s_lift_count[0] < s_lift_count[1] ? s_lift_count[0] : s_lift_count[1], k;
+    for (k = 0; k < n; k++) {
+        LiftRecord *x = &s_lift_records[0][k], *y = &s_lift_records[1][k];
+        int same = x->at == y->at && !memcmp(x->r, y->r, sizeof x->r) && x->fp_top == y->fp_top && x->frame == y->frame &&
+                   (x->fp_top == (entry_top & 7) || !memcmp(&x->top, &y->top, sizeof x->top));
+        if (same) continue;
+        if (reported++ < 12) {
+            fprintf(stderr, "[LIFT] record %d differs (after %08X): lifted at %08X, generated at %08X; frame %08X/%08X\n", k,
+                    k ? s_lift_records[0][k - 1].at : 0, x->at, y->at, x->frame, y->frame);
+            fprintf(stderr, "[LIFT]   lifted    eax %08X ecx %08X edx %08X ebx %08X esi %08X edi %08X esp %08X top %d %.9g\n",
+                    x->r[0], x->r[1], x->r[2], x->r[3], x->r[4], x->r[5], x->r[6], x->fp_top, x->top);
+            fprintf(stderr, "[LIFT]   generated eax %08X ecx %08X edx %08X ebx %08X esi %08X edi %08X esp %08X top %d %.9g\n",
+                    y->r[0], y->r[1], y->r[2], y->r[3], y->r[4], y->r[5], y->r[6], y->fp_top, y->top);
+        }
+        return;
+    }
+    {
+        int m = s_lift_store_count[0] < s_lift_store_count[1] ? s_lift_store_count[0] : s_lift_store_count[1];
+        for (k = 0; k < m; k++) {
+            LiftStore *x = &s_lift_stores[0][k], *y = &s_lift_stores[1][k];
+            if (x->address == y->address && x->value == y->value) continue;
+            if (reported++ < 12)
+                fprintf(stderr, "[LIFT] store %d differs: lifted [%08X] = %08X (after label %08X), generated [%08X] = %08X (after %08X)\n",
+                        k, x->address, x->value, x->after, y->address, y->value, y->after);
+            return;
+        }
+        if (s_lift_store_count[0] != s_lift_store_count[1] && reported++ < 12)
+            fprintf(stderr, "[LIFT] stores: %d lifted, %d generated\n", s_lift_store_count[0], s_lift_store_count[1]);
+    }
+    if (s_lift_count[0] != s_lift_count[1] && reported++ < 12)
+        fprintf(stderr, "[LIFT] same for %d records, then one ends (%d / %d)\n", n, s_lift_count[0], s_lift_count[1]);
+}
+
+static struct { uint32_t address, times; } s_lighting_seen[256];
+static uint32_t s_lighting_seen_count, s_lighting_reported;
+
+static void lighting_verify(void)
+{
+    static uint8_t *before, *native;
+    static unsigned checks, mismatches;
+    uint8_t *ram = (uint8_t *)(uintptr_t)g_xbox_mem_offset;
+    LightingRegs entry, after_native, after_original;
+    uint32_t page, differ = 0, shown = 0;
+    if (!before) {
+        before = (uint8_t *)malloc(LIGHTING_RAM);
+        native = (uint8_t *)malloc(LIGHTING_RAM);
+        if (!before || !native) { sub_00036D00_native(); return; }
+    }
+    lighting_regs_save(&entry);
+    memcpy(before, ram, LIGHTING_RAM);
+    {
+        static int trace = -1;
+        if (trace < 0) {
+            trace = getenv("RECOMP_LIGHTING_TRACE") != NULL;
+            if (trace) {
+                s_lift_records[0] = (LiftRecord *)malloc(sizeof(LiftRecord) * LIFT_RECORDS);
+                s_lift_records[1] = (LiftRecord *)malloc(sizeof(LiftRecord) * LIFT_RECORDS);
+                s_lift_stores[0] = (LiftStore *)malloc(sizeof(LiftStore) * LIFT_RECORDS);
+                s_lift_stores[1] = (LiftStore *)malloc(sizeof(LiftStore) * LIFT_RECORDS);
+                if (!s_lift_records[0] || !s_lift_records[1] || !s_lift_stores[0] || !s_lift_stores[1]) trace = 0;
+            }
+        }
+        s_lift_side = -1;
+        if (trace) { s_lift_count[0] = s_lift_count[1] = 0; s_lift_store_count[0] = s_lift_store_count[1] = 0; s_lift_side = 0; sub_00036D00_tracelift(); s_lift_side = -1; }
+        else if (getenv("RECOMP_LIGHTING_VERIFY_SELF")) sub_00036D00_gen();
+        else sub_00036D00_native();
+    }
+    lighting_regs_save(&after_native);
+    memcpy(native, ram, LIGHTING_RAM);
+    for (page = 0; page < LIGHTING_RAM; page += 4096u)   /* back as it was */
+        if (memcmp(ram + page, before + page, 4096u)) memcpy(ram + page, before + page, 4096u);
+    lighting_regs_load(&entry);
+    if (s_lift_records[0]) {
+        s_lift_side = 1; sub_00036D00_tracegen(); s_lift_side = -1;
+        lift_trace_compare(entry.top);
+    } else sub_00036D00_gen();
+    lighting_regs_save(&after_original);
+    for (page = 0; page < LIGHTING_RAM; page += 4096u) {
+        uint32_t i;
+        if (!memcmp(ram + page, native + page, 4096u)) continue;
+        for (i = 0; i < 4096u; i += 4) {
+            uint32_t a, b;
+            memcpy(&a, native + page + i, 4); memcpy(&b, ram + page + i, 4);
+            if (a == b) continue;
+            differ++;
+            {   /* every address that ever differed, with how often */
+                uint32_t k;
+                for (k = 0; k < s_lighting_seen_count && s_lighting_seen[k].address != page + i; k++) {}
+                if (k < s_lighting_seen_count) s_lighting_seen[k].times++;
+                else if (k < 256) { s_lighting_seen[k].address = page + i; s_lighting_seen[k].times = 1; s_lighting_seen_count++; }
+            }
+            /* other threads' stacks, the D3D device's counters, the frame clocks */
+            if ((page + i >= 0x007B0000u && page + i < 0x00800000u) ||
+                (page + i >= 0x001A4400u && page + i < 0x001A4C00u) || page + i == 0x00257DF0u ||
+                (page + i >= 0x01081E00u && page + i < 0x01082900u) || page + i < 0x4000u) continue;
+            if (shown < 8 && s_lighting_reported < 24) {
+                fprintf(stderr, "[LIGHTING]   %08X: native %08X, original %08X (before %08X)\n",
+                        page + i, a, b, *(uint32_t *)(before + page + i));
+                shown++;
+            }
+        }
+    }
+    if (shown) s_lighting_reported++;
+    if (shown) fprintf(stderr, "[LIGHTING]   (check %u; ecx %08X, esp at entry %08X)\n", checks + 1, entry.r[1], entry.r[6]);
+    after_native.top &= 7; after_original.top &= 7;
+    checks++;
+    if (differ || memcmp(after_native.r, after_original.r, sizeof after_native.r) ||
+        after_native.top != after_original.top || after_native.cc != after_original.cc) {
+        if (mismatches++ < 16)
+            fprintf(stderr, "[LIGHTING] check %u differs: %u words; eax %08X/%08X esp %08X/%08X ebx %08X/%08X "
+                    "esi %08X/%08X edi %08X/%08X ecx %08X/%08X edx %08X/%08X x87 top %d/%d cc %04X/%04X\n",
+                    checks, differ, after_native.r[0], after_original.r[0], after_native.r[6], after_original.r[6],
+                    after_native.r[3], after_original.r[3], after_native.r[4], after_original.r[4],
+                    after_native.r[5], after_original.r[5], after_native.r[1], after_original.r[1],
+                    after_native.r[2], after_original.r[2], after_native.top, after_original.top,
+                    after_native.cc, after_original.cc);
+    }
+    if ((checks & 63u) == 0) {
+        uint32_t k;
+        fprintf(stderr, "[LIGHTING] %u checks, %u differ; addresses that ever differed:", checks, mismatches);
+        for (k = 0; k < s_lighting_seen_count; k++)
+            fprintf(stderr, " %08X x%u", s_lighting_seen[k].address, s_lighting_seen[k].times);
+        fprintf(stderr, "\n");
+    }
+}
+
+#endif   /* RECOMP_HAVE_LIFTED_LIGHTING */
+
+void sub_00036D00(void)
+{
+#ifndef RECOMP_HAVE_LIFTED_LIGHTING
+    sub_00036D00_gen();   /* src/native/sub_00036D00.c not made: tools/x86_lift.py */
+#else
+    static int mode = -1, every = 0;
+    static unsigned calls;
+    if (mode < 0) {
+        const char *verify = getenv("RECOMP_LIGHTING_VERIFY");
+        mode = native_enabled("RECOMP_NATIVE_LIGHTING");
+        if (mode && verify && *verify) {
+            every = atoi(verify);
+            if (every < 1) every = 256;
+            mode = 2;
+            fprintf(stderr, "[LIGHTING] verifying every %d calls\n", every);
+        }
+    }
+    if (mode == 0) { sub_00036D00_gen(); return; }
+    if (mode == 2 && ++calls % (unsigned)every == 0) {
+        /* RECOMP_LIGHTING_VERIFY_AFTER=<s>: from that many seconds after the first call */
+        static time_t from = 0;
+        if (!from) {
+            const char *after = getenv("RECOMP_LIGHTING_VERIFY_AFTER");
+            from = time(NULL) + (after ? atoi(after) : 0) + (time_t)(after ? 0 : -1);
+        }
+        if (time(NULL) >= from) { lighting_verify(); return; }
+    }
+    sub_00036D00_native();
+#endif
+}
+
+/* ── 4x4 matrix product (sub_000230E0) ─────────────────────────
+ *
+ * cdecl (out, a, b): out = a x b for 4x4 matrices whose last row is
+ * (0, 0, 0, 1), rows of four floats; out's last row is written as that.
+ * The culling and transform code (sub_000205xx-00020Exx) calls it for every
+ * object it places: at the waterfall of a later level, 7% of the game
+ * thread. Same products and sums in the same order with the generated
+ * code's rounding (mx_round), all reads before any write as the original's.
+ * It also leaves two of its sums in its own argument slots, as the original
+ * does. RECOMP_MATRIX_VERIFY=1 compares it with the original too;
+ * RECOMP_NATIVE_MATRIX4=0 (or RECOMP_NATIVE=0) runs the original instead. */
+extern void sub_000230E0_gen(void);
+
+static void matrix4_product_native(uint32_t out, uint32_t a, uint32_t b, uint32_t slots)
+{
+    double v1 = MXADD(MXSUM3(MXMUL(MX(b, 14), MX(a, 10)), MXMUL(MX(a, 6), MX(b, 13)), MXMUL(MX(a, 2), MX(b, 12))), MX(a, 14));
+    double v2 = MXSUM3(MXMUL(MX(b, 10), MX(a, 10)), MXMUL(MX(b, 9), MX(a, 6)), MXMUL(MX(a, 2), MX(b, 8)));
+    double v3 = MXSUM3(MXMUL(MX(b, 6), MX(a, 10)), MXMUL(MX(a, 2), MX(b, 4)), MXMUL(MX(a, 6), MX(b, 5)));
+    double v4 = MXSUM3(MXMUL(MX(a, 6), MX(b, 1)), MXMUL(MX(a, 2), MX(b, 0)), MXMUL(MX(a, 10), MX(b, 2)));
+    double t8 = MXADD(MXSUM3(MXMUL(MX(b, 14), MX(a, 9)), MXMUL(MX(a, 5), MX(b, 13)), MXMUL(MX(a, 1), MX(b, 12))), MX(a, 13));
+    double t0 = MXSUM3(MXMUL(MX(b, 10), MX(a, 9)), MXMUL(MX(b, 9), MX(a, 5)), MXMUL(MX(a, 1), MX(b, 8)));
+    double v5 = MXSUM3(MXMUL(MX(b, 6), MX(a, 9)), MXMUL(MX(a, 1), MX(b, 4)), MXMUL(MX(a, 5), MX(b, 5)));
+    double v6 = MXSUM3(MXMUL(MX(a, 5), MX(b, 1)), MXMUL(MX(a, 9), MX(b, 2)), MXMUL(MX(a, 1), MX(b, 0)));
+    double t4 = MXADD(MXSUM3(MXMUL(MX(b, 14), MX(a, 8)), MXMUL(MX(b, 12), MX(a, 0)), MXMUL(MX(a, 4), MX(b, 13))), MX(a, 12));
+    double t18 = MXSUM3(MXMUL(MX(b, 9), MX(a, 4)), MXMUL(MX(b, 8), MX(a, 0)), MXMUL(MX(b, 10), MX(a, 8)));
+    double t14 = MXSUM3(MXMUL(MX(a, 4), MX(b, 5)), MXMUL(MX(b, 6), MX(a, 8)), MXMUL(MX(b, 4), MX(a, 0)));
+    double v7 = MXSUM3(MXMUL(MX(a, 0), MX(b, 0)), MXMUL(MX(a, 8), MX(b, 2)), MXMUL(MX(a, 4), MX(b, 1)));
+    /* its locals: arg slots 2 and 3 (esp+0x14/0x18 inside it) */
+    mx_store(slots + 4u, t14);
+    mx_store(slots + 8u, t18);
+    mx_store(out + 0x10u, t14);
+    TUROK_MEM32(out + 0x0Cu) = 0;
+    TUROK_MEM32(out + 0x1Cu) = 0;
+    mx_store(out + 0x00u, v7);
+    mx_store(out + 0x20u, t18);
+    mx_store(out + 0x04u, v6);
+    TUROK_MEM32(out + 0x2Cu) = 0;
+    mx_store(out + 0x08u, v4);
+    mx_store(out + 0x24u, t0);
+    mx_store(out + 0x30u, t4);
+    mx_store(out + 0x14u, v5);
+    mx_store(out + 0x18u, v3);
+    mx_store(out + 0x28u, v2);
+    mx_store(out + 0x38u, v1);
+    mx_store(out + 0x34u, t8);
+    TUROK_MEM32(out + 0x3Cu) = 0x3F800000u;
+    g_eax = out;
+    g_ecx = TUROK_MEM32(out + 0x30u);
+    g_edx = TUROK_MEM32(out + 0x34u);
+}
+
+void sub_000230E0(void)
+{
+    static int verify = -1;
+    uint32_t out = TUROK_MEM32(g_esp + 4u), a = TUROK_MEM32(g_esp + 8u), b = TUROK_MEM32(g_esp + 12u);
+    static int native = -1;
+    if (native < 0) native = native_enabled("RECOMP_NATIVE_MATRIX4");
+    if (!native) { sub_000230E0_gen(); return; }
+    if (verify < 0) verify = getenv("RECOMP_MATRIX_VERIFY") != NULL;
+    if (verify) {
+        uint32_t saved_out[16], saved_a[16], saved_b[16], saved_slots[2], native[18], original[18], i;
+        static unsigned checks, mismatches;
+        for (i = 0; i < 16; i++) {
+            saved_out[i] = TUROK_MEM32(out + i * 4u);
+            saved_a[i] = TUROK_MEM32(a + i * 4u);
+            saved_b[i] = TUROK_MEM32(b + i * 4u);
+        }
+        saved_slots[0] = TUROK_MEM32(g_esp + 8u); saved_slots[1] = TUROK_MEM32(g_esp + 12u);
+        matrix4_product_native(out, a, b, g_esp + 4u);
+        for (i = 0; i < 16; i++) native[i] = TUROK_MEM32(out + i * 4u);
+        native[16] = TUROK_MEM32(g_esp + 8u); native[17] = TUROK_MEM32(g_esp + 12u);
+        for (i = 0; i < 16; i++) TUROK_MEM32(out + i * 4u) = saved_out[i];
+        for (i = 0; i < 16; i++) { TUROK_MEM32(a + i * 4u) = saved_a[i]; TUROK_MEM32(b + i * 4u) = saved_b[i]; }
+        TUROK_MEM32(g_esp + 8u) = saved_slots[0]; TUROK_MEM32(g_esp + 12u) = saved_slots[1];
+        {
+            uint32_t slots = g_esp + 4u;
+            sub_000230E0_gen();   /* pops its return address */
+            for (i = 0; i < 16; i++) original[i] = TUROK_MEM32(out + i * 4u);
+            original[16] = TUROK_MEM32(slots + 4u); original[17] = TUROK_MEM32(slots + 8u);
+        }
+        checks++;
+        if (memcmp(native, original, sizeof native) && mismatches++ < 16)
+            fprintf(stderr, "[MATRIX4] native product differs (check %u, control word %04X)\n",
+                    checks, (unsigned)g_fp_control_word);
+        if ((checks & 0xFFFFFu) == 0)
+            fprintf(stderr, "[MATRIX4] %u checks, %u differ\n", checks, mismatches);
+        return;
+    }
+    matrix4_product_native(out, a, b, g_esp + 4u);
+    g_esp += 4u;   /* ret */
+}
+
+/* ── Animation channel decoding (sub_000765B0) ─────────────────
+ *
+ * cdecl (stream, count, out): unpacks one channel of a compressed
+ * animation into `out`, 16-bit values. The stream is {bit offset 0-7,
+ * bits left, ?, byte pointer}; a field of n bits is the dword at the
+ * pointer shifted right (arithmetically) by the bit offset. A 16-bit start
+ * value comes first, then a 4-bit width: 0 means `count` raw 16-bit deltas;
+ * otherwise groups of deltas that many bits wide, sign and magnitude, each
+ * group ended by the escape code (the sign bit alone) and followed, while
+ * fewer than `count` values are out, by the next group's width. Every delta
+ * is added to a velocity and the velocity to the value (second-order
+ * delta coding), and each value stored.
+ *
+ * Its only caller (sub_00076760, three channels a key) runs it for every
+ * animated thing each frame: at the waterfall of a later level, a tenth of
+ * the game thread, every step through the generated code's flags and
+ * memory. Done here with the same arithmetic. The caller reads nothing it
+ * leaves but the outputs and the stream; its own first argument slot ends
+ * as the original leaves it (its loop counter). RECOMP_ANIM_VERIFY=1 runs the
+ * original after it and reports any difference; RECOMP_NATIVE_ANIM=0 (or
+ * RECOMP_NATIVE=0) runs the original instead. */
+extern void sub_000765B0_gen(void);
+#define TUROK_MEM16(va) (*(volatile uint16_t *)((uintptr_t)(va) + g_xbox_mem_offset))
+#define TUROK_MEM8(va) (*(volatile uint8_t *)((uintptr_t)(va) + g_xbox_mem_offset))
+
+typedef struct AnimDecode {
+    uint32_t offset, remaining, pointer;   /* the stream's +0, +4, +0xC after */
+    uint32_t slot;                          /* the first argument's slot after */
+    uint32_t words;                         /* values written */
+} AnimDecode;
+
+#define ANIM_MAX_WORDS 65536u
+static uint16_t s_anim_words[ANIM_MAX_WORDS];
+
+/* 0 when the stream runs past ANIM_MAX_WORDS values (left to the original). */
+static int anim_decode_native(uint32_t stream, int32_t count, AnimDecode *result)
+{
+    uint32_t offset = TUROK_MEM32(stream), remaining = TUROK_MEM32(stream + 4u), pointer = TUROK_MEM32(stream + 0xCu);
+    uint32_t value, velocity = 0, words = 0, peek;
+#define ANIM_FIELD() ((uint32_t)((int32_t)TUROK_MEM32(pointer) >> (offset & 31u)))
+#define ANIM_ADVANCE(n) do { uint32_t next_ = offset + (n); pointer += (uint32_t)((int32_t)next_ >> 3); \
+                             offset = next_ & 7u; remaining -= (n); } while (0)
+    value = ANIM_FIELD();
+    ANIM_ADVANCE(16u);
+    peek = ((uint32_t)TUROK_MEM8(pointer) | ((uint32_t)TUROK_MEM8(pointer + 1u) << 8)) >> (offset & 31u);
+    if ((peek & 0xFu) == 0) {
+        ANIM_ADVANCE(4u);
+        result->slot = TUROK_MEM32(g_esp + 4u);
+        if (count > 0) {
+            int32_t left;
+            if ((uint32_t)count > ANIM_MAX_WORDS) return 0;
+            for (left = count; left; left--) {
+                uint32_t delta = ANIM_FIELD();
+                ANIM_ADVANCE(16u);
+                velocity += delta;
+                value += velocity;
+                s_anim_words[words++] = (uint16_t)value;
+            }
+            result->slot = 0;
+        }
+    } else {
+        uint32_t done = 0;
+        result->slot = 0;
+        if (count > 0) for (;;) {
+            uint32_t width = ANIM_FIELD() & 0xFu, magnitude, sign, mask;
+            ANIM_ADVANCE(4u);
+            magnitude = ~(0xFFFFu << ((width - 1u) & 31u));
+            sign = (1u << ((width - 1u) & 31u)) & 0xFFFFu;
+            mask = ~(0xFFFFFFFFu << (width & 31u));
+            for (;;) {
+                uint32_t field = ANIM_FIELD() & mask, extended, delta;
+                ANIM_ADVANCE(width);
+                extended = (uint32_t)(int32_t)(int16_t)field;
+                if (!(sign & extended)) delta = field;
+                else if (extended == sign) break;   /* the group's end */
+                else delta = 0u - (field & magnitude);
+                if (words >= ANIM_MAX_WORDS) return 0;
+                velocity += delta;
+                value += velocity;
+                s_anim_words[words++] = (uint16_t)value;
+                done++;
+            }
+            if ((int32_t)done >= count) break;
+        }
+        result->slot = done;
+    }
+#undef ANIM_FIELD
+#undef ANIM_ADVANCE
+    result->offset = offset;
+    result->remaining = remaining;
+    result->pointer = pointer;
+    result->words = words;
+    return 1;
+}
+
+void sub_000765B0(void)
+{
+    static int verify = -1;
+    uint32_t stream = TUROK_MEM32(g_esp + 4u), out = TUROK_MEM32(g_esp + 12u), i;
+    int32_t count = (int32_t)TUROK_MEM32(g_esp + 8u);
+    AnimDecode result;
+    static int native = -1;
+    if (native < 0) native = native_enabled("RECOMP_NATIVE_ANIM");
+    if (!native) { sub_000765B0_gen(); return; }
+    if (verify < 0) verify = getenv("RECOMP_ANIM_VERIFY") != NULL;
+    if (!anim_decode_native(stream, count, &result)) {
+        sub_000765B0_gen();
+        return;
+    }
+    if (verify) {
+        static unsigned checks, mismatches;
+        uint32_t slot_va = g_esp + 4u;
+        int same;
+        sub_000765B0_gen();   /* pops its return address */
+        same = TUROK_MEM32(stream) == result.offset && TUROK_MEM32(stream + 4u) == result.remaining &&
+               TUROK_MEM32(stream + 0xCu) == result.pointer && TUROK_MEM32(slot_va) == result.slot;
+        for (i = 0; same && i < result.words; i++) same = TUROK_MEM16(out + i * 2u) == s_anim_words[i];
+        checks++;
+        if (!same && mismatches++ < 16)
+            fprintf(stderr, "[ANIM] native decode differs (check %u: %u values, stream %08X)\n", checks,
+                    result.words, stream);
+        if ((checks & 0xFFFFFu) == 0)
+            fprintf(stderr, "[ANIM] %u checks, %u differ\n", checks, mismatches);
+        return;
+    }
+    for (i = 0; i < result.words; i++) TUROK_MEM16(out + i * 2u) = s_anim_words[i];
+    TUROK_MEM32(stream) = result.offset;
+    TUROK_MEM32(stream + 4u) = result.remaining;
+    TUROK_MEM32(stream + 0xCu) = result.pointer;
+    TUROK_MEM32(g_esp + 4u) = result.slot;
+    g_eax = 1;
+    g_ecx = out + result.words * 2u;
+    g_edx = result.offset;
     g_esp += 4u;   /* ret */
 }
 

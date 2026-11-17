@@ -66,6 +66,19 @@ set(GAME_SOURCES
 #   src/recomp/recomp_dispatch.h     - binary search dispatch table
 #   src/recomp/recomp_types.h        - register model, ICALL macros, MEM helpers
 
+# Functions lifted again from the game's own code by tools/x86_lift.py (and
+# their traced copies, tools/lift_trace.py): like src/recomp/gen, made from the
+# XBE and not kept in the repository. Without them the generated code runs.
+set(RECOMP_LIFTED_DEFINITIONS)
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/src/native/sub_00036D00.c)
+    list(APPEND GAME_SOURCES src/native/sub_00036D00.c)
+    list(APPEND RECOMP_LIFTED_DEFINITIONS RECOMP_HAVE_LIFTED_LIGHTING)
+    if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/src/native/sub_00036D00_tracegen.c)
+        list(APPEND GAME_SOURCES src/native/sub_00036D00_tracelift.c src/native/sub_00036D00_tracegen.c)
+        list(APPEND RECOMP_LIFTED_DEFINITIONS RECOMP_HAVE_LIFT_TRACE)
+    endif()
+endif()
+
 add_executable(${PROJECT_NAME} WIN32
     ${GAME_SOURCES}
     ${RECOMP_GEN_SOURCES}
@@ -73,6 +86,7 @@ add_executable(${PROJECT_NAME} WIN32
 
 # Link against the xboxrecomp umbrella target (all 6 runtime libraries)
 target_link_libraries(${PROJECT_NAME} PRIVATE xboxrecomp)
+target_compile_definitions(${PROJECT_NAME} PRIVATE ${RECOMP_LIFTED_DEFINITIONS})
 
 # Include paths for generated recomp headers
 target_include_directories(${PROJECT_NAME} PRIVATE
