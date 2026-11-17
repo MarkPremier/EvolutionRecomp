@@ -823,7 +823,7 @@ index 342f1f8..287570d 100644
      struct {
          int current_entry;
 diff --git a/src/apu/apu_vp.c b/src/apu/apu_vp.c
-index 7c36737..9fe4887 100644
+index 7c36737..e60cfa1 100644
 --- a/src/apu/apu_vp.c
 +++ b/src/apu/apu_vp.c
 @@ -54,26 +54,45 @@ static void set_notify_status(MCPXAPUState *d, uint32_t v, int notifier,
@@ -1258,7 +1258,7 @@ index 7c36737..9fe4887 100644
      bool stereo = voice_get_mask(d, (uint16_t)v, NV_PAVS_VOICE_CFG_FMT,
                                   NV_PAVS_VOICE_CFG_FMT_STEREO) != 0;
      unsigned int channels = stereo ? 2 : 1;
-@@ -807,8 +953,8 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
+@@ -807,8 +953,29 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
          }
  
          hwaddr addr = d->regs[NV_PAPU_VPSSLADDR] + page * 8;
@@ -1266,10 +1266,31 @@ index 7c36737..9fe4887 100644
 -        segment_length = ldl_le_phys(address_space_memory, addr + 4);
 +        segment_offset = ds_ldl(addr);
 +        segment_length = ds_ldl(addr + 4);
++        /* A stream segment outside RAM: DirectSound's packet table (SSL)
++         * reads as garbage. Say which entry, of which table, and what the
++         * table holds around it -- the first few times. */
++        if (segment_offset >= 0x08000000u) {
++            static unsigned reported;
++            if (reported < 6) {
++                reported++;
++                fprintf(stderr, "[APU-SSL] voice %d: ssl %d seg %d (base %u count %u) page %d of table %08X: "
++                                "entry %08X %08X; voices %08X, sge %08X\n",
++                        v, ssl_index, ssl_seg, (unsigned)d->vp.ssl[v].base[ssl_index],
++                        (unsigned)d->vp.ssl[v].count[ssl_index], page,
++                        (unsigned)d->regs[NV_PAPU_VPSSLADDR], (unsigned)segment_offset,
++                        (unsigned)segment_length, (unsigned)d->regs[NV_PAPU_VPVADDR],
++                        (unsigned)d->regs[NV_PAPU_VPSGEADDR]);
++                for (int k = page - 4 < 0 ? 0 : page - 4; k < page + 4; k++)
++                    fprintf(stderr, "[APU-SSL]   page %d: %08X %08X\n", k,
++                            ds_ldl(d->regs[NV_PAPU_VPSSLADDR] + k * 8),
++                            ds_ldl(d->regs[NV_PAPU_VPSSLADDR] + k * 8 + 4));
++                fflush(stderr);
++            }
++        }
          assert(segment_offset != 0);
          assert(segment_length != 0);
          seg_len = (segment_length >> 0) & 0xffff;
-@@ -831,6 +977,10 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
+@@ -831,6 +998,10 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
      } else {
          block_size = container_size;
      }
@@ -1280,7 +1301,7 @@ index 7c36737..9fe4887 100644
      block_size *= samples_per_block;
  
      int sample_count = 0;
-@@ -843,8 +993,7 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
+@@ -843,8 +1014,7 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
                  uint32_t linear_addr = block_index * (uint32_t)block_size;
                  if (stream) {
                      hwaddr addr = segment_offset + linear_addr;
@@ -1290,7 +1311,7 @@ index 7c36737..9fe4887 100644
                  } else {
                      linear_addr += ba;
                      for (unsigned int word_index = 0;
-@@ -911,7 +1060,7 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
+@@ -911,7 +1081,7 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
          }
      }
  
@@ -1299,7 +1320,7 @@ index 7c36737..9fe4887 100644
          if (stream) {
              d->vp.ssl[v].ssl_seg += 1;
              cbo = 0;
-@@ -929,7 +1078,9 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
+@@ -929,7 +1099,9 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
                  cbo = lbo;
              } else {
                  cbo = ebo;
@@ -1310,7 +1331,7 @@ index 7c36737..9fe4887 100644
              }
          }
      }
-@@ -951,11 +1102,10 @@ static long voice_resample_callback(void *cb_data, float **data)
+@@ -951,11 +1123,10 @@ static long voice_resample_callback(void *cb_data, float **data)
  {
      MCPXAPUVoiceFilter *filter = cb_data;
      uint16_t v = filter->voice;
@@ -1323,7 +1344,7 @@ index 7c36737..9fe4887 100644
          int active = voice_get_mask(d, v, NV_PAVS_VOICE_PAR_STATE,
                                      NV_PAVS_VOICE_PAR_STATE_ACTIVE_VOICE);
          if (!active) {
-@@ -964,13 +1114,13 @@ static long voice_resample_callback(void *cb_data, float **data)
+@@ -964,13 +1135,13 @@ static long voice_resample_callback(void *cb_data, float **data)
          int count = voice_get_samples(
              d, v, &filter->resample_buf[sample_count],
              NUM_SAMPLES_PER_FRAME - sample_count);
@@ -1339,7 +1360,7 @@ index 7c36737..9fe4887 100644
          /* Starvation causes SRC to hang on repeated calls. Provide silence. */
          memset(&filter->resample_buf[sample_count], 0,
                 2 * (NUM_SAMPLES_PER_FRAME - sample_count) * sizeof(float));
-@@ -984,7 +1134,7 @@ static long voice_resample_callback(void *cb_data, float **data)
+@@ -984,7 +1155,7 @@ static long voice_resample_callback(void *cb_data, float **data)
  static int voice_resample(MCPXAPUState *d, uint16_t v, float samples[][2],
                            int requested_num, float rate)
  {
@@ -1348,7 +1369,7 @@ index 7c36737..9fe4887 100644
      MCPXAPUVoiceFilter *filter = &d->vp.filters[v];
  
      if (filter->resampler == NULL) {
-@@ -1005,7 +1155,7 @@ static int voice_resample(MCPXAPUState *d, uint16_t v, float samples[][2],
+@@ -1005,7 +1176,7 @@ static int voice_resample(MCPXAPUState *d, uint16_t v, float samples[][2],
      }
      if (count != requested_num) {
          DPRINTF("resample returned fewer than expected: %d\n", count);
@@ -1357,7 +1378,7 @@ index 7c36737..9fe4887 100644
              return -1;
          }
      }
-@@ -1022,7 +1172,7 @@ static void voice_process(MCPXAPUState *d,
+@@ -1022,7 +1193,7 @@ static void voice_process(MCPXAPUState *d,
                            float sample_buf[NUM_SAMPLES_PER_FRAME][2],
                            uint16_t v, int voice_list)
  {
@@ -1366,7 +1387,7 @@ index 7c36737..9fe4887 100644
      bool stereo = voice_get_mask(d, v, NV_PAVS_VOICE_CFG_FMT,
                                   NV_PAVS_VOICE_CFG_FMT_STEREO) != 0;
      unsigned int channels = stereo ? 2 : 1;
-@@ -1067,6 +1217,7 @@ static void voice_process(MCPXAPUState *d,
+@@ -1067,6 +1238,7 @@ static void voice_process(MCPXAPUState *d,
      bool multipass = voice_get_mask(d, v, NV_PAVS_VOICE_CFG_FMT,
                                      NV_PAVS_VOICE_CFG_FMT_MULTIPASS) != 0;
      dbg->multipass = multipass;
@@ -1374,7 +1395,7 @@ index 7c36737..9fe4887 100644
  
      if (multipass) {
          /* Read from multipass bin */
-@@ -1097,6 +1248,10 @@ static void voice_process(MCPXAPUState *d,
+@@ -1097,6 +1269,10 @@ static void voice_process(MCPXAPUState *d,
               * sat here indefinitely while the title waited in voice_lock. */
              if (count == 0 && ++empty > 4) break;
              sample_count += count;
@@ -1385,7 +1406,7 @@ index 7c36737..9fe4887 100644
          }
      }
  
-@@ -1141,7 +1296,10 @@ static void voice_process(MCPXAPUState *d,
+@@ -1141,7 +1317,10 @@ static void voice_process(MCPXAPUState *d,
          dbg->vol[i] = vol[i];
      }
  
@@ -1397,7 +1418,7 @@ index 7c36737..9fe4887 100644
  
      /* Low-pass filter */
      int fmode = voice_get_mask(d, v, NV_PAVS_VOICE_CFG_MISC,
-@@ -1172,7 +1330,7 @@ static void voice_process(MCPXAPUState *d,
+@@ -1172,7 +1351,7 @@ static void voice_process(MCPXAPUState *d,
      }
  
      /* HRTF processing for 3D voices */
@@ -1406,7 +1427,7 @@ index 7c36737..9fe4887 100644
          uint16_t hrtf_handle =
              (uint16_t)voice_get_mask(d, v, NV_PAVS_VOICE_CFG_HRTF_TARGET,
                                       NV_PAVS_VOICE_CFG_HRTF_TARGET_HANDLE);
-@@ -1182,6 +1340,8 @@ static void voice_process(MCPXAPUState *d,
+@@ -1182,6 +1361,8 @@ static void voice_process(MCPXAPUState *d,
      }
  
      /* Mix into bins */
@@ -1415,7 +1436,7 @@ index 7c36737..9fe4887 100644
      for (int b = 0; b < 8; b++) {
          float g = ea_value;
          float hr;
-@@ -1194,6 +1354,13 @@ static void voice_process(MCPXAPUState *d,
+@@ -1194,6 +1375,13 @@ static void voice_process(MCPXAPUState *d,
          for (int i = 0; i < NUM_SAMPLES_PER_FRAME; i++) {
              mixbins[bin[b]][i] += g * samples[i][b % channels];
          }
@@ -1429,7 +1450,7 @@ index 7c36737..9fe4887 100644
      }
  
      /* VP monitor mix */
-@@ -1211,6 +1378,7 @@ static void voice_process(MCPXAPUState *d,
+@@ -1211,6 +1399,7 @@ static void voice_process(MCPXAPUState *d,
          }
      }
  
@@ -1437,7 +1458,7 @@ index 7c36737..9fe4887 100644
      (void)voice_list;
  }
  
-@@ -1240,16 +1408,136 @@ void mcpx_apu_vp_frame(MCPXAPUState *d,
+@@ -1240,16 +1429,136 @@ void mcpx_apu_vp_frame(MCPXAPUState *d,
              }
  
              uint16_t v = (uint16_t)d->regs[current];
@@ -1576,7 +1597,7 @@ index 7c36737..9fe4887 100644
              d->regs[current] = d->regs[next];
          }
      }
-@@ -1275,13 +1563,12 @@ void mcpx_apu_vp_frame(MCPXAPUState *d,
+@@ -1275,13 +1584,12 @@ void mcpx_apu_vp_frame(MCPXAPUState *d,
  
  void mcpx_apu_vp_init(MCPXAPUState *d)
  {

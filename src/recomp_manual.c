@@ -1438,11 +1438,14 @@ void sub_00040DB0(void)
     sub_00040DB0_gen();
 }
 
+static void hurt_frame(void);   /* RECOMP_FALL_TRACE, below */
+
 void sub_00104600(void)
 {
     s_particle_frame++;
     sub_00104600_gen();
     keep_decals_frame();
+    hurt_frame();
     /* RECOMP_DEBUG_KILL=<s>: that long after a level's actors were made,
      * every watched AnimalAI's health (+0x1D0, a float) is set to 0 once --
      * a dinosaur to watch die without a fight. */
@@ -3314,6 +3317,222 @@ void sub_000E7570(void)
     /* As the original leaves them. */
     g_eax = a; g_ecx = b; g_edx = out;
     g_esp += 4u;   /* ret */
+}
+
+/* ── Fall trace (RECOMP_FALL_TRACE=1; issue #25) ───────────────
+ *
+ * Players dying at random above 150 fps (both Flight maps; the start of
+ * Chapter 2 Level 3 uncapped). The on-foot fall checks are speed-based:
+ * sub_0014CA80 (after the on-foot update) starts the falling scream
+ * (+0x1838) once the downward speed ([+0xFC]+0x1C) passes FALLDAMAGEMAXSPEED
+ * (+0x8B4); sub_0014B360 (thiscall (landing), ret 4) takes damage on
+ * landing from the impact speed (landing+0xC) between FALLDAMAGEMINSPEED
+ * (+0x8B0) and the maximum. This logs both with the frame time, to see
+ * whether a high frame rate hands them a bogus speed. */
+extern void sub_0014B360_gen(void);
+extern void sub_0014CA80_gen(void);
+
+static int fall_trace(void)
+{
+    static int on = -1;
+    if (on < 0) on = getenv("RECOMP_FALL_TRACE") != NULL;
+    return on;
+}
+
+void sub_0014B360(void)
+{
+    if (fall_trace()) {
+        uint32_t self = g_ecx, landing = TUROK_MEM32(g_esp + 4u);
+        float speed = landing ? guest_float(landing + 0xCu) : 0.0f;
+        float least = guest_float(self + 0x8B0u), most = guest_float(self + 0x8B4u);
+        if (speed < -least)
+            fprintf(stderr, "[FALL] landing at %.2f (damage from %.2f, all at %.2f); frame %.5f s; at %.1f %.1f %.1f\n",
+                    speed, -least, -most, frame_seconds(), guest_float(self + 0x38u), guest_float(self + 0x3Cu),
+                    guest_float(self + 0x40u));
+    }
+    sub_0014B360_gen();
+}
+
+void sub_0014CA80(void)
+{
+    uint32_t self = g_ecx, falling = fall_trace() ? TUROK_MEM32(self + 0x1838u) : 1u;
+    sub_0014CA80_gen();
+    if (!falling && TUROK_MEM32(self + 0x1838u)) {
+        uint32_t body = TUROK_MEM32(self + 0xFCu);
+        float speed = body ? guest_float(body + 0x1Cu) : 0.0f;
+        fprintf(stderr, "[FALL] falling scream at %.2f (max %.2f); frame %.5f s; at %.1f %.1f %.1f\n",
+                speed, -guest_float(self + 0x8B4u), frame_seconds(), guest_float(self + 0x38u),
+                guest_float(self + 0x3Cu), guest_float(self + 0x40u));
+    }
+}
+
+/* ── The stuck-flier kill at high frame rates (sub_00148E30; issue #25) ──
+ *
+ * sub_00148E30 (this-call (seconds), ret 4), called by the player update
+ * (from 0x14EB35) while the player flies (+0x4D0), kills a player who has
+ * been "stuck" for half a second: when the squared distance from the last
+ * frame's position (+0xAC) to this one (+0x38) is under 0.005, it adds the
+ * frame time to +0x4CC, and at 0.5 deals the health plus 1000 (type 8);
+ * any larger step resets the count. The test is per frame: under 0.071
+ * units a frame is 4.2 units a second at 60 fps, but 10 at 143 fps and 14
+ * at 200 -- above ~150 fps a pteranodon turning or slowing, or just
+ * respawned, was killed in mid-air. Above 60 fps the step is measured as
+ * it would be over a 60th of a second (the last position is moved back
+ * along the step for the call, then restored), so the kill takes the same
+ * speed as at 60 fps. At 60 fps and below nothing changes.
+ * RECOMP_STUCK_FIX=0 runs the original test. */
+extern void sub_00148E30_gen(void);
+
+void sub_00148E30(void)
+{
+    static int enabled = -1;
+    uint32_t self = g_ecx, saved[3];
+    float seconds = guest_float(g_esp + 4u), scale;
+    int i;
+    if (enabled < 0) enabled = !(getenv("RECOMP_STUCK_FIX") && *getenv("RECOMP_STUCK_FIX") == '0');
+    if (!enabled || !(seconds > 0.0f && seconds < 1.0f / 60.0f)) {
+        sub_00148E30_gen();
+        return;
+    }
+    scale = (1.0f / 60.0f) / seconds;
+    for (i = 0; i < 3; i++) {
+        float now = guest_float(self + 0x38u + 4u * i), last = guest_float(self + 0xACu + 4u * i);
+        float stretched = now - (now - last) * scale;
+        uint32_t bits;
+        memcpy(&bits, &stretched, 4);
+        saved[i] = TUROK_MEM32(self + 0xACu + 4u * i);
+        TUROK_MEM32(self + 0xACu + 4u * i) = bits;
+    }
+    sub_00148E30_gen();
+    for (i = 0; i < 3; i++) TUROK_MEM32(self + 0xACu + 4u * i) = saved[i];
+}
+
+/* ── Damage and flight-collision trace (RECOMP_FALL_TRACE=1; issue #25) ──
+ *
+ * Flight multiplayer: sudden deaths in the air above 150 fps, sometimes
+ * right after respawning. The player's TakeDamage is vfunc +0xE0,
+ * sub_00143C70 (thiscall (damage, flag), ret 8; damage +0 amount, +4 type,
+ * health float at [+0x1E8]). The pteranodon's world-collision state
+ * (sub_0014CC30) deals 200 -- death -- for a head-on hit (|velocity .
+ * normal| from +0xA78/+0xA84 above 0.45), else +0xA68 x 0.5 on the cooldown
+ * +0xA9C; its actor-collision state (sub_0014CDE0) +0xA6C x 0.5. The flight
+ * update is sub_00150590 (thiscall (seconds), ret 4). This logs every hit
+ * on a player with its caller, both collisions with their inputs, and any
+ * health lost elsewhere in the flight update. */
+#define PLAYER_VTABLE 0x00222E3Cu
+#define MP_PLAYER_VTABLE 0x00225020u   /* multiplayer; TakeDamage sub_00155920 */
+extern void sub_00143C70_gen(void);
+extern void sub_00155920_gen(void);
+extern void xbox_WatchArmVa(uint32_t va);
+extern void sub_0014CC30_gen(void);
+extern void sub_0014CDE0_gen(void);
+extern void sub_00150590_gen(void);
+
+static float player_health(uint32_t self)
+{
+    uint32_t health = TUROK_MEM32(self + 0x1E8u);
+    return health ? guest_float(health) : -1.0f;
+}
+
+static void hurt_where(uint32_t self)
+{
+    fprintf(stderr, " at %.1f %.1f %.1f, velocity %.2f %.2f %.2f, speed %.2f %.2f; player %08X%s\n",
+            guest_float(self + 0x38u), guest_float(self + 0x3Cu), guest_float(self + 0x40u),
+            guest_float(self + 0x3E4u), guest_float(self + 0x3E8u), guest_float(self + 0x3ECu),
+            guest_float(self + 0xAA0u), guest_float(self + 0xAA4u), self,
+            self == TUROK_MEM32(0x257E90u) ? " (you)" : "");
+}
+
+static void hurt_call(void (*gen)(void))
+{
+    uint32_t self = g_ecx, from, damage, flag;
+    float before;
+    if (!fall_trace() || (TUROK_MEM32(self) != PLAYER_VTABLE && TUROK_MEM32(self) != MP_PLAYER_VTABLE)) {
+        gen();
+        return;
+    }
+    from = TUROK_MEM32(g_esp), damage = TUROK_MEM32(g_esp + 4u), flag = TUROK_MEM32(g_esp + 8u);
+    before = player_health(self);
+    gen();
+    fprintf(stderr, "[HURT] %.2f type %u (%08X %08X %08X) flag %u from %06X; health %.1f -> %.1f; frame %.5f s;",
+            damage ? guest_float(damage) : 0.0f, damage ? TUROK_MEM32(damage + 4u) : 0u,
+            damage ? TUROK_MEM32(damage + 8u) : 0u, damage ? TUROK_MEM32(damage + 0xCu) : 0u,
+            damage ? TUROK_MEM32(damage + 0x10u) : 0u, flag, from, before, player_health(self), frame_seconds());
+    hurt_where(self);
+}
+
+void sub_00143C70(void) { hurt_call(sub_00143C70_gen); }
+void sub_00155920(void) { hurt_call(sub_00155920_gen); }
+
+/* Once a frame (sub_00104600): the local player's health, every change, and
+ * a write trap on it (the toolkit's RECOMP_WATCH, printing the guest return
+ * addresses of whatever changes it). */
+static void hurt_frame(void)
+{
+    static uint32_t last_player, last_health_va, frames;
+    static float last_health;
+    static clock_t start;
+    uint32_t self, health_va;
+    float health;
+    if (!fall_trace()) return;
+    if (!start) start = clock();
+    frames++;
+    self = TUROK_MEM32(0x257E90u);
+    health_va = self ? TUROK_MEM32(self + 0x1E8u) : 0u;
+    health = health_va ? guest_float(health_va) : -1.0f;
+    if (self != last_player || health_va != last_health_va) {
+        fprintf(stderr, "[LIFE] %.2f s frame %u: player %08X (vtable %08X) health at %08X = %.1f\n",
+                (double)(clock() - start) / CLOCKS_PER_SEC, frames, self, self ? TUROK_MEM32(self) : 0u,
+                health_va, health);
+        if (health_va && self && TUROK_MEM32(self) == MP_PLAYER_VTABLE) xbox_WatchArmVa(health_va);
+    } else if (health != last_health) {
+        fprintf(stderr, "[LIFE] %.2f s frame %u: health %.1f -> %.1f; frame %.5f s;",
+                (double)(clock() - start) / CLOCKS_PER_SEC, frames, last_health, health, frame_seconds());
+        hurt_where(self);
+    }
+    last_player = self, last_health_va = health_va, last_health = health;
+}
+
+static void collision_trace(const char *what, uint32_t self)
+{
+    float a[3], b[3], dot;
+    int i;
+    for (i = 0; i < 3; i++) a[i] = guest_float(self + 0xA78u + 4u * i), b[i] = guest_float(self + 0xA84u + 4u * i);
+    dot = a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    fprintf(stderr, "[CRASH] %s: %.3f %.3f %.3f . %.3f %.3f %.3f = %.3f; cooldown %.3f; health %.1f; frame %.5f s;",
+            what, a[0], a[1], a[2], b[0], b[1], b[2], dot, guest_float(self + 0xA9Cu), player_health(self),
+            frame_seconds());
+    hurt_where(self);
+}
+
+void sub_0014CC30(void)
+{
+    if (fall_trace()) collision_trace("world", g_ecx);
+    sub_0014CC30_gen();
+}
+
+void sub_0014CDE0(void)
+{
+    if (fall_trace()) collision_trace("actor", g_ecx);
+    sub_0014CDE0_gen();
+}
+
+void sub_00150590(void)
+{
+    uint32_t self = g_ecx;
+    float before, after, seconds;
+    if (!fall_trace()) {
+        sub_00150590_gen();
+        return;
+    }
+    seconds = guest_float(g_esp + 4u);
+    before = player_health(self);
+    sub_00150590_gen();
+    after = player_health(self);
+    if (after != before) {
+        fprintf(stderr, "[FLY] health %.1f -> %.1f in the flight update (%.5f s);", before, after, seconds);
+        hurt_where(self);
+    }
 }
 
 /* ── Native rewrites: the switch back ───────────────────────────
