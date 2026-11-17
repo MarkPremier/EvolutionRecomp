@@ -798,11 +798,11 @@ static int partdef_is_keepsake(uint32_t text, uint32_t size)
      * effects such as the rockets' smoke trails.
      * The value before the texture is how a particle is turned: COLLIDE
      * (laid on the surface hit), PARENT (as what made it), SCREEN (facing
-     * the camera). Blood with the splat texture turned as its PARENT is the
-     * spurt thrown from a wound -- standing up off the ground where it fell,
-     * gone after 3-5 s on the Xbox -- and a SCREEN one is a sprite: neither
-     * is a decal. Bullet holes and scorches turned as their parent are (the
-     * impact effect lies on the surface). */
+     * the camera). A SCREEN one is a sprite, never a decal. Blood turned as
+     * its PARENT stays: most of it lies on the ground an impact effect was
+     * turned to (the pools); only some, from a wound, stand up where they
+     * land, and the definitions are the same, so they cannot be told apart
+     * here. (0.7.28 left out all PARENT blood: most blood went in seconds.) */
     static const char *const kinds[] = {"splat", "_bh_", "scortch", "biggib\\", "bird_pieces\\",
                                         "brain_chunks\\"};
     const char *body = (const char *)((uintptr_t)text + g_xbox_mem_offset);
@@ -824,7 +824,6 @@ static int partdef_is_keepsake(uint32_t text, uint32_t size)
             continue;
         }
         if (!strcmp(before, "screen")) return 0;
-        if (strstr(name, "blood\\") && strcmp(before, "collide")) return 0;
         for (k = 0; k < sizeof kinds / sizeof *kinds; k++)
             if (strstr(name, kinds[k])) return 1;
         return 0;   /* the first texture or mesh decides */

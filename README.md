@@ -528,10 +528,9 @@ saves the kept weapons with your progress as it saves any weapon. Saved as
   each kind a PARTDEF text the particle system parses as a level loads
   (`sub_000B0110`); its eighth value, the life in seconds, is stored by
   `sub_000AF2A0`. Definitions whose texture or mesh is a splat, bullet hole,
-  scorch or gore piece get the longer life -- blood only when it is laid on
-  the surface hit (`COLLIDE`): the spurts thrown from a wound (turned as
-  their `PARENT`) stand up off the ground where they land, and keep the
-  game's 3 to 5 seconds, as do camera-facing (`SCREEN`) sprites.
+  scorch or gore piece get the longer life, except camera-facing (`SCREEN`)
+  sprites. A blood spurt from a wound can land standing up and then stays
+  the minute too: its definition is the same as the blood pools'.
   `RECOMP_PARTICLE_TRACE=1` lists the definitions. Effect parts with attached emitters keep their original
   lifetime (`sub_000AF9A0`): some steam controllers reuse a bullet-hole
   texture, and extending them made pipe steam accumulate and overlap.
