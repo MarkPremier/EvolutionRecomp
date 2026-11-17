@@ -4017,10 +4017,10 @@ index 6f8b112..3add01b 100644
              if (ResultLength) *ResultLength = sizeof(ULONG);
          }
 diff --git a/src/kernel/nv2a_gpu.h b/src/kernel/nv2a_gpu.h
-index b8d804a..c2e1572 100644
+index b8d804a..058ce0f 100644
 --- a/src/kernel/nv2a_gpu.h
 +++ b/src/kernel/nv2a_gpu.h
-@@ -14,6 +14,44 @@ void nv2a_gpu_sync(void);
+@@ -14,6 +14,47 @@ void nv2a_gpu_sync(void);
  void nv2a_gpu_wait(void);
  void nv2a_gpu_flush(void);
  uint32_t nv2a_gpu_flip(const void *presented, size_t bytes, uint32_t va, uint32_t pitch);
@@ -4061,11 +4061,14 @@ index b8d804a..c2e1572 100644
 +/* Antialiased alpha-test edges with MSAA (grass, leaves): 1 on, 0 off. Any
 + * thread; the next draw sees it. */
 +void nv2a_gpu_set_alpha_coverage(int on);
++/* Temporal anti-aliasing of the 3D scene (nv2a_gpu_d3d11.cpp): 1 on, 0 off.
++ * Any thread; from the next frame. */
++void nv2a_gpu_set_taa(int on);
 +void nv2a_gpu_set_shadow_scale(int factor);
  void nv2a_gpu_surface_modified(const void *addr, size_t bytes);
  void nv2a_gpu_surface_publish(const void *addr, size_t bytes);
  void nv2a_gpu_invalidate(void);
-@@ -42,6 +80,8 @@ typedef struct Nv2aGpuTexture {
+@@ -42,6 +83,8 @@ typedef struct Nv2aGpuTexture {
  	uint32_t color_key;
  	uint32_t mip_levels;
  	uint32_t disabled; /* sampled by the stage program but the texture unit is off */
@@ -4074,7 +4077,7 @@ index b8d804a..c2e1572 100644
  	float bump_matrix[4], bump_scale, bump_offset;
  	void *decode_context;
  	int (*decode)(void *, uint32_t, uint32_t, uint32_t *);
-@@ -96,6 +136,9 @@ typedef struct Nv2aGpuDraw {
+@@ -96,6 +139,9 @@ typedef struct Nv2aGpuDraw {
  	const uint32_t *vertex_valid;
  	const float (*vertex_constants)[4];
  	uint32_t vertex_start, fixed_transform, flat_shading;
@@ -4084,7 +4087,7 @@ index b8d804a..c2e1572 100644
  	const uint32_t *indices;
  	uint32_t index_count;
  	uint32_t topology, point_size;
-@@ -111,11 +154,28 @@ typedef struct Nv2aGpuDraw {
+@@ -111,11 +157,28 @@ typedef struct Nv2aGpuDraw {
  	float light_infinite_direction[8][4];
  	float light_infinite_half_vector[8][4];
  	float light_spot_direction[8][4];    /* xyz = direction, w = spot cone parameter */
@@ -4114,7 +4117,7 @@ index b8d804a..c2e1572 100644
  						  const float attributes[16][4], float constants[192][4]);
  
 diff --git a/src/kernel/nv2a_gpu_d3d11.cpp b/src/kernel/nv2a_gpu_d3d11.cpp
-index f031faf..a5bd96e 100644
+index f031faf..1f29a91 100644
 --- a/src/kernel/nv2a_gpu_d3d11.cpp
 +++ b/src/kernel/nv2a_gpu_d3d11.cpp
 @@ -1,6 +1,7 @@
@@ -4692,15 +4695,16 @@ index f031faf..a5bd96e 100644
  struct Constants {
      uint32_t control[4], misc[4], stages[8][4], final_input[4];
      uint32_t texture_control[4];
-@@ -399,6 +862,7 @@ struct Constants {
+@@ -399,6 +862,8 @@ struct Constants {
      float light_spot_direction[8][4];    /* xyz=direction, w=spot parameter */
      uint32_t texgen[4][4], texture_matrix_enable[4];
      uint32_t window_clip_control[4], window_clip_rects[8][4];
 +    float heat_transform[4][4];
++    float taa[4];   /* temporal AA: jitter in clip units, previous constants valid */
  };
  
  static_assert(sizeof(Constants) % 16 == 0 && sizeof(Constants) <= 65536, "D3D11 constant-buffer extent");
-@@ -406,6 +870,7 @@ static_assert(sizeof(Constants) % 16 == 0 && sizeof(Constants) <= 65536, "D3D11
+@@ -406,6 +871,7 @@ static_assert(sizeof(Constants) % 16 == 0 && sizeof(Constants) <= 65536, "D3D11
  static std::vector<Surface> surfaces;
  static std::vector<DepthSurface> depth_surfaces;
  static uint64_t surface_use_serial;
@@ -4708,7 +4712,7 @@ index f031faf..a5bd96e 100644
  static uint64_t target_content_serial;
  static std::vector<CachedTexture> textures;
  /* Bind-time lookup is limited to entries with the same guest source address.
-@@ -429,8 +894,14 @@ struct DynamicStream {
+@@ -429,8 +895,14 @@ struct DynamicStream {
      ComPtr<ID3D11Buffer> buffer;
      UINT capacity = 0, used = 0;
      D3D11_MAPPED_SUBRESOURCE mapped = {};
@@ -4724,7 +4728,7 @@ index f031faf..a5bd96e 100644
  static std::array<DynamicStream,2> vertex_streams;
  static DynamicStream constant_stream;
  static DynamicStream index_stream;
-@@ -470,6 +941,7 @@ struct VertexVariant {
+@@ -470,6 +942,7 @@ struct VertexVariant {
      std::vector<uint32_t> key;
      ComPtr<ID3D11VertexShader> shader;
      ComPtr<ID3D11InputLayout> layout;
@@ -4732,7 +4736,39 @@ index f031faf..a5bd96e 100644
      uint64_t last_used, bytecode_bytes;
  };
  static std::vector<VertexVariant> vertex_variants;
-@@ -637,42 +1109,148 @@ static std::string vertex_program_source(const std::vector<uint32_t> &key, bool
+@@ -564,7 +1037,9 @@ static std::string vertex_program_source(const std::vector<uint32_t> &key, bool
+             source += "input.attribute" + std::to_string(attribute) + "=stateAttributes[" + std::to_string(attribute) + "];\n";
+     } else source += "Pixel vs_guest(GuestVertex input) {\n";
+     source += "float4 temporary[13]; float4 outputs[16]; int address=0;\n";
+-    source += "[unroll]for(uint index=0;index<13;index++)temporary[index]=0; [unroll]for(uint index=0;index<16;index++)outputs[index]=float4(0,0,0,1);\n";
++    const std::string reset = "[unroll]for(uint index=0;index<13;index++)temporary[index]=0; [unroll]for(uint index=0;index<16;index++)outputs[index]=float4(0,0,0,1);\n";
++    source += reset;
++    const size_t body_start = source.size();
+     for (size_t instruction = 0; instruction < key.size(); instruction += 4) {
+         const uint32_t *words = key.data() + instruction;
+         uint32_t mac = (words[1] >> 21) & 15, ilu = (words[1] >> 25) & 7;
+@@ -632,47 +1107,167 @@ static std::string vertex_program_source(const std::vector<uint32_t> &key, bool
+         }
+         source += "}\n";
+     }
+-    if (state_program) source += "}\n";
+-    else source += "Vertex bridge=(Vertex)0; bridge.position=outputs[0]; bridge.diffuse=saturate(outputs[3]); bridge.specular=saturate(outputs[4]); bridge.tex0=outputs[9]; bridge.tex1=outputs[10]; bridge.tex2=outputs[11]; bridge.tex3=outputs[12]; bridge.fogCoordinate=outputs[5].x; Pixel result=vs_main(bridge); result.fog=fog_factor(outputs[5].x); return result; }\n";
++    if (state_program) { source += "}\n"; return source; }
++    /* Temporal AA: the program again with the frame before's constants, for
++     * where this vertex was then (vs_core's previous). */
++    std::string body = source.substr(body_start), previous_body;
++    previous_body.reserve(body.size() + body.size() / 8);
++    for (size_t at = 0;;) {
++        size_t found = body.find("vertexConstants[", at);
++        previous_body += body.substr(at, found == std::string::npos ? std::string::npos : found - at);
++        if (found == std::string::npos) break;
++        previous_body += "previousConstants[";
++        at = found + 16;
++    }
++    source += "Vertex bridge=(Vertex)0; bridge.position=outputs[0]; bridge.diffuse=saturate(outputs[3]); bridge.specular=saturate(outputs[4]); bridge.tex0=outputs[9]; bridge.tex1=outputs[10]; bridge.tex2=outputs[11]; bridge.tex3=outputs[12]; bridge.fogCoordinate=outputs[5].x;\n";
++    source += "float fogCoordinate=outputs[5].x; float4 previous=outputs[0];\n";
++    source += "[branch]if(taa.z!=0) { address=0;\n" + reset + previous_body + "previous=outputs[0]; }\n";
++    source += "Pixel result=vs_core(bridge,previous); result.fog=fog_factor(fogCoordinate); return result; }\n";
      return source;
  }
  
@@ -4913,7 +4949,7 @@ index f031faf..a5bd96e 100644
  }
  
  extern "C" int nv2a_gpu_execute_state(const uint32_t program[136][4], const uint32_t valid[136], uint32_t start,
-@@ -695,8 +1273,8 @@ extern "C" int nv2a_gpu_execute_state(const uint32_t program[136][4], const uint
+@@ -695,8 +1290,8 @@ extern "C" int nv2a_gpu_execute_state(const uint32_t program[136][4], const uint
          std::string source = vertex_program_source(variant.key, true);
          if (source.empty()) return 0;
          ComPtr<ID3DBlob> code, errors;
@@ -4924,7 +4960,7 @@ index f031faf..a5bd96e 100644
          if (FAILED(result)) {
              std::fprintf(stderr, "[GPU-D3D11] state compile: %s\n", errors ? (const char *)errors->GetBufferPointer() : "failed");
              return 0;
-@@ -738,6 +1316,269 @@ extern "C" int nv2a_gpu_execute_state(const uint32_t program[136][4], const uint
+@@ -738,6 +1333,269 @@ extern "C" int nv2a_gpu_execute_state(const uint32_t program[136][4], const uint
      return 1;
  }
  
@@ -5194,7 +5230,7 @@ index f031faf..a5bd96e 100644
  static ID3D11PixelShader *get_pixel_shader(const Nv2aGpuDraw &state, uint32_t window_clip_mode)
  {
      ShaderVariant variant = {};
-@@ -753,14 +1594,30 @@ static ID3D11PixelShader *get_pixel_shader(const Nv2aGpuDraw &state, uint32_t wi
+@@ -753,14 +1611,30 @@ static ID3D11PixelShader *get_pixel_shader(const Nv2aGpuDraw &state, uint32_t wi
          variant.key[4+stage*4] = state.combiners.rgb_input[stage]; variant.key[5+stage*4] = state.combiners.alpha_input[stage];
          variant.key[6+stage*4] = state.combiners.rgb_output[stage]; variant.key[7+stage*4] = state.combiners.alpha_output[stage];
      }
@@ -5226,7 +5262,7 @@ index f031faf..a5bd96e 100644
      values[0] = std::to_string(variant.key[0] & 255u) + "u";
      values[1] = std::to_string(variant.key[0]) + "u"; values[2] = std::to_string(variant.key[1]) + "u";
      values[3] = std::to_string(variant.key[2]) + "u"; values[4] = std::to_string(variant.key[3]) + "u";
-@@ -782,27 +1639,38 @@ static ID3D11PixelShader *get_pixel_shader(const Nv2aGpuDraw &state, uint32_t wi
+@@ -782,27 +1656,38 @@ static ID3D11PixelShader *get_pixel_shader(const Nv2aGpuDraw &state, uint32_t wi
      }
      values[6] += ")";
      values[7] = std::to_string(variant.key[42]) + "u";
@@ -5281,7 +5317,7 @@ index f031faf..a5bd96e 100644
  }
  
  template<typename SurfaceType>
-@@ -824,6 +1692,29 @@ static void mark_written_mask(SurfaceType &surface, const D3D11_BOX &region)
+@@ -824,6 +1709,29 @@ static void mark_written_mask(SurfaceType &surface, const D3D11_BOX &region)
      }
  }
  
@@ -5311,7 +5347,7 @@ index f031faf..a5bd96e 100644
  template<typename SurfaceType>
  static void mark_written_region(SurfaceType &surface, const D3D11_BOX &region)
  {
-@@ -831,6 +1722,10 @@ static void mark_written_region(SurfaceType &surface, const D3D11_BOX &region)
+@@ -831,6 +1739,10 @@ static void mark_written_region(SurfaceType &surface, const D3D11_BOX &region)
      if (!surface.dirty) {
          surface.written_region = region;
          surface.written_mask.clear();
@@ -5322,10 +5358,50 @@ index f031faf..a5bd96e 100644
      }
      else {
          auto &written = surface.written_region;
-@@ -938,6 +1833,148 @@ static bool surface_memory_matches(const SurfaceType &surface, uint32_t bytes)
-     return true;
+@@ -899,43 +1811,185 @@ static void rotate_depth_row(const uint8_t *source, uint8_t *destination, uint32
+     }
  }
  
+-static void decode_depth_row(uint32_t format, const uint8_t *source, uint8_t *destination, uint32_t columns)
++static void decode_depth_row(uint32_t format, const uint8_t *source, uint8_t *destination, uint32_t columns)
++{
++    if (format == 1) {
++        if (source != destination) std::memcpy(destination, source, (size_t)columns * 2);
++    } else rotate_depth_row<true>(source, destination, columns);
++}
++
++static void encode_depth_row(uint32_t format, const uint8_t *source, uint8_t *destination, uint32_t columns)
++{
++    if (format == 1) {
++        if (source != destination) std::memcpy(destination, source, (size_t)columns * 2);
++    } else rotate_depth_row<false>(source, destination, columns);
++}
++
++template<typename SurfaceType>
++static bool prepare_surface_snapshot(SurfaceType &surface, uint32_t bytes)
++{
++    if (!surface.source_snapshot.empty()) return true;
++    const size_t budget = 64 * 1024 * 1024;
++    size_t required = (size_t)surface.width * surface.height * bytes;
++    size_t allocated = 0;
++    for (const auto &entry : surfaces) allocated += entry.source_snapshot.size();
++    for (const auto &entry : depth_surfaces) allocated += entry.source_snapshot.size();
++    if (required > budget - allocated) return false;
++    surface.source_snapshot.resize(required);
++    return true;
++}
++
++template<typename SurfaceType>
++static bool surface_memory_matches(const SurfaceType &surface, uint32_t bytes)
++{
++    if (!surface.snapshot_valid || surface.dirty) return false;
++    size_t row_bytes = (size_t)surface.width * bytes;
++    for (uint32_t row = 0; row < surface.height; row++)
++        if (std::memcmp(surface.memory + (size_t)row * surface.pitch,
++                        surface.source_snapshot.data() + (size_t)row * row_bytes, row_bytes)) return false;
++    return true;
++}
++
 +/* Draw `source` onto a target of another size, nearest texel: colour onto a
 + * render target, or depth (the source's red channel, as SV_Depth) onto a depth
 + * view. Only `box` (target pixels) is written when one is given. This is the
@@ -5424,18 +5500,25 @@ index f031faf..a5bd96e 100644
 +/* A box of guest pixels as the scaled texture's pixels, rounded outward. */
 +template<typename Target>
 +static D3D11_BOX texture_box(const Target &target, const D3D11_BOX &box)
-+{
+ {
+-    if (format == 1) {
+-        if (source != destination) std::memcpy(destination, source, (size_t)columns * 2);
+-    } else rotate_depth_row<true>(source, destination, columns);
 +    D3D11_BOX scaled = box;
 +    scaled.left = (UINT)((uint64_t)box.left * target.texture_width / target.width);
 +    scaled.top = (UINT)((uint64_t)box.top * target.texture_height / target.height);
 +    scaled.right = (UINT)(((uint64_t)box.right * target.texture_width + target.width - 1) / target.width);
 +    scaled.bottom = (UINT)(((uint64_t)box.bottom * target.texture_height + target.height - 1) / target.height);
 +    return scaled;
-+}
-+
+ }
+ 
+-static void encode_depth_row(uint32_t format, const uint8_t *source, uint8_t *destination, uint32_t columns)
 +/* Guest RAM's pixels (`box` of them, or all) into a colour target. */
 +static void upload_surface(Surface &surface, const D3D11_BOX *box, const void *data, UINT row_pitch)
-+{
+ {
+-    if (format == 1) {
+-        if (source != destination) std::memcpy(destination, source, (size_t)columns * 2);
+-    } else rotate_depth_row<false>(source, destination, columns);
 +    resolve_color(surface);      /* a partial upload keeps the rest */
 +    surface.content_serial = ++target_content_serial;  /* CPU writes also invalidate scene snapshots */
 +    if (surface.ms_texture) surface.ms_stale = true;
@@ -5448,30 +5531,47 @@ index f031faf..a5bd96e 100644
 +    D3D11_BOX target = texture_box(surface, box ? *box : all);
 +    scale_blit(surface.upload_view.Get(), surface.target.Get(), nullptr,
 +               surface.texture_width, surface.texture_height, &target);
-+}
-+
+ }
+ 
+-template<typename SurfaceType>
+-static bool prepare_surface_snapshot(SurfaceType &surface, uint32_t bytes)
 +/* What a guest-size staging copy reads: the target itself, or for a scaled
 + * one its resolve, drawn down from the texture first. */
 +static ID3D11Texture2D *publish_source(Surface &surface)
-+{
+ {
+-    if (!surface.source_snapshot.empty()) return true;
+-    const size_t budget = 64 * 1024 * 1024;
+-    size_t required = (size_t)surface.width * surface.height * bytes;
+-    size_t allocated = 0;
+-    for (const auto &entry : surfaces) allocated += entry.source_snapshot.size();
+-    for (const auto &entry : depth_surfaces) allocated += entry.source_snapshot.size();
+-    if (required > budget - allocated) return false;
+-    surface.source_snapshot.resize(required);
+-    return true;
 +    resolve_color(surface);
 +    if (!is_scaled(surface)) return surface.texture.Get();
 +    scale_blit(surface.view.Get(), surface.resolve_target.Get(), nullptr, surface.width, surface.height);
 +    return surface.resolve.Get();
-+}
-+
+ }
+ 
+-template<typename SurfaceType>
+-static bool surface_memory_matches(const SurfaceType &surface, uint32_t bytes)
 +static ID3D11Texture2D *publish_source(DepthSurface &surface)
-+{
+ {
+-    if (!surface.snapshot_valid || surface.dirty) return false;
+-    size_t row_bytes = (size_t)surface.width * bytes;
+-    for (uint32_t row = 0; row < surface.height; row++)
+-        if (std::memcmp(surface.memory + (size_t)row * surface.pitch,
+-                        surface.source_snapshot.data() + (size_t)row * row_bytes, row_bytes)) return false;
+-    return true;
 +    resolve_depth(surface);
 +    if (!is_scaled(surface)) return surface.texture.Get();
 +    scale_blit(surface.sample_view.Get(), nullptr, surface.resolve_view.Get(), surface.width, surface.height);
 +    return surface.resolve.Get();
-+}
-+
+ }
+ 
  static void refresh_surface(Surface &surface)
- {
-     if (!surface.needs_refresh) return;
-@@ -968,9 +2005,9 @@ static void refresh_surface(Surface &surface)
+@@ -968,9 +2022,9 @@ static void refresh_surface(Surface &surface)
                  std::memcpy(surface.source_snapshot.data() + (size_t)row * row_bytes + changed.left * 4,
                              surface.memory + (size_t)row * surface.pitch + changed.left * 4,
                              (size_t)(changed.right - changed.left) * 4);
@@ -5484,7 +5584,7 @@ index f031faf..a5bd96e 100644
              surface.alias_copy_serial = 0;
              gpu_timing.color_refreshed++;
              gpu_timing.color_refresh_bytes += (uint64_t)(changed.right - changed.left) * (changed.bottom - changed.top) * 4;
-@@ -979,7 +2016,7 @@ static void refresh_surface(Surface &surface)
+@@ -979,7 +2033,7 @@ static void refresh_surface(Surface &surface)
          surface.needs_refresh = false;
          return;
      }
@@ -5493,7 +5593,7 @@ index f031faf..a5bd96e 100644
      surface.clear_value_valid = false;
      surface.alias_copy_serial = 0;
      gpu_timing.color_refresh_bytes += (uint64_t)surface.width * surface.height * 4;
-@@ -1015,7 +2052,13 @@ static bool refresh_depth(DepthSurface &surface)
+@@ -1015,7 +2069,13 @@ static bool refresh_depth(DepthSurface &surface)
          encode_depth_row(surface.format, source, destination, surface.width);
      }
      context->Unmap(surface.staging.Get(), 0);
@@ -5508,7 +5608,7 @@ index f031faf..a5bd96e 100644
      surface.clear_value_valid = false;
      surface.needs_refresh = false;
      surface.snapshot_valid = false;
-@@ -1023,33 +2066,243 @@ static bool refresh_depth(DepthSurface &surface)
+@@ -1023,33 +2083,243 @@ static bool refresh_depth(DepthSurface &surface)
      return true;
  }
  
@@ -5762,7 +5862,7 @@ index f031faf..a5bd96e 100644
  }
  
  static DepthSurface *get_depth(const Nv2aGpuDraw &state, bool preserve = true, TargetExtent extent = {})
-@@ -1066,26 +2319,44 @@ static DepthSurface *get_depth(const Nv2aGpuDraw &state, bool preserve = true, T
+@@ -1066,26 +2336,44 @@ static DepthSurface *get_depth(const Nv2aGpuDraw &state, bool preserve = true, T
                       state.depth_pitch, extent.width, state.depth_format);
          return nullptr;
      }
@@ -5817,7 +5917,7 @@ index f031faf..a5bd96e 100644
      if (!target_operation_succeeded("depth", "create staging", device->CreateTexture2D(&description, nullptr, &surface.staging))) return nullptr;
      // Creation-data uploads can round D24 values; use the bit-preserving refresh path.
      surface.needs_refresh = preserve;
-@@ -1094,6 +2365,153 @@ static DepthSurface *get_depth(const Nv2aGpuDraw &state, bool preserve = true, T
+@@ -1094,6 +2382,153 @@ static DepthSurface *get_depth(const Nv2aGpuDraw &state, bool preserve = true, T
      return &depth_surfaces.back();
  }
  
@@ -5971,7 +6071,7 @@ index f031faf..a5bd96e 100644
  static void readback_failed(const char *kind, HRESULT result, const char *operation = "map")
  {
      std::fprintf(stderr, "[GPU-D3D11] readback failed: %s %s 0x%08X; device 0x%08X\n",
-@@ -1224,6 +2642,54 @@ static void wait_ordering_completion(void)
+@@ -1224,6 +2659,54 @@ static void wait_ordering_completion(void)
      }
  }
  
@@ -6026,7 +6126,7 @@ index f031faf..a5bd96e 100644
  static void gpu_sync_impl(bool publish, const void *only = nullptr, size_t only_bytes = 0)
  {
      GpuTimer sync_timer(gpu_timing.sync);
-@@ -1253,6 +2719,36 @@ static void gpu_sync_impl(bool publish, const void *only = nullptr, size_t only_
+@@ -1253,6 +2736,36 @@ static void gpu_sync_impl(bool publish, const void *only = nullptr, size_t only_
          }
          return;
      }
@@ -6063,7 +6163,7 @@ index f031faf..a5bd96e 100644
      ID3D11RenderTargetView *empty = nullptr;
      context->OMSetRenderTargets(1, &empty, nullptr);
      bool has_readback = false;
-@@ -1266,13 +2762,14 @@ static void gpu_sync_impl(bool publish, const void *only = nullptr, size_t only_
+@@ -1266,13 +2779,14 @@ static void gpu_sync_impl(bool publish, const void *only = nullptr, size_t only_
                      has_known_clear = true;
                      continue;
                  }
@@ -6080,7 +6180,7 @@ index f031faf..a5bd96e 100644
                      gpu_timing.color_copy_bytes += (uint64_t)surface.width * surface.height * 4;
                  }
                  has_readback = true;
-@@ -1284,7 +2781,7 @@ static void gpu_sync_impl(bool publish, const void *only = nullptr, size_t only_
+@@ -1284,7 +2798,7 @@ static void gpu_sync_impl(bool publish, const void *only = nullptr, size_t only_
                      has_known_clear = true;
                      continue;
                  }
@@ -6089,7 +6189,7 @@ index f031faf..a5bd96e 100644
                  has_readback = true;
              }
      }
-@@ -1659,12 +3156,13 @@ static bool stage_flip(const void *presented, size_t bytes, uint32_t va, uint32_
+@@ -1659,12 +3173,13 @@ static bool stage_flip(const void *presented, size_t bytes, uint32_t va, uint32_
  {
      Surface *surface = surface_for_memory(presented);
      if (!surface) return false;
@@ -6105,7 +6205,7 @@ index f031faf..a5bd96e 100644
      }
      if (!s_pending_flip.event) {
          D3D11_QUERY_DESC description = {D3D11_QUERY_EVENT, 0};
-@@ -1684,11 +3182,45 @@ static bool stage_flip(const void *presented, size_t bytes, uint32_t va, uint32_
+@@ -1684,11 +3199,47 @@ static bool stage_flip(const void *presented, size_t bytes, uint32_t va, uint32_
      return true;
  }
  
@@ -6132,6 +6232,7 @@ index f031faf..a5bd96e 100644
   * (synchronous) path that is the buffer just published; with RECOMP_ASYNC_FLIP
   * it is the previous frame's buffer, resolved without a GPU wait. */
 +static void write_depth_pgm(DepthSurface &surface, const char *path, bool wide);
++static void taa_end_frame(const void *presented);
 +
  extern "C" uint32_t nv2a_gpu_flip(const void *presented, size_t bytes, uint32_t va, uint32_t pitch)
  {
@@ -6148,10 +6249,11 @@ index f031faf..a5bd96e 100644
 +            }
 +        }
 +    }
++    taa_end_frame(presented);
      if (!presented) { nv2a_gpu_flush(); return va; }
      uint32_t show = va;
      if (async_flip_enabled()) {
-@@ -1708,17 +3240,268 @@ extern "C" uint32_t nv2a_gpu_flip(const void *presented, size_t bytes, uint32_t
+@@ -1708,17 +3259,269 @@ extern "C" uint32_t nv2a_gpu_flip(const void *presented, size_t bytes, uint32_t
      } else {
          gpu_sync_impl(true, presented, bytes);
      }
@@ -6367,6 +6469,7 @@ index f031faf..a5bd96e 100644
 +                                        uint32_t aspect_w, uint32_t aspect_h, int interval)
 +{
 +    if (!window || !presented || !aspect_w || !aspect_h) return 0;
++    taa_end_frame(presented);
 +    Surface *shown = nullptr;
 +    for (auto &surface : surfaces)
 +        if (surface.memory == presented && surface.pitch == pitch && surface.view &&
@@ -6428,7 +6531,7 @@ index f031faf..a5bd96e 100644
  /* A GPU-engine blit wrote guest RAM a cached surface mirrors. Refresh only the
   * surfaces that overlap those bytes from guest RAM; never bump the global
   * texture-validation serial, which would re-upload GPU-only textures (UI). */
-@@ -1754,8 +3537,11 @@ static bool matches_color_target(const Surface &surface, const Nv2aGpuDraw &stat
+@@ -1754,8 +3557,11 @@ static bool matches_color_target(const Surface &surface, const Nv2aGpuDraw &stat
  
  static bool matches_depth_target(const DepthSurface &surface, const Nv2aGpuDraw &state, TargetExtent extent)
  {
@@ -6441,7 +6544,7 @@ index f031faf..a5bd96e 100644
  }
  
  static TargetExtent reusable_target_extent(const Nv2aGpuDraw &state)
-@@ -1894,12 +3680,30 @@ extern "C" int nv2a_gpu_clear(const Nv2aGpuDraw *state, uint32_t flags, uint32_t
+@@ -1894,12 +3700,30 @@ extern "C" int nv2a_gpu_clear(const Nv2aGpuDraw *state, uint32_t flags, uint32_t
          const float rgba[] = {(float)((color >> 16) & 255u) / 255.0f, (float)((color >> 8) & 255u) / 255.0f,
                                (float)(color & 255u) / 255.0f, (float)(color >> 24) / 255.0f};
          context->ClearRenderTargetView(surface->target.Get(), rgba);
@@ -6473,7 +6576,7 @@ index f031faf..a5bd96e 100644
      }
      if (surface) {
          mark_written_region(*surface, region);
-@@ -1908,7 +3712,7 @@ extern "C" int nv2a_gpu_clear(const Nv2aGpuDraw *state, uint32_t flags, uint32_t
+@@ -1908,7 +3732,7 @@ extern "C" int nv2a_gpu_clear(const Nv2aGpuDraw *state, uint32_t flags, uint32_t
      if (depth) {
          bool known = known_clears && !partial && (depth->format == 1 ? clear_depth :
              (clear_depth && clear_stencil) || depth->clear_value_valid);
@@ -6482,7 +6585,7 @@ index f031faf..a5bd96e 100644
              (clear_depth ? depth_value & 0xFFFFFF00u : depth->clear_value & 0xFFFFFF00u) |
              (clear_stencil ? depth_value & 255u : depth->clear_value & 255u);
          mark_written_region(*depth, region);
-@@ -1928,10 +3732,16 @@ static void release_stream(DynamicStream &stream)
+@@ -1928,10 +3752,16 @@ static void release_stream(DynamicStream &stream)
      }
  }
  
@@ -6503,23 +6606,28 @@ index f031faf..a5bd96e 100644
  static bool map_stream(DynamicStream &stream, UINT bytes, UINT bind, const char *kind, UINT &offset)
  {
      if (!stream.buffer || bytes > stream.capacity) {
-@@ -1953,18 +3763,18 @@ static bool map_stream(DynamicStream &stream, UINT bytes, UINT bind, const char
-         stream.capacity = capacity;
-         stream.used = 0;
-     }
-+    release_stream(stream);
-     UINT aligned = (stream.used + 15u) & ~15u;
+@@ -1950,21 +3780,21 @@ static bool map_stream(DynamicStream &stream, UINT bytes, UINT bind, const char
+         if (!target_operation_succeeded(kind, "create stream", device->CreateBuffer(&description, nullptr, &buffer)))
+             return false;
+         stream.buffer = std::move(buffer);
+-        stream.capacity = capacity;
+-        stream.used = 0;
+-    }
+-    UINT aligned = (stream.used + 15u) & ~15u;
 -    if (stream.active && (aligned > stream.capacity || bytes > stream.capacity - aligned)) {
 -        release_stream(stream);
--        stream.used = 0;
++        stream.capacity = capacity;
+         stream.used = 0;
 -        aligned = 0;
--    }
+     }
 -    if (!stream.active) {
 -        if (!target_operation_succeeded(kind, "map stream",
 -            context->Map(stream.buffer.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &stream.mapped)))
 -            return false;
 -        stream.active = true;
 -        aligned = 0;
++    release_stream(stream);
++    UINT aligned = (stream.used + 15u) & ~15u;
 +    bool discard = stream.used == 0 || aligned > stream.capacity || bytes > stream.capacity - aligned ||
 +                   ((bind & D3D11_BIND_CONSTANT_BUFFER) && !constant_no_overwrite);
 +    if (discard) aligned = 0;
@@ -6533,7 +6641,7 @@ index f031faf..a5bd96e 100644
          gpu_timing.stream_discards++;
      } else {
          gpu_timing.stream_appends++;
-@@ -2011,26 +3821,109 @@ static bool initialize_pipeline()
+@@ -2011,26 +3841,109 @@ static bool initialize_pipeline()
  static ComPtr<ID3D11Texture2D> feedback_texture;
  static ComPtr<ID3D11ShaderResourceView> feedback_view;
  
@@ -6652,7 +6760,7 @@ index f031faf..a5bd96e 100644
  }
  
  static ID3D11ShaderResourceView *default_white_view()
-@@ -2050,12 +3943,162 @@ static ID3D11ShaderResourceView *default_white_view()
+@@ -2050,12 +3963,162 @@ static ID3D11ShaderResourceView *default_white_view()
      return view.Get();
  }
  
@@ -6815,7 +6923,7 @@ index f031faf..a5bd96e 100644
      static const bool mirror_aliases = []() {
          const char *setting = std::getenv("RECOMP_NV2A_GPU_ALIAS_COPIES");
          return !setting || std::strcmp(setting, "0") != 0;
-@@ -2153,14 +4196,22 @@ static ID3D11ShaderResourceView *get_texture(const Nv2aGpuTexture &binding, cons
+@@ -2153,14 +4216,22 @@ static ID3D11ShaderResourceView *get_texture(const Nv2aGpuTexture &binding, cons
              direct->needs_refresh = true;
              refresh_surface(*direct);
              if (direct->alias_copy_serial != alias_serial) {
@@ -6840,7 +6948,7 @@ index f031faf..a5bd96e 100644
                          context->CopySubresourceRegion(direct->texture.Get(), 0, box.left, box.top, 0,
                                                        surface.texture.Get(), 0, &box);
                          direct->clear_value_valid = false;
-@@ -2207,6 +4258,20 @@ static ID3D11ShaderResourceView *get_texture(const Nv2aGpuTexture &binding, cons
+@@ -2207,6 +4278,20 @@ static ID3D11ShaderResourceView *get_texture(const Nv2aGpuTexture &binding, cons
          nv2a_gpu_surface_publish(binding.source, binding.source_bytes);
      }
      if (direct) {
@@ -6861,7 +6969,7 @@ index f031faf..a5bd96e 100644
          direct->last_used = ++surface_use_serial;
          if (cloak_debug())
              std::fprintf(stderr, "[CLOAKDBG] direct src=%p %ux%u fmt=%X linear=%u pitch=%u; surf %ux%u pitch=%u dirty=%u needs_refresh=%u snapshot_valid=%u\n",
-@@ -2223,6 +4288,7 @@ static ID3D11ShaderResourceView *get_texture(const Nv2aGpuTexture &binding, cons
+@@ -2223,6 +4308,7 @@ static ID3D11ShaderResourceView *get_texture(const Nv2aGpuTexture &binding, cons
           * GPU stale data -- see RECOMP_SYNC_LIGHT. */
          if (!direct->dirty)
              refresh_surface(*direct);
@@ -6869,7 +6977,7 @@ index f031faf..a5bd96e 100644
          return direct->view.Get();
      }
      CachedTexture *refresh = nullptr;
-@@ -2397,6 +4463,20 @@ static ID3D11ShaderResourceView *get_texture(const Nv2aGpuTexture &binding, cons
+@@ -2397,6 +4483,20 @@ static ID3D11ShaderResourceView *get_texture(const Nv2aGpuTexture &binding, cons
      description.MipLevels = levels; description.ArraySize = faces; description.Format = format;
      description.MiscFlags = binding.cube ? D3D11_RESOURCE_MISC_TEXTURECUBE : 0;
      description.SampleDesc.Count = 1; description.BindFlags = D3D11_BIND_SHADER_RESOURCE;
@@ -6890,7 +6998,7 @@ index f031faf..a5bd96e 100644
      ComPtr<ID3D11Texture2D> texture;
      CachedTexture entry = {};
      entry.source = binding.source; entry.width = binding.width; entry.height = binding.height; entry.format = binding.format;
-@@ -2515,11 +4595,96 @@ static D3D11_TEXTURE_ADDRESS_MODE texture_address(uint32_t address)
+@@ -2515,11 +4615,96 @@ static D3D11_TEXTURE_ADDRESS_MODE texture_address(uint32_t address)
      }
  }
  
@@ -6987,7 +7095,7 @@ index f031faf..a5bd96e 100644
      if (minimum > 6 || maximum > 2) return false;
      D3D11_SAMPLER_DESC description = {};
      description.AddressU = texture_address(binding.address_u);
-@@ -2535,6 +4700,10 @@ static bool make_sampler(const Nv2aGpuTexture &binding, ComPtr<ID3D11SamplerStat
+@@ -2535,6 +4720,10 @@ static bool make_sampler(const Nv2aGpuTexture &binding, ComPtr<ID3D11SamplerStat
      description.MipLODBias = (float)bias / 256.0f;
      if (description.MipLODBias > D3D11_MIP_LOD_BIAS_MAX) return false;
      description.MaxAnisotropy = binding.control0_valid ? 1u << ((binding.control0 >> 4) & 3u) : 1u;
@@ -6998,7 +7106,7 @@ index f031faf..a5bd96e 100644
      if (description.MaxAnisotropy > 1) {
          if (maximum != 2 || (minimum != 2 && minimum != 6)) return false;
          description.Filter = D3D11_FILTER_ANISOTROPIC;
-@@ -2673,10 +4842,10 @@ static bool clear_target_rectangle(const Nv2aGpuDraw &state, Surface *surface, D
+@@ -2673,10 +4862,10 @@ static bool clear_target_rectangle(const Nv2aGpuDraw &state, Surface *surface, D
              "float4 ps():SV_Target{return clearColor;}";
          ClearPipeline created;
          ComPtr<ID3DBlob> vertex, pixel, errors;
@@ -7011,7 +7119,7 @@ index f031faf..a5bd96e 100644
                                  "ps", "ps_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &pixel, &errors);
          if (FAILED(result)) {
              std::fprintf(stderr, "[GPU-D3D11] rectangle clear shader compile: 0x%08X %s\n",
-@@ -2725,7 +4894,7 @@ static bool clear_target_rectangle(const Nv2aGpuDraw &state, Surface *surface, D
+@@ -2725,7 +4914,7 @@ static bool clear_target_rectangle(const Nv2aGpuDraw &state, Surface *surface, D
      const float constants[8] = {
          (float)((color >> 16) & 255u) / 255.0f, (float)((color >> 8) & 255u) / 255.0f,
          (float)(color & 255u) / 255.0f, (float)(color >> 24) / 255.0f,
@@ -7020,7 +7128,7 @@ index f031faf..a5bd96e 100644
              (float)(depth_value >> 8) / 16777215.0f, 0, 0, 0
      };
      D3D11_MAPPED_SUBRESOURCE mapped = {};
-@@ -2735,8 +4904,10 @@ static bool clear_target_rectangle(const Nv2aGpuDraw &state, Surface *surface, D
+@@ -2735,8 +4924,10 @@ static bool clear_target_rectangle(const Nv2aGpuDraw &state, Surface *surface, D
      context->Unmap(pipeline.constants.Get(), 0);
      ID3D11ShaderResourceView *empty[12] = {};
      context->PSSetShaderResources(0, 12, empty);
@@ -7033,7 +7141,7 @@ index f031faf..a5bd96e 100644
      context->OMSetBlendState(pipeline.blend[surface ? 1 : 0].Get(), nullptr, UINT_MAX);
      context->OMSetDepthStencilState(pipeline.depth[(clear_depth ? 1 : 0) | (clear_stencil ? 2 : 0)].Get(), depth_value & 255u);
      context->IASetInputLayout(nullptr);
-@@ -2747,8 +4918,13 @@ static bool clear_target_rectangle(const Nv2aGpuDraw &state, Surface *surface, D
+@@ -2747,8 +4938,13 @@ static bool clear_target_rectangle(const Nv2aGpuDraw &state, Surface *surface, D
      ID3D11Buffer *buffer = pipeline.constants.Get();
      context->VSSetConstantBuffers(0, 1, &buffer);
      context->PSSetConstantBuffers(0, 1, &buffer);
@@ -7049,7 +7157,7 @@ index f031faf..a5bd96e 100644
      context->RSSetState(pipeline.raster.Get());
      context->RSSetViewports(1, &viewport);
      context->RSSetScissorRects(1, &clip);
-@@ -2756,17 +4932,106 @@ static bool clear_target_rectangle(const Nv2aGpuDraw &state, Surface *surface, D
+@@ -2756,17 +4952,628 @@ static bool clear_target_rectangle(const Nv2aGpuDraw &state, Surface *surface, D
      return true;
  }
  
@@ -7115,6 +7223,528 @@ index f031faf..a5bd96e 100644
 +    *bytes = geometry_cache_bytes;
 +}
 +
++/* ── Temporal anti-aliasing (nv2a_gpu_set_taa) ─────────────────────────────
++ *
++ * MSAA smooths the edges of triangles and (with alpha coverage) of alpha-tested
++ * leaves, but not what flickers inside them: grass blades a pixel wide, thin
++ * branches, fine texture detail, which shimmer as the camera moves. Temporal
++ * AA spreads each pixel's samples over frames instead: every 3D draw into the
++ * scene is moved by a different sub-pixel offset each frame (the jitter), and
++ * the finished scene is blended with the frames before, found where each
++ * pixel was a frame ago (its motion) and kept within the colours around it
++ * now, so what moved or appeared does not leave a trail.
++ *
++ * The Xbox never made motion vectors, so each draw finds its own: the vertex
++ * stage runs again with the constants (matrices, bones) the same draw had the
++ * frame before, and the difference of the two positions is written to a
++ * second target, the motion target. "The same draw" is the one with the same
++ * vertex program and geometry; of several alike (a clump of grass drawn
++ * twenty times), the one whose projection was nearest (taa_previous).
++ * A draw not found takes the constants of the last frame's first draw with its
++ * program, which for the world (all one matrix) is the camera's motion.
++ * Blended draws (smoke, fire, glows) write no motion: the surface behind keeps
++ * its own.
++ *
++ * The scene is the first screen-shaped surface a frame draws 3D into (Turok
++ * Evolution's is its 1280x480 antialiased back buffer, filtered down into
++ * the 640x480 one it presents). Its 3D draws are jittered until the first 2D
++ * draw into it (the HUD, text, a fade), the first draw that samples it (the
++ * filter down), or the flip; that is where the scene is resolved, so the HUD
++ * is drawn sharp over the result and stays out of the history. 3D drawn
++ * after that point in the frame is drawn as the title draws it. RECOMP_TAA=1 turns it on at start
++ * (the setting from then on); RECOMP_TAA_TRACE=1 reports every 5 s. */
++static std::atomic<int> taa_setting{-1};
++
++extern "C" void nv2a_gpu_set_taa(int on)
++{
++    taa_setting.store(on ? 1 : 0);
++}
++
++static struct {
++    ComPtr<ID3D11VertexShader> vertex;
++    ComPtr<ID3D11PixelShader> pixel[2];   /* motion single-sampled, multisampled */
++    ComPtr<ID3D11PixelShader> sharpen;    /* history to scene */
++    ComPtr<ID3D11SamplerState> sampler;
++    ComPtr<ID3D11RasterizerState> raster;
++    ComPtr<ID3D11BlendState> blend;
++    ComPtr<ID3D11DepthStencilState> depth_off;
++    ComPtr<ID3D11Buffer> parameters;
++    bool failed = false;
++    /* The motion target: R16G16 float, as large as the scene and with its samples. */
++    ComPtr<ID3D11Texture2D> motion;
++    ComPtr<ID3D11RenderTargetView> motion_target;
++    ComPtr<ID3D11ShaderResourceView> motion_view;
++    UINT motion_width = 0, motion_height = 0, motion_samples = 0;
++    /* The resolved frames, ping-ponged: one read, one written. */
++    ComPtr<ID3D11Texture2D> history[2];
++    ComPtr<ID3D11RenderTargetView> history_target[2];
++    ComPtr<ID3D11ShaderResourceView> history_view[2];
++    UINT history_width = 0, history_height = 0;
++    int history_index = 0;
++    uint64_t history_frame = 0;   /* surface_frame_serial of the last resolve */
++    ComPtr<ID3D11Texture2D> input;   /* the scene as drawn, read while the scene is written */
++    ComPtr<ID3D11ShaderResourceView> input_view;
++    DynamicStream previous_stream;   /* each draw's previous constants (cbuffer b2) */
++} taa;
++
++static struct {
++    const uint8_t *scene = nullptr;   /* this frame's scene surface */
++    bool pending = false, resolved = false, motion_ready = false;
++    uint32_t jitter_index = 0;
++    float jitter[2] = {};   /* this frame's offset in target pixels */
++    /* trace */
++    uint64_t draws = 0, motion_draws = 0, matched = 0, by_program = 0, unmatched = 0, late_3d = 0;
++    uint64_t resolves_2d = 0, resolves_sampled = 0, resolves_flip = 0, frames = 0;
++} taa_frame;
++
++static bool taa_active()
++{
++    int setting = taa_setting.load(std::memory_order_relaxed);
++    if (setting < 0) {
++        const char *value = std::getenv("RECOMP_TAA");
++        setting = value && *value && std::strcmp(value, "0") != 0 ? 1 : 0;
++        int expected = -1;
++        taa_setting.compare_exchange_strong(expected, setting);
++        setting = taa_setting.load();
++    }
++    return setting > 0 && context1 && !taa.failed;
++}
++
++static bool taa_trace()
++{
++    static const bool trace = std::getenv("RECOMP_TAA_TRACE") != nullptr;
++    return trace;
++}
++
++static bool taa_scene_surface(const Surface &surface)
++{
++    return screen_shaped(surface.width, surface.height);
++}
++
++/* Halton (2, 3), eight steps, centred on the pixel. */
++static void taa_jitter(uint32_t index, float jitter[2])
++{
++    auto halton = [](uint32_t i, uint32_t base) {
++        float f = 1.0f, r = 0.0f;
++        for (; i; i /= base) { f /= (float)base; r += f * (float)(i % base); }
++        return r;
++    };
++    uint32_t step = index % 8u + 1u;
++    jitter[0] = halton(step, 2) - 0.5f;
++    jitter[1] = halton(step, 3) - 0.5f;
++}
++
++/* Each draw's constants by identity, this frame's and the frame before's. */
++static struct {
++    std::vector<std::array<float, 768>> pool[2];
++    std::unordered_map<uint64_t, std::vector<uint32_t>> by_draw[2];   /* in draw order */
++    std::unordered_map<uint64_t, uint32_t> by_program[2];
++    std::unordered_map<uint64_t, uint32_t> seen;
++    int now = 0;
++} taa_motion;
++
++static uint64_t taa_mix(uint64_t hash, const void *data, size_t bytes)
++{
++    const uint8_t *at = (const uint8_t *)data;
++    for (size_t i = 0; i < bytes; i++) { hash ^= at[i]; hash *= 1099511628211ull; }
++    return hash;
++}
++
++static float taa_projection_distance(const float *before, const float (*now)[4], int projection)
++{
++    float distance = 0.0f;
++    for (int row = projection; row < projection + 4; row++)
++        for (int column = 0; column < 4; column++) distance += std::fabs(before[row * 4 + column] - now[row][column]);
++    return distance;
++}
++
++static const float (*taa_previous(const Nv2aGpuDraw &state, const Nv2aGpuVertex *vertices, uint32_t count,
++                                  int geometry_mode, uint64_t geometry_key, const float (*constants)[4],
++                                  int projection))[4]
++{
++    uint64_t program = 14695981039346656037ull;
++    uint32_t words = vertex_program_word_count(state);
++    if (state.vertex_program && words) program = taa_mix(program, state.vertex_program + state.vertex_start, words * 4u);
++    else {
++        uint32_t tag[2] = {state.fixed_transform, state.skin_mode};
++        program = taa_mix(program, tag, sizeof tag);
++    }
++    uint64_t draw = program;
++    uint32_t shape[2] = {count, state.indices ? state.index_count : 0u};
++    draw = taa_mix(draw, shape, sizeof shape);
++    draw = taa_mix(draw, &state.textures[0].source, sizeof state.textures[0].source);
++    if (geometry_mode && geometry_key) draw = taa_mix(draw, &geometry_key, sizeof geometry_key);
++    else for (uint32_t vertex = 0; vertex < count && vertex < 8; vertex++)
++        draw = state.vertex_program ? taa_mix(draw, vertices[vertex].attributes[0], 16)
++                                    : taa_mix(draw, vertices[vertex].position, 16);
++    uint32_t occurrence = taa_motion.seen[draw]++;
++
++    int now = taa_motion.now, before = now ^ 1;
++    const float (*previous)[4] = nullptr;
++    auto found = taa_motion.by_draw[before].find(draw);
++    if (found != taa_motion.by_draw[before].end()) {
++        /* The same place in the frame's order, unless another of the same
++         * draws had a projection nearer this one's: when one of twenty alike
++         * is culled, the rest move up a place, and each took its neighbour's
++         * matrices (a pop of the foliage moving). */
++        const auto &list = found->second;
++        const auto &pool = taa_motion.pool[before];
++        size_t at = occurrence < list.size() ? occurrence : list.size() - 1;
++        uint32_t best = list[at];
++        if (list.size() > 1 && projection >= 0 && projection + 4 <= 192) {
++            float nearest = taa_projection_distance(pool[best].data(), constants, projection);
++            size_t from = at > 32 ? at - 32 : 0, to = std::min(list.size(), from + 65);
++            for (size_t candidate = from; candidate < to && nearest > 0.0f; candidate++) {
++                float distance = taa_projection_distance(pool[list[candidate]].data(), constants, projection);
++                if (distance < nearest) { nearest = distance; best = list[candidate]; }
++            }
++        }
++        previous = (const float (*)[4])pool[best].data();
++        taa_frame.matched++;
++    } else {
++        auto fallback = taa_motion.by_program[before].find(program);
++        if (fallback != taa_motion.by_program[before].end()) {
++            previous = (const float (*)[4])taa_motion.pool[before][fallback->second].data();
++            taa_frame.by_program++;
++        } else taa_frame.unmatched++;
++    }
++    auto &pool = taa_motion.pool[now];
++    if (pool.size() < 16384) {
++        uint32_t index = (uint32_t)pool.size();
++        pool.emplace_back();
++        std::memcpy(pool.back().data(), constants, sizeof(float) * 768);
++        taa_motion.by_draw[now][draw].push_back(index);
++        taa_motion.by_program[now].emplace(program, index);
++    }
++    return previous;
++}
++
++static void taa_release()
++{
++    taa.motion.Reset(); taa.motion_target.Reset(); taa.motion_view.Reset();
++    taa.motion_width = taa.motion_height = taa.motion_samples = 0;
++    for (int index = 0; index < 2; index++) {
++        taa.history[index].Reset(); taa.history_target[index].Reset(); taa.history_view[index].Reset();
++    }
++    taa.history_width = taa.history_height = 0;
++    taa.input.Reset(); taa.input_view.Reset();
++}
++
++static bool taa_pipeline()
++{
++    if (taa.failed) return false;
++    if (taa.vertex) return true;
++    static const char text[] =
++        "Texture2D<float4> current:register(t0);Texture2D<float4> history:register(t1);\n"
++        "#if NV_TAA_MS\nTexture2DMS<float2> motion:register(t2);\n#define MOTION(p) motion.Load(p,0)\n"
++        "#else\nTexture2D<float2> motion:register(t2);\n#define MOTION(p) motion.Load(int3(p,0))\n#endif\n"
++        "SamplerState smooth:register(s0);\n"
++        "cbuffer Taa:register(b0){float4 size;float4 params;float4 moving;};\n"
++        "float4 vs(uint id:SV_VertexID):SV_Position{float2 t=float2((id<<1)&2,id&2);return float4(t*float2(2,-2)+float2(-1,1),0,1);}\n"
++        "float3 ycocg(float3 c){return float3(dot(c,float3(0.25,0.5,0.25)),dot(c,float3(0.5,0,-0.5)),dot(c,float3(-0.25,0.5,-0.25)));}\n"
++        "float3 rgb(float3 c){return float3(c.x+c.y-c.z,c.x+c.z,c.x-c.y-c.z);}\n"
++        /* Catmull-Rom from five bilinear taps: the history stays sharp
++           instead of blurring a little more every frame. */
++        "float3 history_sample(float2 uv){\n"
++        " float2 position=uv*size.xy,centre=floor(position-0.5)+0.5,f=position-centre;\n"
++        " float2 w0=f*(-0.5+f*(1-0.5*f)),w1=1+f*f*(-2.5+1.5*f),w2=f*(0.5+f*(2-1.5*f)),w3=f*f*(-0.5+0.5*f);\n"
++        " float2 w12=w1+w2,t0=(centre-1)*size.zw,t3=(centre+2)*size.zw,t12=(centre+w2/w12)*size.zw;\n"
++        " float3 sum=history.SampleLevel(smooth,float2(t12.x,t0.y),0).rgb*(w12.x*w0.y)\n"
++        "  +history.SampleLevel(smooth,float2(t0.x,t12.y),0).rgb*(w0.x*w12.y)\n"
++        "  +history.SampleLevel(smooth,t12,0).rgb*(w12.x*w12.y)\n"
++        "  +history.SampleLevel(smooth,float2(t3.x,t12.y),0).rgb*(w3.x*w12.y)\n"
++        "  +history.SampleLevel(smooth,float2(t12.x,t3.y),0).rgb*(w12.x*w3.y);\n"
++        " float total=w12.x*w0.y+w0.x*w12.y+w12.x*w12.y+w3.x*w12.y+w12.x*w3.y;\n"
++        " return max(sum/total,0);\n"
++        "}\n"
++        "float4 ps(float4 p:SV_Position):SV_Target{\n"
++        " int2 pixel=int2(p.xy),last=int2(size.xy)-1;\n"
++        " float4 here=current.Load(int3(pixel,0));\n"
++        " float3 m1=0,m2=0,low=1e9,high=-1e9; float2 motionHere=0; float longest=-1;\n"
++        " [unroll]for(int y=-1;y<=1;y++)[unroll]for(int x=-1;x<=1;x++){\n"
++        "  int2 at=clamp(pixel+int2(x,y),0,last);\n"
++        "  float3 s=ycocg(current.Load(int3(at,0)).rgb); m1+=s; m2+=s*s; low=min(low,s); high=max(high,s);\n"
++        /* the longest motion around: an object's edge moves with it */
++        "  float2 m=MOTION(at); float l=dot(m,m); if(l>longest){longest=l;motionHere=m;}\n"
++        " }\n"
++        " float2 before=p.xy*size.zw-motionHere;\n"
++        " if(params.x!=0 || any(before<0) || any(before>1))return here;\n"
++        " float3 mean=m1/9,sigma=sqrt(max(m2/9-mean*mean,0));\n"
++        " float3 boxLow=max(low,mean-params.z*sigma),boxHigh=min(high,mean+params.z*sigma);\n"
++        " float3 h=ycocg(history_sample(before));\n"
++        " float movement=saturate(length(motionHere*size.xy)/moving.y);\n"
++        /* A grass blade thinner than a pixel can miss all nine samples
++           around one in a frame; the box of colours then excludes the blade
++           and pulled the settled history to the background, and back the
++           frame after: foliage flickering darker and lighter. Held still,
++           the box is moving.z times as large. */
++        " float3 centre=0.5*(boxHigh+boxLow),extent=(0.5*(boxHigh-boxLow)+1e-5)*lerp(moving.z,1,movement),offset=h-centre,units=abs(offset/extent);\n"
++        " float most=max(units.x,max(units.y,units.z)); if(most>1)h=centre+offset/most;\n"
++        /* Held still, the history counts for more (the jitter's flicker
++           averages out); moving, less, so it stays sharp. */
++        " float feedback=lerp(params.y,moving.x,movement);\n"
++        " return float4(saturate(rgb(lerp(ycocg(here.rgb),h,feedback))),here.a);\n"
++        "}\n"
++        /* The history into the scene, sharpened by how much contrast each
++           pixel has around it (AMD's CAS, its cross of five): blending frames
++           softens what the jitter does not move, and this gives it back
++           without sharpening the history itself. params.w: 0 none, 1 most. */
++        "float4 sharpen(float4 p:SV_Position):SV_Target{\n"
++        " int2 pixel=int2(p.xy),last=int2(size.xy)-1;\n"
++        " float4 e=history.Load(int3(pixel,0));\n"
++        " if(params.w<=0)return e;\n"
++        " float3 b=history.Load(int3(clamp(pixel+int2(0,-1),0,last),0)).rgb,d=history.Load(int3(clamp(pixel+int2(-1,0),0,last),0)).rgb;\n"
++        " float3 f=history.Load(int3(clamp(pixel+int2(1,0),0,last),0)).rgb,h=history.Load(int3(clamp(pixel+int2(0,1),0,last),0)).rgb;\n"
++        " float3 low=min(min(min(b,d),min(f,h)),e.rgb),high=max(max(max(b,d),max(f,h)),e.rgb);\n"
++        " float3 amount=sqrt(saturate(min(low,1-high)/max(high,1e-5)));\n"
++        " float3 w=amount*lerp(-0.125,-0.2,saturate(params.w));\n"
++        " return float4(saturate((e.rgb+(b+d+f+h)*w)/(1+4*w)),e.a);\n"
++        "}\n";
++    ComPtr<ID3DBlob> vertex, pixel[2], sharpen, errors;
++    D3D_SHADER_MACRO single[] = {{"NV_TAA_MS", "0"}, {nullptr, nullptr}}, multi[] = {{"NV_TAA_MS", "1"}, {nullptr, nullptr}};
++    HRESULT result = shader_compile(text, sizeof text - 1, "NV2A TAA", single, nullptr, "vs", "vs_5_0",
++                                    D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &vertex, &errors);
++    if (SUCCEEDED(result)) result = shader_compile(text, sizeof text - 1, "NV2A TAA", single, nullptr, "ps", "ps_5_0",
++                                                   D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &pixel[0], &errors);
++    if (SUCCEEDED(result)) result = shader_compile(text, sizeof text - 1, "NV2A TAA", multi, nullptr, "ps", "ps_5_0",
++                                                   D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &pixel[1], &errors);
++    if (SUCCEEDED(result)) result = shader_compile(text, sizeof text - 1, "NV2A TAA", single, nullptr, "sharpen", "ps_5_0",
++                                                   D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &sharpen, &errors);
++    if (SUCCEEDED(result)) result = device->CreatePixelShader(sharpen->GetBufferPointer(), sharpen->GetBufferSize(), nullptr, &taa.sharpen);
++    if (SUCCEEDED(result)) result = device->CreateVertexShader(vertex->GetBufferPointer(), vertex->GetBufferSize(), nullptr, &taa.vertex);
++    for (int index = 0; index < 2 && SUCCEEDED(result); index++)
++        result = device->CreatePixelShader(pixel[index]->GetBufferPointer(), pixel[index]->GetBufferSize(), nullptr, &taa.pixel[index]);
++    D3D11_SAMPLER_DESC sampler = {};
++    sampler.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
++    sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
++    if (SUCCEEDED(result)) result = device->CreateSamplerState(&sampler, &taa.sampler);
++    D3D11_RASTERIZER_DESC raster = {};
++    raster.FillMode = D3D11_FILL_SOLID; raster.CullMode = D3D11_CULL_NONE;
++    if (SUCCEEDED(result)) result = device->CreateRasterizerState(&raster, &taa.raster);
++    D3D11_BLEND_DESC blend = {};
++    blend.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
++    if (SUCCEEDED(result)) result = device->CreateBlendState(&blend, &taa.blend);
++    D3D11_DEPTH_STENCIL_DESC depth = {};
++    if (SUCCEEDED(result)) result = device->CreateDepthStencilState(&depth, &taa.depth_off);
++    D3D11_BUFFER_DESC buffer = {};
++    buffer.ByteWidth = 48; buffer.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
++    buffer.Usage = D3D11_USAGE_DYNAMIC; buffer.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
++    if (SUCCEEDED(result)) result = device->CreateBuffer(&buffer, nullptr, &taa.parameters);
++    if (FAILED(result)) {
++        std::fprintf(stderr, "[TAA] unavailable: 0x%08X %s\n", (unsigned)result,
++                     errors ? (const char *)errors->GetBufferPointer() : "");
++        taa.failed = true;
++        taa.vertex.Reset();
++        return false;
++    }
++    std::fprintf(stderr, "[TAA] on\n");
++    return true;
++}
++
++/* The motion target for a scene of this size and sample count, cleared once a frame. */
++static bool taa_motion_target(UINT width, UINT height, UINT samples)
++{
++    if (taa.motion && taa.motion_width == width && taa.motion_height == height && taa.motion_samples == samples)
++        return true;
++    taa.motion.Reset(); taa.motion_target.Reset(); taa.motion_view.Reset();
++    taa.motion_width = taa.motion_height = taa.motion_samples = 0;
++    D3D11_TEXTURE2D_DESC description = {};
++    description.Width = width; description.Height = height;
++    description.MipLevels = description.ArraySize = 1;
++    description.Format = DXGI_FORMAT_R16G16_FLOAT; description.SampleDesc.Count = samples;
++    description.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
++    if (FAILED(device->CreateTexture2D(&description, nullptr, &taa.motion)) ||
++        FAILED(device->CreateRenderTargetView(taa.motion.Get(), nullptr, &taa.motion_target)) ||
++        FAILED(device->CreateShaderResourceView(taa.motion.Get(), nullptr, &taa.motion_view))) {
++        std::fprintf(stderr, "[TAA] motion target %ux%u x%u could not be made\n", width, height, samples);
++        taa.motion.Reset(); taa.motion_target.Reset(); taa.motion_view.Reset();
++        return false;
++    }
++    taa.motion_width = width; taa.motion_height = height; taa.motion_samples = samples;
++    return true;
++}
++
++static bool taa_history(UINT width, UINT height, bool &fresh)
++{
++    fresh = false;
++    if (taa.history[0] && taa.history_width == width && taa.history_height == height) return true;
++    fresh = true;
++    for (int index = 0; index < 2; index++) {
++        taa.history[index].Reset(); taa.history_target[index].Reset(); taa.history_view[index].Reset();
++    }
++    taa.history_width = taa.history_height = 0;
++    D3D11_TEXTURE2D_DESC description = {};
++    description.Width = width; description.Height = height;
++    description.MipLevels = description.ArraySize = 1;
++    description.Format = DXGI_FORMAT_R16G16B16A16_FLOAT; description.SampleDesc.Count = 1;
++    description.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
++    for (int index = 0; index < 2; index++)
++        if (FAILED(device->CreateTexture2D(&description, nullptr, &taa.history[index])) ||
++            FAILED(device->CreateRenderTargetView(taa.history[index].Get(), nullptr, &taa.history_target[index])) ||
++            FAILED(device->CreateShaderResourceView(taa.history[index].Get(), nullptr, &taa.history_view[index]))) {
++            std::fprintf(stderr, "[TAA] history %ux%u could not be made\n", width, height);
++            for (int other = 0; other < 2; other++) {
++                taa.history[other].Reset(); taa.history_target[other].Reset(); taa.history_view[other].Reset();
++            }
++            return false;
++        }
++    taa.history_width = width; taa.history_height = height;
++    return true;
++}
++
++/* A 3D draw into the scene: its jitter and previous constants. Returns
++ * whether it is one (constants.taa set, *previous the constants or null). */
++static bool taa_scene_draw(Surface &surface, const Nv2aGpuDraw &state, const Nv2aGpuVertex *vertices, uint32_t count,
++                           int geometry_mode, uint64_t geometry_key, int projection, Constants &constants,
++                           float viewport_width, float viewport_height, const float (*&previous)[4])
++{
++    previous = nullptr;
++    if (taa_frame.resolved) { taa_frame.late_3d++; return false; }
++    if (taa_frame.scene && taa_frame.scene != surface.memory) return false;
++    if (!taa_frame.scene) {
++        if (!taa_pipeline()) return false;
++        taa_frame.scene = surface.memory;
++        taa_frame.pending = true;
++        UINT samples = surface.ms_texture ? (UINT)msaa_samples : 1u;
++        taa_frame.motion_ready = taa_motion_target(surface.texture_width, surface.texture_height, samples);
++        if (taa_frame.motion_ready) {
++            const float zero[4] = {};
++            context->ClearRenderTargetView(taa.motion_target.Get(), zero);
++        }
++    }
++    taa_frame.draws++;
++    previous = taa_previous(state, vertices, count, geometry_mode, geometry_key, constants.vertex_constants, projection);
++    constants.taa[0] = viewport_width > 0 ? taa_frame.jitter[0] * 2.0f / viewport_width : 0.0f;
++    constants.taa[1] = viewport_height > 0 ? -taa_frame.jitter[1] * 2.0f / viewport_height : 0.0f;
++    constants.taa[2] = previous ? 1.0f : 0.0f;
++    return true;
++}
++
++/* The scene so far, blended with the frames before, written back into it. */
++enum { TAA_AT_2D, TAA_AT_SAMPLE, TAA_AT_FLIP };
++static void taa_resolve(Surface &surface, int at)
++{
++    taa_frame.pending = false;
++    taa_frame.resolved = true;
++    (at == TAA_AT_FLIP ? taa_frame.resolves_flip : at == TAA_AT_SAMPLE ? taa_frame.resolves_sampled : taa_frame.resolves_2d)++;
++    if (!taa_pipeline() || !surface.texture || !surface.target) return;
++    UINT width = surface.texture_width, height = surface.texture_height;
++    bool fresh = false;
++    if (!taa_history(width, height, fresh)) return;
++    ID3D11ShaderResourceView *input = snapshot_color(surface, taa.input, taa.input_view);
++    if (!input) return;
++    bool reset = fresh || taa.history_frame + 1 != surface_frame_serial || !taa_frame.motion_ready;
++    int read = taa.history_index, write = read ^ 1;
++    {
++        /* RECOMP_TAA_FEEDBACK: the history's weight held still (0.98);
++         * RECOMP_TAA_FEEDBACK_MOVING: at 4 pixels a frame and more (0.9). */
++        static float feedback = -1.0f, feedback_moving = -1.0f, clip = -1.0f, sharpness = -1.0f, still_box = -1.0f;
++        if (feedback < 0) {
++            const char *text = std::getenv("RECOMP_TAA_FEEDBACK");
++            feedback = text && *text ? (float)std::atof(text) : 0.98f;
++            if (!(feedback >= 0.0f && feedback < 1.0f)) feedback = 0.98f;
++            text = std::getenv("RECOMP_TAA_FEEDBACK_MOVING");
++            feedback_moving = text && *text ? (float)std::atof(text) : 0.9f;
++            if (!(feedback_moving >= 0.0f && feedback_moving < 1.0f)) feedback_moving = 0.9f;
++            text = std::getenv("RECOMP_TAA_CLIP");
++            clip = text && *text ? (float)std::atof(text) : 1.25f;
++            if (!(clip > 0.0f)) clip = 1.25f;
++            text = std::getenv("RECOMP_TAA_SHARPEN");
++            sharpness = text && *text ? (float)std::atof(text) : 0.2f;
++            if (!(sharpness >= 0.0f)) sharpness = 0.2f;
++            text = std::getenv("RECOMP_TAA_STILL_BOX");
++            still_box = text && *text ? (float)std::atof(text) : 2.0f;
++            if (!(still_box >= 1.0f)) still_box = 2.0f;
++        }
++        D3D11_MAPPED_SUBRESOURCE mapped = {};
++        if (FAILED(context->Map(taa.parameters.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) return;
++        float values[12] = {(float)width, (float)height, 1.0f / width, 1.0f / height,
++                            reset ? 1.0f : 0.0f, feedback, clip, sharpness, feedback_moving, 4.0f, still_box, 0.0f};
++        std::memcpy(mapped.pData, values, sizeof values);
++        context->Unmap(taa.parameters.Get(), 0);
++    }
++    ID3D11ShaderResourceView *none[12] = {};
++    context->PSSetShaderResources(0, 12, none);
++    ID3D11RenderTargetView *history_target = taa.history_target[write].Get();
++    context->OMSetRenderTargets(1, &history_target, nullptr);
++    context->OMSetBlendState(taa.blend.Get(), nullptr, UINT_MAX);
++    context->OMSetDepthStencilState(taa.depth_off.Get(), 0);
++    context->IASetInputLayout(nullptr);
++    context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
++    context->VSSetShader(taa.vertex.Get(), nullptr, 0);
++    context->GSSetShader(nullptr, nullptr, 0);
++    context->PSSetShader(taa.pixel[taa.motion_samples > 1 ? 1 : 0].Get(), nullptr, 0);
++    ID3D11ShaderResourceView *sources[3] = {input, taa.history_view[read].Get(),
++                                            taa_frame.motion_ready ? taa.motion_view.Get() : nullptr};
++    context->PSSetShaderResources(0, 3, sources);
++    ID3D11SamplerState *sampler = taa.sampler.Get();
++    context->PSSetSamplers(0, 1, &sampler);
++    ID3D11Buffer *parameters = taa.parameters.Get();
++    context->PSSetConstantBuffers(0, 1, &parameters);
++    context->RSSetState(taa.raster.Get());
++    D3D11_VIEWPORT viewport = {0, 0, (float)width, (float)height, 0, 1};
++    context->RSSetViewports(1, &viewport);
++    D3D11_RECT clip_all = {0, 0, (LONG)width, (LONG)height};
++    context->RSSetScissorRects(1, &clip_all);
++    context->Draw(3, 0);
++    context->PSSetShaderResources(0, 3, none);
++    ID3D11RenderTargetView *scene_target = surface.target.Get();
++    context->OMSetRenderTargets(1, &scene_target, nullptr);
++    ID3D11ShaderResourceView *resolved[2] = {nullptr, taa.history_view[write].Get()};
++    context->PSSetShaderResources(0, 2, resolved);
++    context->PSSetShader(taa.sharpen.Get(), nullptr, 0);
++    context->Draw(3, 0);
++    context->PSSetShaderResources(0, 3, none);
++    context->OMSetRenderTargets(0, nullptr, nullptr);
++    /* The title goes on drawing into the twin: it starts from this. */
++    if (surface.ms_texture) { surface.ms_stale = true; surface.ms_newer = false; }
++    D3D11_BOX all = {0, 0, 0, surface.width, surface.height, 1};
++    mark_written_region(surface, all);
++    taa.history_index = write;
++    taa.history_frame = surface_frame_serial;
++}
++
++/* At a flip: a scene not resolved yet is now, and the next frame starts. */
++static void taa_end_frame(const void *presented)
++{
++    (void)presented;
++    if (taa_frame.pending && taa_frame.scene) {
++        Surface *surface = surface_for_memory(taa_frame.scene);
++        if (surface) taa_resolve(*surface, TAA_AT_FLIP);
++    }
++    if (taa_frame.scene) taa_frame.frames++;
++    if (taa_trace()) {
++        static ULONGLONG last;
++        ULONGLONG now = GetTickCount64();
++        if (!last) last = now;
++        if (now - last >= 5000) {
++            last = now;
++            std::fprintf(stderr, "[TAA] %llu frames: %llu scene draws (%llu write motion; same draw %llu, by program %llu, "
++                         "none %llu), resolved at 2D %llu / sampled %llu / flip %llu, %llu 3D draws after\n",
++                         (unsigned long long)taa_frame.frames, (unsigned long long)taa_frame.draws,
++                         (unsigned long long)taa_frame.motion_draws, (unsigned long long)taa_frame.matched,
++                         (unsigned long long)taa_frame.by_program, (unsigned long long)taa_frame.unmatched,
++                         (unsigned long long)taa_frame.resolves_2d, (unsigned long long)taa_frame.resolves_sampled,
++                         (unsigned long long)taa_frame.resolves_flip,
++                         (unsigned long long)taa_frame.late_3d);
++            taa_frame.frames = taa_frame.draws = taa_frame.motion_draws = taa_frame.matched = 0;
++            taa_frame.by_program = taa_frame.unmatched = taa_frame.late_3d = 0;
++            taa_frame.resolves_2d = taa_frame.resolves_sampled = taa_frame.resolves_flip = 0;
++        }
++    }
++    taa_frame.scene = nullptr;
++    taa_frame.pending = taa_frame.resolved = taa_frame.motion_ready = false;
++    taa_frame.jitter_index++;
++    taa_jitter(taa_frame.jitter_index, taa_frame.jitter);
++    taa_motion.now ^= 1;
++    taa_motion.pool[taa_motion.now].clear();
++    taa_motion.by_draw[taa_motion.now].clear();
++    taa_motion.by_program[taa_motion.now].clear();
++    taa_motion.seen.clear();
++    release_stream(taa.previous_stream);
++    if (!taa_active() && (taa.motion || taa.history[0])) taa_release();
++}
++
  extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices, uint32_t count)
  {
 +    /* The hint is for this draw alone, whatever path it takes. */
@@ -7158,7 +7788,7 @@ index f031faf..a5bd96e 100644
      if (state->topology > NV2A_GPU_TOPOLOGY_POINTS) return reject("primitive topology");
      uint32_t primitive_width = state->topology == NV2A_GPU_TOPOLOGY_TRIANGLES ? 3u :
                                 state->topology == NV2A_GPU_TOPOLOGY_LINES ? 2u : 1u;
-@@ -2775,7 +5040,7 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -2775,7 +5582,7 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
          (state->indices && element_count > NV2A_GPU_MAX_INDICES)) return reject("primitive element count");
      if (state->topology == NV2A_GPU_TOPOLOGY_POINTS && state->point_size && state->point_size != 8)
          return reject("non-unit point size");
@@ -7167,7 +7797,7 @@ index f031faf..a5bd96e 100644
          for (uint32_t index = 0; index < state->index_count; index++)
              if (state->indices[index] >= count) return reject("vertex index extent");
      }
-@@ -2856,12 +5121,25 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -2856,12 +5663,25 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
      for (uint32_t vertex = 0; !state->vertex_program && !state->fixed_transform && vertex < count; vertex++)
          if (!nv_cpu_finite(vertices[vertex].position[0]) || !nv_cpu_finite(vertices[vertex].position[1]) ||
              !nv_cpu_finite(vertices[vertex].position[2]) || !nv_cpu_finite(vertices[vertex].position[3])) return 0;
@@ -7195,7 +7825,7 @@ index f031faf..a5bd96e 100644
      D3D11_DEPTH_STENCIL_DESC depth_description = {};
      depth_description.DepthEnable = state->depth_enable != 0;
      depth_description.DepthWriteMask = state->depth_mask ? D3D11_DEPTH_WRITE_MASK_ALL : D3D11_DEPTH_WRITE_MASK_ZERO;
-@@ -2903,8 +5181,24 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -2903,8 +5723,24 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
                        (LONG)std::min(state->clip_y + state->clip_height, state->height)};
      if (state->topology == NV2A_GPU_TOPOLOGY_TRIANGLES && state->cull_enable && state->cull_face == 0x408) { clip.right = clip.left; clip.bottom = clip.top; }
      configure_window_clip(*state, constants, clip);
@@ -7221,7 +7851,7 @@ index f031faf..a5bd96e 100644
      constants.misc[1] = state->control0;
      constants.misc[2] = state->fixed_transform; constants.misc[3] = state->flat_shading;
      constants.final_input[0] = state->combiners.final_input[0]; constants.final_input[1] = state->combiners.final_input[1];
-@@ -2971,14 +5265,43 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -2971,14 +5807,68 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
              }
          }
      }
@@ -7243,6 +7873,31 @@ index f031faf..a5bd96e 100644
 +        else if (!nv2a_pb_exec_batch_spans(constants.viewport[0])) {
 +            constants.viewport[3] = 1.0f / widened;
 +            squeeze_2d = true;
++        }
++    }
++    /* Temporal AA (see taa_scene_draw, taa_resolve): a 3D draw into the scene
++     * is jittered and finds its previous constants; the first 2D draw into it
++     * resolves it first. */
++    bool taa_draw = false, taa_writes_motion = false;
++    const float (*taa_before)[4] = nullptr;
++    if (taa_frame.pending) {   /* the scene sampled as a texture: resolved first */
++        for (uint32_t stage = 0; stage < 4; stage++)
++            if (state->textures[stage].source == taa_frame.scene && nv2a_gpu_texture_mode_samples((state->stage_program >> (stage * 5)) & 31u)) {
++                Surface *scene = surface_for_memory(taa_frame.scene);
++                if (scene) taa_resolve(*scene, TAA_AT_SAMPLE);
++                break;
++            }
++    }
++    if (surface && (taa_frame.pending || taa_active()) && taa_scene_surface(*surface)) {
++        if (projection < 0) {
++            if (taa_frame.pending && taa_frame.scene == surface->memory) taa_resolve(*surface, TAA_AT_2D);
++        } else if (taa_active()) {
++            float viewport_width = (float)scale_edge((LONG)state->width, guest_width, target_width);
++            float viewport_height = (float)scale_edge((LONG)state->height, guest_height, target_height);
++            taa_draw = taa_scene_draw(*surface, *state, vertices, count, geometry_mode, geometry_key, projection,
++                                      constants, viewport_width, viewport_height, taa_before);
++            taa_writes_motion = taa_draw && taa_frame.motion_ready && !state->blend_enable &&
++                                (state->color_mask & 0x10100u) == 0x10100u;
 +        }
 +    }
      constants.depth_range[0] = depth_clip_min; constants.depth_range[1] = depth_clip_max;
@@ -7267,7 +7922,7 @@ index f031faf..a5bd96e 100644
      for (uint32_t stage = 0; stage < 8; stage++) {
          constants.stages[stage][0] = state->combiners.rgb_input[stage]; constants.stages[stage][1] = state->combiners.alpha_input[stage];
          constants.stages[stage][2] = state->combiners.rgb_output[stage]; constants.stages[stage][3] = state->combiners.alpha_output[stage];
-@@ -3052,7 +5375,8 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -3052,7 +5942,8 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
              constants.texture_info[stage][3] = 0.0f;
              continue;
          }
@@ -7277,7 +7932,7 @@ index f031faf..a5bd96e 100644
              return reject("projective volume texture dimensionality");
          uint32_t sign_mask = binding.filter >> 28;
          uint32_t key_mode = binding.control0_valid ? binding.control0 & 3u : 0;
-@@ -3090,9 +5414,50 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -3090,9 +5981,50 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
              if ((mode == 1 || mode == 2) && vertices[vertex].texture[stage][3] == 0) return reject("zero projective texture coordinate");
          }
          if (!binding.source_bytes) return reject("missing texture data");
@@ -7330,7 +7985,7 @@ index f031faf..a5bd96e 100644
          constants.texture_info[stage][0] = (float)binding.width; constants.texture_info[stage][1] = (float)binding.height; constants.texture_info[stage][2] = (float)binding.linear;
          constants.texture_key[stage][0] = binding.color_key;
          constants.texture_key[stage][1] = binding.format == 0x03 || binding.format == 0x07 ||
-@@ -3102,7 +5467,16 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -3102,7 +6034,16 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
          constants.texture_info[stage][3] = (float)((binding.format == 0x1E ? 1u : 0u) | (binding.cube ? 2u : 0u) |
              (binding.address_u == 5 ? 4u : 0u) | (binding.address_v == 5 ? 8u : 0u) |
              (binding.control0_valid && (binding.control0 & 4u) ? 16u : 0u) |
@@ -7348,7 +8003,7 @@ index f031faf..a5bd96e 100644
          if (sign_mask) signed_texture_stages++;
          switch (binding.format) {
          case 0x01: case 0x16: case 0x17: case 0x1A: case 0x1B: case 0x20: case 0x28: case 0x29:
-@@ -3111,32 +5485,82 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -3111,32 +6052,94 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
          }
      }
      phase_timer.next_phase(gpu_timing.draw_streams);
@@ -7439,6 +8094,18 @@ index f031faf..a5bd96e 100644
 +    }
 +    if (state->indices) context->IASetIndexBuffer(geometry_buffer, DXGI_FORMAT_R32_UINT, index_offset);
      else context->IASetIndexBuffer(nullptr, DXGI_FORMAT_R32_UINT, 0);
++    /* A temporal-AA draw's constants of the frame before (cbuffer b2). */
++    ID3D11Buffer *previous_buffer = nullptr;
++    UINT previous_first = 0;
++    if (taa_draw && taa_before) {
++        UINT offset = 0;
++        if (map_stream(taa.previous_stream, 3072, D3D11_BIND_CONSTANT_BUFFER, "TAA constants", offset)) {
++            std::memcpy((uint8_t *)taa.previous_stream.mapped.pData + offset, taa_before, 3072);
++            release_stream(taa.previous_stream);
++            previous_buffer = taa.previous_stream.buffer.Get();
++            previous_first = offset / 16u;
++        } else constants.taa[2] = 0.0f;
++    }
      UINT constants_offset = 0;
      bool constants_ring = false;
      {
@@ -7449,7 +8116,7 @@ index f031faf..a5bd96e 100644
                  !std::memcmp(&uploaded_constants, &constants, sizeof constants)) {
              /* Same constants as the last upload this frame: rebind its offset. */
              gpu_timing.constant_reuses++;
-@@ -3146,6 +5570,8 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -3146,6 +6149,8 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
              if (!map_stream(constant_stream, kConstantSlot, D3D11_BIND_CONSTANT_BUFFER, "constants", constants_offset))
                  return 0;
              std::memcpy((uint8_t *)constant_stream.mapped.pData + constants_offset, &constants, sizeof constants);
@@ -7458,7 +8125,7 @@ index f031faf..a5bd96e 100644
              constant_upload_offset = constants_offset;
              uploaded_constants = constants;
              uploaded_constants_valid = true;
-@@ -3170,20 +5596,31 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -3170,20 +6175,35 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
              constants.texture_key[stage][2] == 3u) uncombined = false;
      ID3D11PixelShader *program = uncombined ? uncombined_shader.Get() : get_pixel_shader(*state, constants.window_clip_control[0]);
      if (!program) return 0;
@@ -7490,11 +8157,15 @@ index f031faf..a5bd96e 100644
      }
      float blend_color[4]; nv_cpu_unpack_argb(state->blend_constant, blend_color);
 -    context->OMSetRenderTargets(1, &target, depth ? depth->view.Get() : nullptr);
-+    context->OMSetRenderTargets(1, &target, depth_target);
++    if (taa_writes_motion && target && (target == surface->ms_target.Get()) == (taa.motion_samples > 1)) {
++        ID3D11RenderTargetView *both[2] = {target, taa.motion_target.Get()};
++        context->OMSetRenderTargets(2, both, depth_target);
++        taa_frame.motion_draws++;
++    } else context->OMSetRenderTargets(1, &target, depth_target);
      context->OMSetDepthStencilState(depth_state.Get(), state->stencil_reference & 255u); context->OMSetBlendState(blending.Get(), blend_color, ~0u);
      context->IASetInputLayout(guest_vertex ? guest_vertex->layout.Get() : input_layout.Get()); context->IASetVertexBuffers(0, 1, buffers, &stride, &offset);
      context->IASetPrimitiveTopology(state->topology == NV2A_GPU_TOPOLOGY_LINES ? D3D11_PRIMITIVE_TOPOLOGY_LINELIST :
-@@ -3192,7 +5629,7 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -3192,7 +6212,7 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
      context->VSSetShader(guest_vertex ? guest_vertex->shader.Get() : vertex_shader.Get(), nullptr, 0);
      ID3D11GeometryShader *geometry = state->topology == NV2A_GPU_TOPOLOGY_LINES ? line_geometry_shader.Get() :
          state->topology == NV2A_GPU_TOPOLOGY_POINTS ? point_geometry_shader.Get() :
@@ -7503,7 +8174,16 @@ index f031faf..a5bd96e 100644
      context->GSSetShader(geometry, nullptr, 0);
      context->PSSetShader(program, nullptr, 0);
      if (constants_ring && context1) {
-@@ -3205,20 +5642,23 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -3200,25 +6220,32 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+         context1->VSSetConstantBuffers1(0, 1, &constant_ring_buffer, &first, &num);
+         context1->PSSetConstantBuffers1(0, 1, &constant_ring_buffer, &first, &num);
+         context1->GSSetConstantBuffers1(0, 1, &constant_ring_buffer, &first, &num);
++        if (previous_buffer) {
++            UINT count_previous = 192;
++            context1->VSSetConstantBuffers1(2, 1, &previous_buffer, &previous_first, &count_previous);
++        }
+     } else {
+         context->VSSetConstantBuffers(0, 1, constants_buffer); context->PSSetConstantBuffers(0, 1, constants_buffer);
          context->GSSetConstantBuffers(0, 1, constants_buffer);
      }
      context->PSSetShaderResources(0, 12, resources); context->PSSetSamplers(0, 4, sampler_states);
@@ -7532,7 +8212,7 @@ index f031faf..a5bd96e 100644
      end_gpu_sample(sample);
      phase_timer.next_phase(gpu_timing.draw_bookkeeping);
      if (state->topology == NV2A_GPU_TOPOLOGY_LINES) gpu_timing.line_primitives += element_count / 2;
-@@ -3245,8 +5685,10 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -3245,8 +6272,10 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
          if (texture_matrix_used) gpu_timing.texture_matrix_draws++;
      }
      pending_draws = true;
@@ -7544,7 +8224,7 @@ index f031faf..a5bd96e 100644
      bool stencil_writes = state->stencil_enable && (state->stencil_write_mask & 255u) &&
          (state->stencil_fail != 0x1E00 || state->stencil_depth_fail != 0x1E00 || state->stencil_pass != 0x1E00);
      if (depth && ((state->depth_enable && state->depth_mask) || stencil_writes) && writes) mark_written_region(*depth, region);
-@@ -3260,8 +5702,8 @@ extern "C" int nv2a_gpu_compile(void)
+@@ -3260,8 +6289,8 @@ extern "C" int nv2a_gpu_compile(void)
      if (vertex_shader && uncombined_shader && geometry_shader && line_geometry_shader && point_geometry_shader) return 1;
      if (!nv2a_gpu_available()) return 0;
      ComPtr<ID3DBlob> pixel_code, errors;
@@ -7555,7 +8235,7 @@ index f031faf..a5bd96e 100644
      if (FAILED(result)) {
          std::fprintf(stderr, "[GPU-D3D11] shader compile: %s\n", errors ? (const char *)errors->GetBufferPointer() : "failed");
          return 0;
-@@ -3273,8 +5715,8 @@ extern "C" int nv2a_gpu_compile(void)
+@@ -3273,8 +6302,8 @@ extern "C" int nv2a_gpu_compile(void)
          return 0;
      }
      pixel_code.Reset(); errors.Reset();
@@ -7566,7 +8246,7 @@ index f031faf..a5bd96e 100644
      if (FAILED(result)) return 0;
      if (FAILED(device->CreatePixelShader(pixel_code->GetBufferPointer(), pixel_code->GetBufferSize(), nullptr, &uncombined_shader))) return 0;
      const struct { const char *entry; ComPtr<ID3D11GeometryShader> *shader; } geometries[] = {
-@@ -3282,8 +5724,8 @@ extern "C" int nv2a_gpu_compile(void)
+@@ -3282,8 +6311,8 @@ extern "C" int nv2a_gpu_compile(void)
      };
      for (const auto &geometry : geometries) {
          pixel_code.Reset(); errors.Reset();
@@ -7577,7 +8257,7 @@ index f031faf..a5bd96e 100644
          if (SUCCEEDED(result))
              result = device->CreateGeometryShader(pixel_code->GetBufferPointer(), pixel_code->GetBufferSize(), nullptr,
                                                     geometry.shader->ReleaseAndGetAddressOf());
-@@ -3296,28 +5738,98 @@ extern "C" int nv2a_gpu_compile(void)
+@@ -3296,28 +6325,98 @@ extern "C" int nv2a_gpu_compile(void)
      return 1;
  }
  
@@ -7682,26 +8362,33 @@ index f031faf..a5bd96e 100644
 \ No newline at end of file
 +}
 diff --git a/src/kernel/nv2a_gpu_shader.h b/src/kernel/nv2a_gpu_shader.h
-index e27083f..a61c57a 100644
+index e27083f..20987ee 100644
 --- a/src/kernel/nv2a_gpu_shader.h
 +++ b/src/kernel/nv2a_gpu_shader.h
-@@ -30,6 +30,7 @@ cbuffer State : register(b0) {
+@@ -30,7 +30,12 @@ cbuffer State : register(b0) {
   float4 lightSpotDirection[8];    /* xyz=direction, w=spot parameter */
   uint4 texgen[4]; uint4 textureMatrixEnable;
   uint4 windowClipControl; uint4 windowClipRects[8];
 + float4 heatTransform[4];
++ /* Temporal AA (nv2a_gpu_set_taa): xy the frame's jitter in clip units, z 1
++    when previousConstants hold this draw's constants of the frame before. */
++ float4 taa;
  };
++cbuffer Previous : register(b2) { float4 previousConstants[192]; };
  #ifndef NV_WINDOW_CLIP_MODE
  #define NV_WINDOW_CLIP_MODE windowClipControl.x
-@@ -74,6 +75,7 @@ struct Pixel {
+ #endif
+@@ -74,6 +79,9 @@ struct Pixel {
   noperspective float depthZ:TEXCOORD5;
   float fog:TEXCOORD6;
   nointerpolation float depthSlope:TEXCOORD7;
 + float depthClip:TEXCOORD8;
++ /* Clip positions now (before jitter) and a frame ago: the motion target. */
++ float4 motionNow:TEXCOORD9; float4 motionBefore:TEXCOORD10;
  };
  float fog_factor(float distance) {
   if(textureControl.z==0)return 1;
-@@ -93,6 +95,13 @@ float4 guest_multiply(float4 left,float4 right) {
+@@ -93,6 +101,13 @@ float4 guest_multiply(float4 left,float4 right) {
   return float4(left.x==0||right.x==0?0:left.x*right.x,left.y==0||right.y==0?0:left.y*right.y,
                 left.z==0||right.z==0?0:left.z*right.z,left.w==0||right.w==0?0:left.w*right.w);
  }
@@ -7715,15 +8402,86 @@ index e27083f..a61c57a 100644
  float guest_clip_w(float value) {
   if(!isfinite(value))return value;
   float magnitude=clamp(abs(value),5.421010862427522e-20,1.8446744073709552e19);
-@@ -230,6 +239,7 @@ Pixel vs_main(Vertex input) {
+@@ -106,6 +121,37 @@ float4 fixed_matrix(float4 value,uint firstRow) {
+  }
+  return result;
+ }
++float4 previous_matrix(float4 value,uint firstRow) {
++ float4 result;
++ [unroll]for(uint row=0;row<4;row++) {
++  float4 products=guest_multiply(value,previousConstants[firstRow+row]);
++  result[row]=products.x+products.y+products.z+products.w;
++ }
++ return result;
++}
++/* The fixed-function screen position with the frame before's matrices. */
++float4 fixed_previous_position(Vertex input) {
++ uint mode=lightControl.z;
++ uint count=mode==0?1:(mode+3)/2;
++ float remaining=1;
++ float4 position=0;
++ [unroll]for(uint slot=0;slot<4;slot++) {
++  if(slot<count) {
++   float weight=mode==0?1:((mode&1)!=0 && slot==count-1?remaining:input.weights[slot]);
++   remaining-=weight;
++   position+=previous_matrix(input.position,8+slot*8)*weight;
++  }
++ }
++ float4 transformed=previous_matrix(mode==0?input.position:position,0);
++ transformed.w=guest_clip_w(transformed.w);
++ transformed.xyz/=transformed.w;
++ transformed.xy+=previousConstants[59].xy;
++ return transformed;
++}
++float4 screen_clip(float4 position) {
++ float w=guest_clip_w(position.w);
++ return float4((2*position.x/viewport.x-1)*w,(1-2*position.y/viewport.y)*w,0,w);
++}
+ void fixed_eye_transform(Vertex input,out float4 position,out float3 normal) {
+  uint mode=lightControl.z;
+  uint count=mode==0?1:(mode+3)/2;
+@@ -136,10 +182,13 @@ float4 fixed_texcoord(float4 coordinate,uint stage,float4 objectPosition,float4
+ #ifndef NV_FIXED_TRANSFORM
+ #define NV_FIXED_TRANSFORM misc.z
+ #endif
+-Pixel vs_main(Vertex input) {
++/* previous: a vertex program's screen position with the frame before's
++   constants (vs_guest), or this one's; fixed function finds its own. */
++Pixel vs_core(Vertex input,float4 previous) {
+  Pixel output;
+  float distance=fogControl.x==6?input.fogCoordinate:saturate(input.specular.a);
+  if(NV_FIXED_TRANSFORM!=0) {
++  if(taa.z!=0)previous=fixed_previous_position(input);
+   float4 eyeSpacePosition;
+   float3 eyeSpaceNormal;
+   fixed_eye_transform(input,eyeSpacePosition,eyeSpaceNormal);
+@@ -221,6 +270,7 @@ Pixel vs_main(Vertex input) {
+   transformed.xyz/=transformed.w;
+   transformed.xy+=vertexConstants[59].xy;
+   input.position=transformed;
++  if(taa.z==0)previous=transformed;
+  }
+  input.position.w=guest_clip_w(input.position.w);
+  output.position=float4((2*input.position.x/viewport.x-1)*input.position.w,
+@@ -230,10 +280,17 @@ Pixel vs_main(Vertex input) {
   output.tex0=input.tex0; output.tex1=input.tex1; output.tex2=input.tex2; output.tex3=input.tex3;
   output.depthW=input.position.w;
   output.depthZ=input.position.z;
 + output.depthClip=input.position.z*input.position.w;
   output.fog=fog_factor(distance);
   output.depthSlope=0;
++ output.motionNow=float4(output.position.xy,0,output.position.w);
++ output.motionBefore=screen_clip(previous);
++ output.position.xy+=taa.xy*output.position.w;
   return output;
-@@ -254,8 +264,18 @@ void gs_main(triangle Pixel vertices[3],inout TriangleStream<Pixel> stream) {
+ }
++Pixel vs_main(Vertex input) {
++ return vs_core(input,input.position);
++}
+ )HLSL" R"HLSL(
+ [maxvertexcount(3)]
+ void gs_main(triangle Pixel vertices[3],inout TriangleStream<Pixel> stream) {
+@@ -254,8 +311,18 @@ void gs_main(triangle Pixel vertices[3],inout TriangleStream<Pixel> stream) {
    if(plane.z!=0)slope=max(abs(plane.x),abs(plane.y))/abs(plane.z);
    if(!isfinite(slope))slope=0;
   }
@@ -7742,12 +8500,19 @@ index e27083f..a61c57a 100644
    result.depthSlope=slope;
    if(misc.w!=0) {result.diffuse=vertices[2].diffuse;result.specular=vertices[2].specular;}
    stream.Append(result);
-@@ -322,7 +342,37 @@ bool compare_alpha(uint function,uint incoming,uint reference) {
+@@ -322,7 +389,44 @@ bool compare_alpha(uint function,uint incoming,uint reference) {
   case 0x206:return incoming>=reference; default:return true;
   }
  }
 -struct PixelOutput { float4 color:SV_TARGET; float depth:NV_DEPTH_SEMANTIC; };
-+struct PixelOutput { float4 color:SV_TARGET; float depth:NV_DEPTH_SEMANTIC; uint coverage:SV_Coverage; };
++/* motion: where this pixel was a frame ago, as a texture-coordinate offset
++   (now minus then); written only with the motion target bound. */
++struct PixelOutput { float4 color:SV_TARGET; float2 motion:SV_TARGET1; float depth:NV_DEPTH_SEMANTIC; uint coverage:SV_Coverage; };
++float2 pixel_motion(Pixel input) {
++ if(!(input.motionNow.w>0) || !(input.motionBefore.w>0))return 0;
++ float2 motion=(input.motionNow.xy/input.motionNow.w-input.motionBefore.xy/input.motionBefore.w)*float2(0.5,-0.5);
++ return all(isfinite(motion))?motion:0;
++}
 +/* Alpha test on a multisampled target (MSAA on): an alpha-tested pixel is
 +   all in or all out, so grass, leaves and fences stayed as jagged as without
 +   MSAA. For the four ordered tests it now covers a share of the pixel's
@@ -7781,7 +8546,7 @@ index e27083f..a61c57a 100644
  void window_clip_pixel(float2 position) {
   if(NV_WINDOW_CLIP_MODE!=0) {
    float2 coordinate=position-0.5;
-@@ -336,30 +386,59 @@ void window_clip_pixel(float2 position) {
+@@ -336,30 +440,60 @@ void window_clip_pixel(float2 position) {
   }
  }
  PixelOutput finish_pixel(float4 color,Pixel input,bool frontFacing) {
@@ -7800,6 +8565,7 @@ index e27083f..a61c57a 100644
   output.color=color;
 - float depth=NV_W_DEPTH?input.depthW:input.depthZ;
 + output.coverage=coverage;
++ output.motion=pixel_motion(input);
 + /* The screen z of a pixel: the vertices' z*w and w, both interpolated
 +    with perspective, divided. That is the screen-linear z a noperspective
 +    interpolant gives, but it also holds on a triangle the driver has to
@@ -7851,7 +8617,7 @@ index e27083f..a61c57a 100644
  #endif
   return output;
  }
-@@ -400,13 +479,39 @@ float4 texture_color_sign(float4 color,uint mask) {
+@@ -400,13 +534,39 @@ float4 texture_color_sign(float4 color,uint mask) {
   if(mask&1)color.a=2*color.a-1;
   return color;
  }
@@ -7891,7 +8657,7 @@ index e27083f..a61c57a 100644
    float4 coordinate=coordinates[stage]; float4 value=float4(0,0,0,1);
    if(mode==4)value=coordinate;
    if(mode==9 || mode==11 || mode==12 || mode==14 || mode==17 || mode==18) {
-@@ -444,14 +549,40 @@ PixelOutput ps_main(Pixel input,bool frontFacing:SV_IsFrontFace) {
+@@ -444,14 +604,40 @@ PixelOutput ps_main(Pixel input,bool frontFacing:SV_IsFrontFace) {
          uint sourceSign=TEXTURE_SIGN(sourceStage);
          if(sourceSign&8)perturbation.x=registers[8+sourceStage].b;
          if(sourceSign&4)perturbation.y=registers[8+sourceStage].g;
@@ -7934,7 +8700,7 @@ index e27083f..a61c57a 100644
    float2 gradientX=ddx(uv),gradientY=ddy(uv);
    if(textureFlags&4)uv.x=saturate(uv.x);
    if(textureFlags&8)uv.y=saturate(uv.y);
-@@ -471,8 +602,50 @@ PixelOutput ps_main(Pixel input,bool frontFacing:SV_IsFrontFace) {
+@@ -471,8 +657,50 @@ PixelOutput ps_main(Pixel input,bool frontFacing:SV_IsFrontFace) {
    default:value=cube3.Sample(sampler3,direction);break;
     }
    }
@@ -7987,7 +8753,7 @@ index e27083f..a61c57a 100644
     float3 gradientX=ddx(uvw),gradientY=ddy(uvw);
     if(textureFlags&4)uvw.x=saturate(uvw.x);
     if(textureFlags&8)uvw.y=saturate(uvw.y);
-@@ -524,12 +697,16 @@ PixelOutput ps_main(Pixel input,bool frontFacing:SV_IsFrontFace) {
+@@ -524,12 +752,16 @@ PixelOutput ps_main(Pixel input,bool frontFacing:SV_IsFrontFace) {
   registers[14]=specular+temporary; if(NV_FINAL1&0x80)registers[14]=saturate(registers[14]);
   registers[15]=mapped(registers,NV_FINAL1>>24,false)*mapped(registers,NV_FINAL1>>16,false);
   registers[14].a=0;registers[15].a=0;

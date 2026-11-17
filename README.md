@@ -378,6 +378,7 @@ effect at once and are kept in `turok_settings.ini` beside the exe:
 | Anisotropy | off, 2x, 4x, 8x, 16x (16x by default) | |
 | MSAA | off, 2x, 4x, 8x | |
 | Foliage AA | off, on (on by default; with MSAA, the edges of grass, leaves and other cut-out textures are smoothed too; about 5% of the frame rate when the GPU is the limit) | |
+| Temporal AA | off, on (off by default; experimental. Steadies the shimmer inside grass, leaves and fine textures that MSAA does not reach by blending each frame with the ones before, then sharpens lightly. A little softer while turning; about 10% of the frame rate. The HUD is drawn after it and stays sharp) | `RECOMP_TAA` (1 or 0, at start) |
 | Button icons | xbox, pc | |
 | Mouse look | raw, stick (raw falls back to stick in vehicles and turrets; on the PC Settings page, kept with these settings) | |
 | Mouse speed | 1 to 10 (5 by default; each step 1.4x; on the PC Settings page, kept with these settings) | |

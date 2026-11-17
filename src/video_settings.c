@@ -58,6 +58,7 @@ extern void nv2a_gpu_set_anisotropy(int level);
 extern void nv2a_gpu_set_msaa(int samples);
 extern void nv2a_gpu_set_heat_haze(int mode);
 extern void nv2a_gpu_set_alpha_coverage(int on);
+extern void nv2a_gpu_set_taa(int on);
 extern void nv2a_gpu_set_shadow_scale(int factor);
 extern void nv2a_gpu_set_exact_shadows(int on);
 
@@ -67,7 +68,7 @@ extern void nv2a_gpu_set_exact_shadows(int on);
  * through its values (shown, and written in turok_settings.ini, as their
  * text). */
 enum { SET_RESOLUTION, SET_ASPECT, SET_DISPLAY, SET_VSYNC, SET_FRAMES, SET_ANISOTROPY, SET_MSAA, SET_FOLIAGE_AA,
-       SET_DRAW_DISTANCE,
+       SET_TAA, SET_DRAW_DISTANCE,
        SET_HEAT_HAZE, SET_SHADOWS, SET_ICONS,
        SET_MOUSE_LOOK, SET_MOUSE_SPEED, SET_FLIGHT_MOUSE, SET_FLIGHT_SPEED, SET_FLIGHT_INVERT,
        SET_CONTROLLER_AIM, SET_LADDER_FREELOOK, SET_KEEP_WEAPONS, SETTING_COUNT };
@@ -111,6 +112,10 @@ static const VideoSetting k_settings[SETTING_COUNT] = {
     /* With MSAA: alpha-tested edges (grass, leaves, fences) antialiased too
      * (nv2a_gpu_set_alpha_coverage; ~5% of a GPU-bound frame). */
     {"foliage_aa", "foliage aa", k_switches, COUNT(k_switches), 1},
+    /* Temporal AA (nv2a_gpu_set_taa): the shimmer inside grass and leaves
+     * that MSAA does not reach, steadied over frames. Off by default: it
+     * costs frame rate and softens a little in motion. */
+    {"temporal_aa", "temporal aa", k_switches, COUNT(k_switches), 0},
     {"draw_distance", "draw distance", k_distances, COUNT(k_distances), 1},
     {"heat_haze", "heat haze", k_hazes, COUNT(k_hazes), 2},
     {"shadows", "shadows", k_shadow_modes, COUNT(k_shadow_modes), 1},
@@ -749,19 +754,20 @@ static int values_of(int setting)
     }
 }
 
-/* Shadows, controller aiming, ladder freelook, keep weapons and foliage aa
- * use GameOptions.txm, keys 14, 17, 20, 23 and 26 on (after PC Settings'
- * title, 13): Options.txm has no keys left for them. */
+/* Shadows, controller aiming, ladder freelook, keep weapons, foliage aa and
+ * temporal aa use GameOptions.txm, keys 14, 17, 20, 23, 26 and 29 on (after
+ * PC Settings' title, 13): Options.txm has no keys left for them. */
 #define GAME_TEXT_SHADOWS 14
 #define GAME_TEXT_CONTROLLER_AIM 17
 #define GAME_TEXT_LADDER_FREELOOK 20
 #define GAME_TEXT_KEEP_WEAPONS 23
 #define GAME_TEXT_FOLIAGE_AA 26
+#define GAME_TEXT_TAA 29
 
 static int in_game_text(int setting)
 {
     return setting == SET_SHADOWS || setting == SET_CONTROLLER_AIM || setting == SET_LADDER_FREELOOK ||
-           setting == SET_KEEP_WEAPONS || setting == SET_FOLIAGE_AA;
+           setting == SET_KEEP_WEAPONS || setting == SET_FOLIAGE_AA || setting == SET_TAA;
 }
 
 static int text_label(int setting)
@@ -772,6 +778,7 @@ static int text_label(int setting)
     if (setting == SET_LADDER_FREELOOK) return GAME_TEXT_LADDER_FREELOOK;
     if (setting == SET_KEEP_WEAPONS) return GAME_TEXT_KEEP_WEAPONS;
     if (setting == SET_FOLIAGE_AA) return GAME_TEXT_FOLIAGE_AA;
+    if (setting == SET_TAA) return GAME_TEXT_TAA;
     for (s = 0; s < setting; s++)
         if (!in_game_text(s)) key += 1 + (values_of(s) == s ? k_settings[s].count : 0);
     return key;
@@ -2047,6 +2054,7 @@ static void apply_setting(int setting)
     case SET_ANISOTROPY: nv2a_gpu_set_anisotropy(1 << s_values[SET_ANISOTROPY]); break;
     case SET_MSAA: nv2a_gpu_set_msaa(1 << s_values[SET_MSAA]); break;
     case SET_FOLIAGE_AA: nv2a_gpu_set_alpha_coverage(s_values[SET_FOLIAGE_AA]); break;
+    case SET_TAA: nv2a_gpu_set_taa(s_values[SET_TAA]); break;
     case SET_HEAT_HAZE: nv2a_gpu_set_heat_haze(k_haze_modes[s_values[SET_HEAT_HAZE]]); break;
     case SET_SHADOWS:   /* the rest is read as the game runs (recomp_manual.c) */
         nv2a_gpu_set_shadow_scale(s_values[SET_SHADOWS] ? 4 : 1);
@@ -3108,6 +3116,7 @@ void video_settings_start(const char *game_dir)
     apply_setting(SET_ANISOTROPY);
     apply_setting(SET_MSAA);
     apply_setting(SET_FOLIAGE_AA);
+    if (!getenv("RECOMP_TAA")) apply_setting(SET_TAA);   /* RECOMP_TAA set by hand wins at start */
     apply_setting(SET_SHADOWS);   /* its map scale and exact depth (else only when changed) */
     apply_setting(SET_HEAT_HAZE); /* apply the saved haze mode before the first frame */
     apply_setting(SET_ICONS);
