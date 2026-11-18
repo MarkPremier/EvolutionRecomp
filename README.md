@@ -38,10 +38,9 @@ CPU-renderer build (about 9 fps on the title screen).
   pink) and the Switch 2's player lights. `RECOMP_USB_PADS=1` offers the game
   only controller 1.
 - Keyboard and mouse work too, merged onto controller 1 (see Controls).
-- Dinosaurs and Turok cast shadows, with filtered (PCF) edges, the Xbox's
-  own or enhanced (Shadows, in Video Options; `RECOMP_SHADOWS=0` turns them
-  off). Xbox is the game's shadows as they were. Enhanced is every change
-  the recompilation makes to them:
+- Dinosaurs and Turok cast shadows with filtered (PCF) edges. Video Options
+  offers Xbox, Enhanced (the default), and Enhanced+. `RECOMP_SHADOWS=0`
+  turns shadows off. Enhanced and Enhanced+ share these changes:
   - a 2048x2048 shadow map instead of the game's 512x512, drawn four times
     finer again on the GPU (8192 texels a side): sharp edges, no blocks;
   - exact (float) shadow depth instead of the Xbox's 16-bit: there one
@@ -62,11 +61,10 @@ CPU-renderer build (about 9 fps on the title screen).
     caster", and the far sky darkened in a trapezoid over the map's
     footprint.
 
-  The longer reach has a side effect the Xbox never shows: the game draws
-  only creatures into the shadow map, not floors, so an enemy on a balcony
-  or upper gallery (Halls of Battle) casts down through its floor onto the
-  hall below. The map's size changes when the game next starts; the rest at
-  once. `RECOMP_SHADOW_DISTANCE`, `RECOMP_SHADOW_AROUND`, `RECOMP_SHADOW_MAP`,
+  Enhanced+ fades indoor shadows that fall well below the caster, reducing
+  spill below balconies while keeping floor shadows close to standing enemies
+  at full strength. The map's size changes when the game next starts. The
+  other changes apply immediately. `RECOMP_SHADOW_DISTANCE`, `RECOMP_SHADOW_AROUND`, `RECOMP_SHADOW_MAP`,
   `RECOMP_SHADOW_OFFSCREEN`, `RECOMP_SHADOW_EXACT`, `RECOMP_SHADOW_SCALE`,
   `RECOMP_SHADOW_FAR_LIT`, `RECOMP_SHADOW_BIRD_HEIGHT` and
   `RECOMP_SHADOW_BIRDS=1` tune Enhanced.
@@ -423,7 +421,7 @@ effect at once and are kept in `turok_settings.ini` beside the exe:
 | Keep weapons | off, on (off by default; weapons you own stay yours from level to level; on the PC Settings page) | |
 | Draw distance | normal, 2x, 4x, 8x (2x by default) | |
 | Heat haze | off, xbox, enhanced (enhanced by default; off removes distortion; xbox keeps the original effect; enhanced refracts the full-resolution scene with filtered offsets and feathered edges) | |
-| Shadows | xbox, enhanced (enhanced by default; see Shadows above -- the shadow map's size changes when the game next starts) | `RECOMP_SHADOW_EXACT`, `RECOMP_SHADOW_SCALE`, `RECOMP_SHADOW_FAR_LIT` override parts |
+| Shadows | xbox, enhanced (default), enhanced+ (reduces shadow spill below indoor balconies) | `RECOMP_SHADOW_EXACT`, `RECOMP_SHADOW_SCALE`, `RECOMP_SHADOW_FAR_LIT` override parts |
 
 The page shows ten rows at a time and scrolls: it follows the highlight as you move up and down, and the mouse wheel scrolls it (click a row, or press left and right, to change its value).
 

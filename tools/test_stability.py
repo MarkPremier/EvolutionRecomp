@@ -59,7 +59,10 @@ def game_functions(root, output):
     (output / "video_settings_under_test.inc").write_text(
         settings[settings.index("enum { SET_RESOLUTION"):settings.index("/* Mouse look's state")] +
         settings[settings.index("#define TEXT_ENTRY"):settings.index("/* Then the controls page's:")] +
-        function(settings, "static int value_index("), encoding="utf-8")
+        function(settings, "static int value_index(") +
+        settings[settings.index("static int s_flying_level;"):settings.index("/* Keep weapons: the weapons you own")] +
+        settings[settings.index("static void apply_dlaa_scene("):settings.index("/* ── Menu pointer")],
+        encoding="utf-8")
     source = (root / "src/recomp_manual.c").read_text(encoding="utf-8")
     (output / "controller_aim_under_test.inc").write_text(
         function(source, "static float guest_float(") +
@@ -157,6 +160,7 @@ def main():
         ("shotgun_origin.c", []),
         ("gpu_shader_cache.cpp", ["d3d11.lib", "dxgi.lib", "d3dcompiler.lib", "user32.lib"]),
         ("gpu_dlss.cpp", ["d3d11.lib", "dxgi.lib", "d3dcompiler.lib", "user32.lib"]),
+        ("gpu_shadow.cpp", ["d3d11.lib", "dxgi.lib", "d3dcompiler.lib", "user32.lib"]),
         ("dlss_bridge.cpp", []),
         ("gpu_heat_haze.cpp", ["d3d11.lib", "dxgi.lib", "d3dcompiler.lib", "user32.lib"]),
         ("apu_voices.c", [str(root / "build/xboxrecomp/src/apu/Release/xbox_apu.lib")]),

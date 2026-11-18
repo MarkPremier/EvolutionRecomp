@@ -87,7 +87,7 @@ extern "C" __declspec(dllexport) int dlss_bridge_evaluate(ID3D11DeviceContext *c
     if (!s_ready || !context || !color || !depth || !motion || !output || !width || !height) return 0;
     if (s_trace < 0) {
         const char *trace = getenv("RECOMP_DLSS_TRACE");
-        s_trace = trace && *trace && *trace != '0';
+        s_trace = trace ? atoi(trace) : 0;
     }
     s_calls++;
     for (i = 0; i < DLSS_FEATURES; i++)
@@ -137,7 +137,7 @@ extern "C" __declspec(dllexport) int dlss_bridge_evaluate(ID3D11DeviceContext *c
     if (s_trace > 0) {
         static unsigned shown;
         if (reset && shown > 20) shown = 0;   /* again after each change */
-        if (shown++ < 20) {
+        if (s_trace >= 2 || shown++ < 20) {
             fprintf(stderr, "[DLSS] call %llu: %ux%u reset %d jitter %.3f %.3f\n", s_calls, width, height, reset,
                     jitter_x, jitter_y);
             fflush(stderr);
@@ -157,6 +157,10 @@ extern "C" __declspec(dllexport) int dlss_bridge_evaluate(ID3D11DeviceContext *c
     evaluate.InMVScaleY = motion_scale_y;
     evaluate.InFrameTimeDeltaInMsec = frame_ms;
     result = NGX_D3D11_EVALUATE_DLSS_EXT(context, feature, s_parameters, &evaluate);
+    if (s_trace >= 2) {
+        fprintf(stderr, "[DLSS] call %llu returned 0x%08X\n", s_calls, (unsigned)result);
+        fflush(stderr);
+    }
     if (NVSDK_NGX_FAILED(result)) {
         static int reported;
         if (reported++ < 5) report("DLSS evaluation failed", result);

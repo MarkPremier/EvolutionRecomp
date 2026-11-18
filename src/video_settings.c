@@ -60,7 +60,9 @@ extern void nv2a_gpu_set_heat_haze(int mode);
 extern void nv2a_gpu_set_alpha_coverage(int on);
 extern void nv2a_gpu_set_taa(int on);
 extern void nv2a_gpu_set_shadow_scale(int factor);
-extern void nv2a_gpu_set_exact_shadows(int on);
+extern void nv2a_gpu_set_shadow_mode(int mode);
+extern void nv2a_gpu_set_shadow_indoor(int indoor);
+extern void nv2a_gpu_allow_dlaa(int allowed);
 
 /* ── Settings ─────────────────────────────────────────────────── */
 
@@ -92,9 +94,7 @@ static const char *const k_distances[] = {"normal", "2x", "4x", "8x"};
 static const char *const k_hazes[] = {"off", "xbox", "enhanced"};
 /* The renderer's API retains its older mode numbers. */
 static const int k_haze_modes[] = {3, 0, 2};
-/* Shadows: the Xbox's own, or every shadow change of the recompilation
- * (video_settings_enhanced_shadows). */
-static const char *const k_shadow_modes[] = {"xbox", "enhanced"};
+static const char *const k_shadow_modes[] = {"xbox", "enhanced", "enhanced+"};
 static const char *const k_icons[] = {"xbox", "pc"};
 static const char *const k_mouse_looks[] = {"stick", "raw"};
 static const char *const k_controller_aims[] = {"original", "modern"};
@@ -767,18 +767,16 @@ static int values_of(int setting)
     }
 }
 
-/* Shadows, controller aiming, ladder freelook, keep weapons, foliage aa,
- * temporal aa and look limit use GameOptions.txm, keys 14, 17, 20, 23, 26, 29
- * and 33 on (after PC Settings' title, 13): Options.txm has no keys left for
- * them. */
+/* These rows use GameOptions.txm from key 14 on, after the PC Settings
+ * title. The values for each row immediately follow its label. */
 #define GAME_TEXT_SHADOWS 14
-#define GAME_TEXT_CONTROLLER_AIM 17
-#define GAME_TEXT_LADDER_FREELOOK 20
-#define GAME_TEXT_KEEP_WEAPONS 23
-#define GAME_TEXT_FOLIAGE_AA 26
-#define GAME_TEXT_TAA 29
-#define GAME_TEXT_LOOK_LIMIT 33   /* after Temporal AA's three values */
-#define GAME_TEXT_CLUB_HOLD 36
+#define GAME_TEXT_CONTROLLER_AIM (GAME_TEXT_SHADOWS + 1 + COUNT(k_shadow_modes))
+#define GAME_TEXT_LADDER_FREELOOK 21
+#define GAME_TEXT_KEEP_WEAPONS 24
+#define GAME_TEXT_FOLIAGE_AA 27
+#define GAME_TEXT_TAA 30
+#define GAME_TEXT_LOOK_LIMIT 34   /* after Temporal AA's three values */
+#define GAME_TEXT_CLUB_HOLD 37
 
 static int in_game_text(int setting)
 {
@@ -2079,7 +2077,7 @@ static void apply_setting(int setting)
     case SET_HEAT_HAZE: nv2a_gpu_set_heat_haze(k_haze_modes[s_values[SET_HEAT_HAZE]]); break;
     case SET_SHADOWS:   /* the rest is read as the game runs (recomp_manual.c) */
         nv2a_gpu_set_shadow_scale(s_values[SET_SHADOWS] ? 4 : 1);
-        nv2a_gpu_set_exact_shadows(s_values[SET_SHADOWS]);
+        nv2a_gpu_set_shadow_mode(s_values[SET_SHADOWS]);
         break;
     case SET_ICONS: nv2a_gpu_set_texture_replacements(s_values[SET_ICONS]); break;
     case SET_MOUSE_LOOK: xbox_KbmSetRawMouse(s_values[SET_MOUSE_LOOK]); s_mouse_raw = s_values[SET_MOUSE_LOOK]; break;
@@ -2250,6 +2248,7 @@ void video_settings_level(const char *path)
     lower[n] = 0;
     s_flying_level = strstr(lower, "-flight") != NULL;
     s_indoor_level = strstr(lower, "\\pod-05-") || strstr(lower, "\\pod-06-") || strstr(lower, "-s-city-");
+    nv2a_gpu_set_shadow_indoor(s_indoor_level);
     if (s_indoor_level) fprintf(stderr, "[VIDEO] indoor level: shadows reach further around the player\n");
 }
 
@@ -2258,7 +2257,7 @@ int video_settings_indoor_level(void)
     return s_indoor_level;
 }
 
-/* Shadows: enhanced -- every shadow change of the recompilation
+/* Both Enhanced modes use the expanded shadow map and caster range
  * (recomp_manual.c, the toolkit): a 2048 map instead of the game's 512, drawn
  * four times finer again on the GPU, exact depth, four times the reach, a
  * wider area around the player, models out of view casting, high ambient
@@ -2286,12 +2285,20 @@ float video_settings_draw_distance(void)
     return (float)(1 << s_values[SET_DRAW_DISTANCE]);
 }
 
+static void apply_dlaa_scene(void)
+{
+    /* The front end and loading transitions use TAA when DLAA is selected.
+     * Creating/evaluating DLAA on the animated title scene can hang the GPU. */
+    nv2a_gpu_allow_dlaa(!s_front_end && !s_loading && !s_cinema);
+}
+
 void video_settings_screen(int front_end, int pause_menu)
 {
     s_pause_menu = pause_menu;
     if (front_end == s_front_end && !s_cinema) return;
     s_front_end = front_end;
     s_cinema = 0;      /* a level or menu left mid-cutscene */
+    apply_dlaa_scene();
     apply_aspect();
     apply_frames();
 }
@@ -2300,6 +2307,7 @@ void video_settings_cinema(int on)
 {
     if (on == s_cinema) return;
     s_cinema = on;
+    apply_dlaa_scene();
     fprintf(stderr, "[VIDEO] cutscene %s\n", on ? "begins: 4:3" : "ends");
     apply_aspect();
 }
@@ -2308,6 +2316,7 @@ void video_settings_loading(int on)
 {
     if (on == s_loading) return;
     s_loading = on;
+    apply_dlaa_scene();
     fprintf(stderr, "[VIDEO] level %s\n", on ? "loading: 4:3" : "begins");
     apply_aspect();
 }
@@ -3142,6 +3151,7 @@ void video_settings_start(const char *game_dir)
      * c[187] (their bone palette is at c[96] + a0). */
     static const int projections[] = {187, 96};
     HANDLE thread;
+    apply_dlaa_scene();
     snprintf(s_game_dir, sizeof s_game_dir, "%s", game_dir);
     write_patch(game_dir);
     nv2a_gpu_set_projection_registers(projections, 2);
