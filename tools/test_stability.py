@@ -45,6 +45,9 @@ def generated_fixture(generated, signatures, tag, icall_body="(g_esp = (saved))"
 
 def game_functions(root, output):
     settings = (root / "src/video_settings.c").read_text(encoding="utf-8")
+    bridge = (root / "src/dlss_bridge.cpp").read_text(encoding="utf-8")
+    (output / "dlss_bridge_under_test.inc").write_text(
+        bridge[bridge.index("/* This application's NGX project id"):], encoding="utf-8")
     input_source = (root.parent / "xboxrecomp_fork/src/input/xinput_device.c").read_text(encoding="utf-8")
     (output / "controls_settings_under_test.inc").write_text(
         settings[settings.index("enum { SET_RESOLUTION"):settings.index("/* ── Archives")], encoding="utf-8")
@@ -153,6 +156,8 @@ def main():
         ("weapon_emission.c", []),
         ("shotgun_origin.c", []),
         ("gpu_shader_cache.cpp", ["d3d11.lib", "dxgi.lib", "d3dcompiler.lib", "user32.lib"]),
+        ("gpu_dlss.cpp", ["d3d11.lib", "dxgi.lib", "d3dcompiler.lib", "user32.lib"]),
+        ("dlss_bridge.cpp", []),
         ("gpu_heat_haze.cpp", ["d3d11.lib", "dxgi.lib", "d3dcompiler.lib", "user32.lib"]),
         ("apu_voices.c", [str(root / "build/xboxrecomp/src/apu/Release/xbox_apu.lib")]),
     ):

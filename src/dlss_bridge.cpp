@@ -25,9 +25,15 @@ static const char k_project_id[] = "ff9d3085-451b-4037-bc7e-69b1a7866748";
 
 static ID3D11Device *s_device;
 static NVSDK_NGX_Parameter *s_parameters;
-static NVSDK_NGX_Handle *s_feature;
-static unsigned s_width, s_height;
 static int s_ready;
+
+/* One DLAA feature per scene size, kept: the game switches between its 4:3
+ * menus and cutscenes and its widescreen play, and making a feature takes
+ * seconds -- each switch used to throw one away and make another. */
+#define DLSS_FEATURES 4
+static struct { NVSDK_NGX_Handle *handle; unsigned width, height; unsigned long long used; } s_features[DLSS_FEATURES];
+static unsigned long long s_calls;
+static int s_trace = -1;   /* RECOMP_DLSS_TRACE: each feature made, and the first calls after */
 
 static void report(const char *what, NVSDK_NGX_Result result)
 {
@@ -76,11 +82,28 @@ extern "C" __declspec(dllexport) int dlss_bridge_evaluate(ID3D11DeviceContext *c
                                                           float motion_scale_y, int reset, float frame_ms)
 {
     NVSDK_NGX_Result result;
+    NVSDK_NGX_Handle *feature = nullptr;
+    int slot = -1, i;
     if (!s_ready || !context || !color || !depth || !motion || !output || !width || !height) return 0;
-    if (!s_feature || width != s_width || height != s_height) {
+    if (s_trace < 0) {
+        const char *trace = getenv("RECOMP_DLSS_TRACE");
+        s_trace = trace && *trace && *trace != '0';
+    }
+    s_calls++;
+    for (i = 0; i < DLSS_FEATURES; i++)
+        if (s_features[i].handle && s_features[i].width == width && s_features[i].height == height) slot = i;
+    if (slot >= 0) {
+        feature = s_features[slot].handle;
+        if (s_features[slot].used + 1 != s_calls) reset = 1;   /* back to this size: its history is old */
+    } else {
         NVSDK_NGX_DLSS_Create_Params create = {};
-        if (s_feature) NVSDK_NGX_D3D11_ReleaseFeature(s_feature);
-        s_feature = nullptr;
+        /* A free slot, or the one used longest ago. */
+        for (i = 0, slot = 0; i < DLSS_FEATURES; i++) {
+            if (!s_features[i].handle) { slot = i; break; }
+            if (s_features[i].used < s_features[slot].used) slot = i;
+        }
+        if (s_features[slot].handle) NVSDK_NGX_D3D11_ReleaseFeature(s_features[slot].handle);
+        s_features[slot].handle = nullptr;
         create.Feature.InWidth = width;
         create.Feature.InHeight = height;
         create.Feature.InTargetWidth = width;
@@ -98,16 +121,27 @@ extern "C" __declspec(dllexport) int dlss_bridge_evaluate(ID3D11DeviceContext *c
                 fprintf(stderr, "[DLSS] preset %c asked for\n", *preset);
             }
         }
-        result = NGX_D3D11_CREATE_DLSS_EXT(context, &s_feature, s_parameters, &create);
-        if (NVSDK_NGX_FAILED(result) || !s_feature) {
+        result = NGX_D3D11_CREATE_DLSS_EXT(context, &feature, s_parameters, &create);
+        if (NVSDK_NGX_FAILED(result) || !feature) {
             report("creating the DLSS feature failed", result);
-            s_feature = nullptr;
             return 0;
         }
         fprintf(stderr, "[DLSS] DLAA at %ux%u\n", width, height);
-        s_width = width;
-        s_height = height;
+        fflush(stderr);
+        s_features[slot].handle = feature;
+        s_features[slot].width = width;
+        s_features[slot].height = height;
         reset = 1;
+    }
+    s_features[slot].used = s_calls;
+    if (s_trace > 0) {
+        static unsigned shown;
+        if (reset && shown > 20) shown = 0;   /* again after each change */
+        if (shown++ < 20) {
+            fprintf(stderr, "[DLSS] call %llu: %ux%u reset %d jitter %.3f %.3f\n", s_calls, width, height, reset,
+                    jitter_x, jitter_y);
+            fflush(stderr);
+        }
     }
     NVSDK_NGX_D3D11_DLSS_Eval_Params evaluate = {};
     evaluate.Feature.pInColor = color;
@@ -122,7 +156,7 @@ extern "C" __declspec(dllexport) int dlss_bridge_evaluate(ID3D11DeviceContext *c
     evaluate.InMVScaleX = motion_scale_x;
     evaluate.InMVScaleY = motion_scale_y;
     evaluate.InFrameTimeDeltaInMsec = frame_ms;
-    result = NGX_D3D11_EVALUATE_DLSS_EXT(context, s_feature, s_parameters, &evaluate);
+    result = NGX_D3D11_EVALUATE_DLSS_EXT(context, feature, s_parameters, &evaluate);
     if (NVSDK_NGX_FAILED(result)) {
         static int reported;
         if (reported++ < 5) report("DLSS evaluation failed", result);
@@ -133,8 +167,10 @@ extern "C" __declspec(dllexport) int dlss_bridge_evaluate(ID3D11DeviceContext *c
 
 extern "C" __declspec(dllexport) void dlss_bridge_shutdown(void)
 {
-    if (s_feature) NVSDK_NGX_D3D11_ReleaseFeature(s_feature);
-    s_feature = nullptr;
+    for (int i = 0; i < DLSS_FEATURES; i++) {
+        if (s_features[i].handle) NVSDK_NGX_D3D11_ReleaseFeature(s_features[i].handle);
+        s_features[i].handle = nullptr;
+    }
     if (s_parameters) NVSDK_NGX_D3D11_DestroyParameters(s_parameters);
     s_parameters = nullptr;
     if (s_device) NVSDK_NGX_D3D11_Shutdown1(s_device);

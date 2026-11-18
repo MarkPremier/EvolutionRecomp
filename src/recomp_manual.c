@@ -4549,6 +4549,24 @@ void sub_00039FF0(void)
 {
     static int trace = -1;
     uint32_t actor = g_ecx;
+    /* The armoured Sleg's recovery callback can request Idle on the
+     * first frame of an Expel launch. A wall hit only deals impact
+     * damage while the actor is in Knockback or Knockfore. Ignore that
+     * early animation recovery while the impulse is still lifting it.
+     * The original contact handler still ends the launch on impact. */
+    if (actor && TUROK_MEM32(g_esp) == 0x0013D646u &&
+        TUROK_MEM32(g_esp + 4u) == 1u) {
+        uint32_t state = TUROK_MEM32(actor + 0x12Cu);
+        uint32_t id = state ? TUROK_MEM32(state) : 0u;
+        if (id == 63u || id == 64u) {
+            uint32_t physics = TUROK_MEM32(actor + 0xFCu);
+            if (physics && guest_float(physics + 0x1Cu) > 0.0f) {
+                g_eax = 0;   /* state change refused, like sub_00046940 */
+                g_esp += 8;  /* ret 4 */
+                return;
+            }
+        }
+    }
     if (trace < 0) trace = getenv("RECOMP_STATE_TRACE") != NULL;
     if (trace && actor && (TUROK_MEM32(actor) == 0x00222CE8u || TUROK_MEM32(actor) == 0x00225020u)) {
         uint32_t state = TUROK_MEM32(actor + 0x12Cu);
@@ -4577,4 +4595,42 @@ void sub_00039FF0(void)
         }
     }
     sub_00039FF0_gen();
+}
+extern void sub_001686C0_gen(void);
+extern void sub_00139210_gen(void);
+
+void sub_001686C0(void)
+{
+    uint32_t axis = TUROK_MEM32(g_esp + 4);
+    /* The movement controller steers forward and sideways toward its own
+     * speed every update. Some Slegs keep running it during Expel and
+     * brake their launch before they reach a wall. Suspend those axes
+     * for the HumanAI knockback states. World contact and gravity run
+     * separately, as does any vertical steering through this helper. */
+    if (axis == 0x242720u || axis == 0x242738u) {
+        uint32_t state = TUROK_MEM32(g_ecx + 0x12C);
+        uint32_t definition = state ? TUROK_MEM32(state + 8) : 0;
+        if (definition == 0x21F220u || definition == 0x21F240u) {
+            g_esp += 16; /* ret 12 */
+            return;
+        }
+    }
+    sub_001686C0_gen();
+}
+
+void sub_00139210(void)
+{
+    uint32_t actor = g_ecx;
+    uint32_t state = TUROK_MEM32(actor + 0x12C);
+    uint32_t id = state ? TUROK_MEM32(state) : 0;
+    /* Each overlapping Expel particle can relaunch the same target.
+     * The launch sets vertical speed and lifts its position, so repeated
+     * hits stack lift while the first push is still in flight. Leave the
+     * launch alone until contact or recovery ends the knockback state. */
+    if (id == 63u || id == 64u) {
+        g_eax = 0;
+        g_esp += 8; /* ret 4 */
+        return;
+    }
+    sub_00139210_gen();
 }
