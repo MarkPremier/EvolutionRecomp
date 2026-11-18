@@ -71,7 +71,7 @@ enum { SET_RESOLUTION, SET_ASPECT, SET_DISPLAY, SET_VSYNC, SET_FRAMES, SET_ANISO
        SET_TAA, SET_DRAW_DISTANCE,
        SET_HEAT_HAZE, SET_SHADOWS, SET_ICONS,
        SET_MOUSE_LOOK, SET_MOUSE_SPEED, SET_FLIGHT_MOUSE, SET_FLIGHT_SPEED, SET_FLIGHT_INVERT,
-       SET_CONTROLLER_AIM, SET_LADDER_FREELOOK, SET_LOOK_LIMIT, SET_KEEP_WEAPONS, SETTING_COUNT };
+       SET_CONTROLLER_AIM, SET_LADDER_FREELOOK, SET_LOOK_LIMIT, SET_CLUB_HOLD, SET_KEEP_WEAPONS, SETTING_COUNT };
 
 typedef struct VideoSetting {
     const char *key, *label;
@@ -105,6 +105,10 @@ static const char *const k_look_limits[] = {"original", "extended"};
  * switch), or "dlaa": NVIDIA DLSS as DLAA, anti-aliasing at native resolution,
  * not an upscaler -- named so (dlss_bridge.dll; nv2a_gpu_set_taa). */
 static const char *const k_taa_modes[] = {"off", "on", "dlaa"};
+/* Club hold (the war club): the game's (a press swings at once; held a second, the
+ * charged strike follows the swing) or "charge" (a tap swings when released,
+ * a hold goes straight to the charged strike; video_settings_club_charge). */
+static const char *const k_club_holds[] = {"original", "charge"};
 static const char *const k_speeds[] = {"1", "2", "3", "4", "5", "6", "7", "8", "9", "10"};
 #define COUNT(array) ((int)(sizeof array / sizeof *array))
 
@@ -135,6 +139,7 @@ static const VideoSetting k_settings[SETTING_COUNT] = {
     {"controller_aim", "pad aim", k_controller_aims, COUNT(k_controller_aims), 0},
     {"ladder_freelook", "ladder freelook", k_switches, COUNT(k_switches), 0},
     {"look_limit", "look limit", k_look_limits, COUNT(k_look_limits), 0},
+    {"club_hold", "club hold", k_club_holds, COUNT(k_club_holds), 0},
     {"keep_weapons", "keep weapons", k_switches, COUNT(k_switches), 0},
 };
 
@@ -773,12 +778,13 @@ static int values_of(int setting)
 #define GAME_TEXT_FOLIAGE_AA 26
 #define GAME_TEXT_TAA 29
 #define GAME_TEXT_LOOK_LIMIT 33   /* after Temporal AA's three values */
+#define GAME_TEXT_CLUB_HOLD 36
 
 static int in_game_text(int setting)
 {
     return setting == SET_SHADOWS || setting == SET_CONTROLLER_AIM || setting == SET_LADDER_FREELOOK ||
            setting == SET_KEEP_WEAPONS || setting == SET_FOLIAGE_AA || setting == SET_TAA ||
-           setting == SET_LOOK_LIMIT;
+           setting == SET_LOOK_LIMIT || setting == SET_CLUB_HOLD;
 }
 
 static int text_label(int setting)
@@ -791,6 +797,7 @@ static int text_label(int setting)
     if (setting == SET_FOLIAGE_AA) return GAME_TEXT_FOLIAGE_AA;
     if (setting == SET_TAA) return GAME_TEXT_TAA;
     if (setting == SET_LOOK_LIMIT) return GAME_TEXT_LOOK_LIMIT;
+    if (setting == SET_CLUB_HOLD) return GAME_TEXT_CLUB_HOLD;
     for (s = 0; s < setting; s++)
         if (!in_game_text(s)) key += 1 + (values_of(s) == s ? k_settings[s].count : 0);
     return key;
@@ -2084,6 +2091,7 @@ static void apply_setting(int setting)
     case SET_CONTROLLER_AIM:
     case SET_LADDER_FREELOOK:
     case SET_LOOK_LIMIT:             /* read each frame */
+    case SET_CLUB_HOLD:
     case SET_KEEP_WEAPONS: break;    /* read at each level's start */
     }
 }
@@ -2198,6 +2206,12 @@ int video_settings_ladder_freelook(void)
 float video_settings_look_limit(void)
 {
     return s_values[SET_LOOK_LIMIT] ? 85.0f : 70.0f;
+}
+
+/* Club hold: 1 when a hold goes straight to the charged strike. */
+int video_settings_club_charge(void)
+{
+    return s_values[SET_CLUB_HOLD] != 0;
 }
 
 float video_settings_take_mouse_turn(int axis)

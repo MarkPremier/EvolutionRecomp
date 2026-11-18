@@ -48,6 +48,7 @@ float video_settings_take_mouse_steer(int axis);
 int video_settings_modern_aim(void);
 int video_settings_ladder_freelook(void);
 float video_settings_look_limit(void);
+int video_settings_club_charge(void);
 /* Owned weapons carry over between levels (off: as on the Xbox). */
 int video_settings_keep_weapons(void);
 

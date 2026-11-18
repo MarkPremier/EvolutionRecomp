@@ -569,6 +569,33 @@ void sub_000F21B0(void)
         g_eax = 0;
 }
 
+/* ── Club hold (the war club): straight to the charged strike (PC Settings) ──
+ *
+ * The war club (WarClubObject, vtable 0x215F10; its states by index: 6
+ * Idle, 7 Fire, 9/11/13 the combos, 15 Charge) takes the attack button
+ * through three methods: pressed (vfunc +0x18C, sub_00123D10) -- from Idle
+ * the swing (Fire) at once, during a swing the next combo queued; held
+ * (+0x194, sub_00123C00) -- a timer started; released (+0x190, sub_00123DC0)
+ * -- the charged strike's return if it was held long enough, else, from
+ * Idle, the swing. Its update (+0x8, sub_00123B50) turns a hold of a second
+ * into the charged strike (Charge). So a hold always swung first, the charge
+ * coming after (issue #22). With Club hold "charge", a press from Idle
+ * does nothing: a tap swings when released (the release's own path), and a
+ * hold goes straight to the charged strike. Combos, pressed during a swing,
+ * are as before. Off by default (the Xbox's). */
+extern void sub_00123D10_gen(void);
+extern int video_settings_club_charge(void);
+
+void sub_00123D10(void)
+{
+    uint32_t club = g_ecx, state = club ? TUROK_MEM32(club + 0x12Cu) : 0u;
+    if (video_settings_club_charge() && state && TUROK_MEM32(state) == 6u) {
+        g_esp += 4u;   /* ret */
+        return;
+    }
+    sub_00123D10_gen();
+}
+
 /* ── Rumble from the player's own gun, measured from the eyes ───
  *
  * The scripted Rumble event (vtable 0x204CAC, execute sub_000A3770) shakes
