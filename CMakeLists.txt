@@ -166,6 +166,29 @@ if(MSVC)
     else()
         message(WARNING "RECOMP_D3DCOMPILER: ${RECOMP_D3DCOMPILER} not found; Proton (Steam Deck) will not draw")
     endif()
+    # NVIDIA DLSS, the Temporal AA setting's "dlaa": dlss_bridge.dll,
+    # which the renderer loads only when DLSS is chosen. Built only when
+    # NVIDIA's DLSS SDK is found -- it is NVIDIA's, under NVIDIA's license,
+    # and not part of this repository (README, "NVIDIA DLSS"). NVIDIA's
+    # runtime, nvngx_dlss.dll, is copied beside the program.
+    set(DLSS_SDK_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../sdk/dlss/v310.9.16"
+        CACHE PATH "NVIDIA DLSS SDK: include/, lib/nvsdk_ngx_d.lib, bin/nvngx_dlss.dll")
+    if(EXISTS "${DLSS_SDK_DIR}/include/nvsdk_ngx_helpers_d3d.h" AND EXISTS "${DLSS_SDK_DIR}/lib/nvsdk_ngx_d.lib")
+        enable_language(CXX)
+        add_library(dlss_bridge SHARED src/dlss_bridge.cpp)
+        target_include_directories(dlss_bridge PRIVATE "${DLSS_SDK_DIR}/include")
+        target_link_libraries(dlss_bridge PRIVATE "${DLSS_SDK_DIR}/lib/nvsdk_ngx_d.lib" d3d11)
+        # nvsdk_ngx_d.lib is built for the DLL C runtime.
+        set_target_properties(dlss_bridge PROPERTIES MSVC_RUNTIME_LIBRARY MultiThreadedDLL)
+        add_dependencies(${PROJECT_NAME} dlss_bridge)
+        if(EXISTS "${DLSS_SDK_DIR}/bin/nvngx_dlss.dll")
+            add_custom_command(TARGET dlss_bridge POST_BUILD
+                               COMMAND ${CMAKE_COMMAND} -E copy_if_different "${DLSS_SDK_DIR}/bin/nvngx_dlss.dll"
+                                       "$<TARGET_FILE_DIR:dlss_bridge>/nvngx_dlss.dll")
+        endif()
+    else()
+        message(STATUS "DLSS SDK not found at ${DLSS_SDK_DIR}: the DLSS option will fall back to TAA")
+    endif()
     option(RECOMP_LTCG "Link-time code generation for Release builds" ON)
     if(RECOMP_LTCG)
         target_compile_options(${PROJECT_NAME} PRIVATE $<$<CONFIG:Release>:/GL>)

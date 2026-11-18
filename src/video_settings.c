@@ -101,6 +101,10 @@ static const char *const k_controller_aims[] = {"original", "modern"};
 /* Look limit: how far the view looks up or down -- the game's 70 degrees, or
  * 85 (video_settings_look_limit). */
 static const char *const k_look_limits[] = {"original", "extended"};
+/* Temporal AA: off, the recompilation's own ("on", kept from when it was a
+ * switch), or "dlaa": NVIDIA DLSS as DLAA, anti-aliasing at native resolution,
+ * not an upscaler -- named so (dlss_bridge.dll; nv2a_gpu_set_taa). */
+static const char *const k_taa_modes[] = {"off", "on", "dlaa"};
 static const char *const k_speeds[] = {"1", "2", "3", "4", "5", "6", "7", "8", "9", "10"};
 #define COUNT(array) ((int)(sizeof array / sizeof *array))
 
@@ -118,7 +122,7 @@ static const VideoSetting k_settings[SETTING_COUNT] = {
     /* Temporal AA (nv2a_gpu_set_taa): the shimmer inside grass and leaves
      * that MSAA does not reach, steadied over frames. Off by default: it
      * costs frame rate and softens a little in motion. */
-    {"temporal_aa", "temporal aa", k_switches, COUNT(k_switches), 0},
+    {"temporal_aa", "temporal aa", k_taa_modes, COUNT(k_taa_modes), 0},
     {"draw_distance", "draw distance", k_distances, COUNT(k_distances), 1},
     {"heat_haze", "heat haze", k_hazes, COUNT(k_hazes), 2},
     {"shadows", "shadows", k_shadow_modes, COUNT(k_shadow_modes), 1},
@@ -760,7 +764,7 @@ static int values_of(int setting)
 
 /* Shadows, controller aiming, ladder freelook, keep weapons, foliage aa,
  * temporal aa and look limit use GameOptions.txm, keys 14, 17, 20, 23, 26, 29
- * and 32 on (after PC Settings' title, 13): Options.txm has no keys left for
+ * and 33 on (after PC Settings' title, 13): Options.txm has no keys left for
  * them. */
 #define GAME_TEXT_SHADOWS 14
 #define GAME_TEXT_CONTROLLER_AIM 17
@@ -768,7 +772,7 @@ static int values_of(int setting)
 #define GAME_TEXT_KEEP_WEAPONS 23
 #define GAME_TEXT_FOLIAGE_AA 26
 #define GAME_TEXT_TAA 29
-#define GAME_TEXT_LOOK_LIMIT 32
+#define GAME_TEXT_LOOK_LIMIT 33   /* after Temporal AA's three values */
 
 static int in_game_text(int setting)
 {
@@ -2060,9 +2064,11 @@ static void apply_setting(int setting)
     case SET_VSYNC: xbox_SetPresentInterval(s_values[SET_VSYNC]); break;
     case SET_FRAMES: apply_frames(); break;
     case SET_ANISOTROPY: nv2a_gpu_set_anisotropy(1 << s_values[SET_ANISOTROPY]); break;
-    case SET_MSAA: nv2a_gpu_set_msaa(1 << s_values[SET_MSAA]); break;
+    case SET_MSAA:   /* DLSS works single-sampled: MSAA is off while it is chosen */
+        nv2a_gpu_set_msaa(1 << (s_values[SET_TAA] == 2 ? 0 : s_values[SET_MSAA]));
+        break;
     case SET_FOLIAGE_AA: nv2a_gpu_set_alpha_coverage(s_values[SET_FOLIAGE_AA]); break;
-    case SET_TAA: nv2a_gpu_set_taa(s_values[SET_TAA]); break;
+    case SET_TAA: nv2a_gpu_set_taa(s_values[SET_TAA]); apply_setting(SET_MSAA); break;
     case SET_HEAT_HAZE: nv2a_gpu_set_heat_haze(k_haze_modes[s_values[SET_HEAT_HAZE]]); break;
     case SET_SHADOWS:   /* the rest is read as the game runs (recomp_manual.c) */
         nv2a_gpu_set_shadow_scale(s_values[SET_SHADOWS] ? 4 : 1);
