@@ -569,6 +569,143 @@ void sub_000F21B0(void)
         g_eax = 0;
 }
 
+/* ── Rumble from the player's own gun, measured from the eyes ───
+ *
+ * The scripted Rumble event (vtable 0x204CAC, execute sub_000A3770) shakes
+ * the pads near an actor through sub_000549D0 -> sub_00054120 (this-call:
+ * strength, ?, radius, ?, position; ret 0x14): each player in the world's
+ * list (+0x118..+0x11C) that is locally controlled (sub_00038C50) and
+ * within the radius gets sub_0002C600 (cdecl: pad, motor, strength,
+ * duration), unless its pad's vibration is off ([[0x250A84]+0xA4]+0xC).
+ *
+ * The pistol fires one at its muzzle with a radius of 2. A multiplayer
+ * character's position is high on its body, 0.7 to 1.0 from the muzzle, so
+ * every shot rumbles; the single-player character's (vtable 0x222CE8) is its
+ * feet, 2.13 below the muzzle standing -- outside the radius, so its pistol
+ * rumbled only when the gun dipped (issue: no vibration from the pistol in
+ * single player). A rumble from right at a single-player character -- within
+ * 1 unit across and no higher than half a unit over its eyes (EYEHEIGHT,
+ * +0x860): its own held weapon -- is measured from the eyes instead: the
+ * height is raised for the call and put back. RECOMP_GUN_RUMBLE_FIX=0 keeps
+ * the feet. RECOMP_RUMBLE_TRACE=1 logs each positional rumble with every
+ * player's distance, and every pad rumble with its caller. */
+extern void sub_00054120_gen(void);
+extern void sub_0002C600_gen(void);
+#define RUMBLE_MEM8(va) (*(volatile uint8_t *)((uintptr_t)(va) + g_xbox_mem_offset))
+static int rumble_trace(void)
+{
+    static int on = -1;
+    if (on < 0) on = getenv("RECOMP_RUMBLE_TRACE") != NULL;
+    return on;
+}
+
+void sub_00054120(void)
+{
+    if (rumble_trace()) {
+        uint32_t world = g_ecx, position = TUROK_MEM32(g_esp + 0x14u), list = TUROK_MEM32(world + 0x118u),
+                 end = TUROK_MEM32(world + 0x11Cu), at;
+        float radius = guest_float(g_esp + 0xCu);
+        fprintf(stderr, "[RUMBLE] at %.2f %.2f %.2f: strength %.3f, %.3f, radius %.2f, %.3f; from %06X\n",
+                position ? guest_float(position) : 0.0f, position ? guest_float(position + 4u) : 0.0f,
+                position ? guest_float(position + 8u) : 0.0f, guest_float(g_esp + 4u), guest_float(g_esp + 8u), radius,
+                guest_float(g_esp + 0x10u), TUROK_MEM32(g_esp));
+        for (at = list; list && at < end && at < list + 64u; at += 4u) {
+            uint32_t player = TUROK_MEM32(at), control = player ? TUROK_MEM32(player + 0x210u) : 0u;
+            float dx = 0, dy = 0, dz = 0;
+            if (player && position) {
+                dx = guest_float(position) - guest_float(player + 0x38u);
+                dy = guest_float(position + 4u) - guest_float(player + 0x3Cu);
+                dz = guest_float(position + 8u) - guest_float(player + 0x40u);
+            }
+            fprintf(stderr, "[RUMBLE]   player %08X (vtable %08X%s) at %.2f %.2f %.2f, distance %.2f; control %08X: "
+                            "%02X %02X %02X pad %d\n",
+                    player, player ? TUROK_MEM32(player) : 0u, player == TUROK_MEM32(0x257E90u) ? ", you" : "",
+                    player ? guest_float(player + 0x38u) : 0.0f, player ? guest_float(player + 0x3Cu) : 0.0f,
+                    player ? guest_float(player + 0x40u) : 0.0f, sqrtf(dx * dx + dy * dy + dz * dz), control,
+                    control ? RUMBLE_MEM8(control) : 0u, control ? RUMBLE_MEM8(control + 1u) : 0u,
+                    control ? RUMBLE_MEM8(control + 2u) : 0u, control ? (int)TUROK_MEM32(control + 4u) : -1);
+        }
+    }
+    {
+        static int enabled = -1;
+        uint32_t world = g_ecx, position = TUROK_MEM32(g_esp + 0x14u), list = TUROK_MEM32(world + 0x118u),
+                 end = TUROK_MEM32(world + 0x11Cu), at, raised[16], saved[16];
+        unsigned count = 0, i;
+        if (enabled < 0) enabled = !(getenv("RECOMP_GUN_RUMBLE_FIX") && *getenv("RECOMP_GUN_RUMBLE_FIX") == '0');
+        for (at = list; enabled && position && list && at < end && count < 16u; at += 4u) {
+            uint32_t player = TUROK_MEM32(at);
+            float feet, eye, dx, dz, up, height;
+            uint32_t bits;
+            if (!player || TUROK_MEM32(player) != 0x00222CE8u) continue;
+            feet = guest_float(player + 0x3Cu);
+            eye = guest_float(player + 0x860u);
+            dx = guest_float(position) - guest_float(player + 0x38u);
+            dz = guest_float(position + 8u) - guest_float(player + 0x40u);
+            up = guest_float(position + 4u) - feet;
+            if (!(eye > 0.0f && eye < 10.0f) || dx * dx + dz * dz > 1.0f || up < 0.0f || up > eye + 0.5f) continue;
+            height = feet + eye;
+            memcpy(&bits, &height, 4);
+            raised[count] = player;
+            saved[count] = TUROK_MEM32(player + 0x3Cu);
+            TUROK_MEM32(player + 0x3Cu) = bits;
+            count++;
+        }
+        sub_00054120_gen();
+        for (i = 0; i < count; i++) TUROK_MEM32(raised[i] + 0x3Cu) = saved[i];
+    }
+}
+
+void sub_0002C600(void)
+{
+    if (rumble_trace())
+        fprintf(stderr, "[RUMBLE] pad %d motor %u strength %.3f duration %.3f from %06X\n",
+                (int)TUROK_MEM32(g_esp + 4u), TUROK_MEM32(g_esp + 8u), guest_float(g_esp + 0xCu),
+                guest_float(g_esp + 0x10u), TUROK_MEM32(g_esp));
+    sub_0002C600_gen();
+}
+
+/* ── Minigun spin-up pitch at any frame rate ────────────────────
+ *
+ * The minigun's update (sub_0011F020, this-call (seconds), ret 4) moves its
+ * spin sound's pitch (+0x2F8, from -25 when equipped) a fixed step a frame
+ * while the barrels turn fast: +5 in the spin state (0xB), -12 in the
+ * others, and hands it to the sound (sub_00085370, returning to 0x11F17D;
+ * the mixer clamps it to +-4800). Every other part of its spin follows the
+ * frame time; this step does not, so above 60 fps the spin-up rose faster
+ * and higher the higher the frame rate (issue: the minigun pitches up with
+ * the frame rate). Above 60 fps the step is scaled to the frame time, as
+ * many a second as at 60 (the Xbox ran at 60 or less): the change the update
+ * made is rescaled just before it reaches the sound. At 60 fps and below
+ * nothing changes. RECOMP_MINIGUN_PITCH_FIX=0 keeps the per-frame step. */
+extern void sub_0011F020_gen(void);
+extern void sub_00085370_gen(void);
+static uint32_t s_minigun;
+static float s_minigun_pitch, s_minigun_scale;
+
+void sub_0011F020(void)
+{
+    static int enabled = -1;
+    float seconds = guest_float(g_esp + 4u);
+    if (enabled < 0) enabled = !(getenv("RECOMP_MINIGUN_PITCH_FIX") && *getenv("RECOMP_MINIGUN_PITCH_FIX") == '0');
+    s_minigun = g_ecx;
+    s_minigun_pitch = guest_float(g_ecx + 0x2F8u);
+    s_minigun_scale = enabled && seconds > 0.0f && seconds < 1.0f / 60.0f ? seconds * 60.0f : 1.0f;
+    sub_0011F020_gen();
+    s_minigun = 0;
+}
+
+void sub_00085370(void)
+{
+    if (s_minigun && s_minigun_scale != 1.0f && TUROK_MEM32(g_esp) == 0x0011F17Du) {
+        float pitch = s_minigun_pitch + (guest_float(s_minigun + 0x2F8u) - s_minigun_pitch) * s_minigun_scale;
+        uint32_t bits;
+        memcpy(&bits, &pitch, 4);
+        TUROK_MEM32(s_minigun + 0x2F8u) = bits;
+        TUROK_MEM32(g_esp + 8u) = bits;   /* the pitch argument */
+    }
+    sub_00085370_gen();
+}
+
 /* ── Aim wobble at any frame rate ───────────────────────────────
  *
  * A scoped gun (sub_0011B220, called each frame while scoped) and the bows
@@ -1439,6 +1576,8 @@ void sub_00040DB0(void)
 }
 
 static void hurt_frame(void);   /* RECOMP_FALL_TRACE, below */
+static void put_guest_float(uint32_t va, float value);   /* below */
+extern float video_settings_look_limit(void);
 
 void sub_00104600(void)
 {
@@ -1446,6 +1585,14 @@ void sub_00104600(void)
     sub_00104600_gen();
     keep_decals_frame();
     hurt_frame();
+    /* Look limit (PC Settings): the game's pitch limit, [0x221420] (70
+     * degrees), read by the on-foot look (sub_00144560 through the call at
+     * 0x144970), the look of the other aiming states (0x1458FD) and Ladder
+     * freelook. Extended: 85. */
+    {
+        float limit = video_settings_look_limit();
+        if (guest_float(0x00221420u) != limit) put_guest_float(0x00221420u, limit);
+    }
     /* RECOMP_DEBUG_KILL=<s>: that long after a level's actors were made,
      * every watched AnimalAI's health (+0x1D0, a float) is set to 0 once --
      * a dinosaur to watch die without a fight. */
@@ -3239,6 +3386,23 @@ extern void sub_00149BE0_gen(void);
 #define BOB_SMOOTH_SECONDS 0.1f
 #define BOB_MAX_SPEED      40.0f   /* a teleport or respawn is not walking */
 
+/* The ease (sub_0017F8C0, cdecl: value *, target, rate, seconds: value +=
+ * (target - value) x rate x seconds, not past the target) as the walk bob
+ * calls it for the sideways offset (returning to 0x149FB5): under
+ * RECOMP_BOB_TRACE, its arguments. */
+extern void sub_0017F8C0_gen(void);
+void sub_0017F8C0(void)
+{
+    static int trace = -1;
+    if (trace < 0) trace = getenv("RECOMP_BOB_TRACE") != NULL;
+    if (trace && TUROK_MEM32(g_esp) == 0x00149FB5u) {
+        uint32_t value = TUROK_MEM32(g_esp + 4u);
+        fprintf(stderr, "[BOBX] value %.4f target %.4f rate %.4f seconds %.5f\n", value ? guest_float(value) : 0.0f,
+                guest_float(g_esp + 8u), guest_float(g_esp + 0xCu), guest_float(g_esp + 0x10u));
+    }
+    sub_0017F8C0_gen();
+}
+
 void sub_00149BE0(void)
 {
     static int trace = -1;
@@ -3283,10 +3447,12 @@ void sub_00149BE0(void)
     }
     if (trace && player) {
         uint32_t state = TUROK_MEM32(player + 0x12Cu);
-        fprintf(stderr, "[BOB] dt %.4f move %.4f %.4f (%.2f/s, smoothed %.2f/s) y %.4f x %.4f state %u t %.3f\n",
+        fprintf(stderr, "[BOB] dt %.4f move %.4f %.4f (%.2f/s, smoothed %.2f/s) y %.4f x %.4f z %.4f "
+                        "second %.4f %.4f state %u t %.3f\n",
                 dt, dx, dz, sqrtf(vx * vx + vz * vz),
                 slot >= 0 ? sqrtf(smooth[slot].vx * smooth[slot].vx + smooth[slot].vz * smooth[slot].vz) : 0.0f,
-                guest_float(player + 0x40Cu), guest_float(player + 0x408u),
+                guest_float(player + 0x40Cu), guest_float(player + 0x408u), guest_float(player + 0x410u),
+                guest_float(player + 0x1A70u), guest_float(player + 0x1A74u),
                 state ? TUROK_MEM32(state) : 0u, state ? guest_float(state + 0x10u) : 0.0f);
     }
 }
@@ -3665,10 +3831,11 @@ static void hurt_frame(void)
         uint32_t body = self ? TUROK_MEM32(self + 0xFCu) : 0u;
         if (on < 0) {
             const char *mode = getenv("RECOMP_VY_WATCH");
-            on = !mode ? 0 : *mode == 'y' ? 2 : *mode == 'p' ? 3 : 1;
+            on = !mode ? 0 : *mode == 'y' ? 2 : *mode == 'p' ? 3 : *mode == 'g' ? 4 : 1;
         }
         if (on) {
-            uint32_t target = on == 3 ? (s_player_path ? s_player_path + 8u : 0u)
+            uint32_t target = on == 4 ? (self ? self + 0x408u : 0u)   /* the gun's sideways offset */
+                            : on == 3 ? (s_player_path ? s_player_path + 8u : 0u)
                             : on == 2 ? (self ? self + 0x3Cu : 0u) : (body ? body + 0x1Cu : 0u);
             if (target != armed) {
                 vy_watch_arm(target);
@@ -4363,6 +4530,24 @@ void sub_00039FF0(void)
                 guest_float(actor + 0x3Cu), TUROK_MEM32(actor + 0x45Cu),
                 guest_float(actor + 0x408u), guest_float(actor + 0x40Cu), guest_float(actor + 0x410u),
                 s_move_frames, s_last_move_seconds);
+    }
+    /* Multiplayer gun drift. The walk bob eases the gun's sideways offset
+     * (+0x408) towards trig(the state's clock) x amplitude, and each state's
+     * clock starts at 0 -- the right-hand half of the swing. Switching between
+     * forward, strafe and attack faster than half a step keeps the target to
+     * the right, so the gun crept right until nearly off screen, returning
+     * only when the player stopped (any frame rate; the Xbox's own
+     * behaviour). Single player's movement states shrink the gun offsets to
+     * 0.4 when entered (sub_00145FE0); the multiplayer character's states
+     * (vtable 0x225020) do not. They get the same shrink of the gun offsets
+     * (+0x408, +0x40C, +0x1A70, +0x1A74) on every change of state. */
+    if (actor && TUROK_MEM32(actor) == 0x00225020u) {
+        uint32_t state = TUROK_MEM32(actor + 0x12Cu);
+        if (state && TUROK_MEM32(state) != TUROK_MEM32(g_esp + 4u)) {
+            static const uint32_t offsets[4] = { 0x408u, 0x40Cu, 0x1A70u, 0x1A74u };
+            int i;
+            for (i = 0; i < 4; i++) put_guest_float(actor + offsets[i], guest_float(actor + offsets[i]) * 0.4f);
+        }
     }
     sub_00039FF0_gen();
 }

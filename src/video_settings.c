@@ -71,7 +71,7 @@ enum { SET_RESOLUTION, SET_ASPECT, SET_DISPLAY, SET_VSYNC, SET_FRAMES, SET_ANISO
        SET_TAA, SET_DRAW_DISTANCE,
        SET_HEAT_HAZE, SET_SHADOWS, SET_ICONS,
        SET_MOUSE_LOOK, SET_MOUSE_SPEED, SET_FLIGHT_MOUSE, SET_FLIGHT_SPEED, SET_FLIGHT_INVERT,
-       SET_CONTROLLER_AIM, SET_LADDER_FREELOOK, SET_KEEP_WEAPONS, SETTING_COUNT };
+       SET_CONTROLLER_AIM, SET_LADDER_FREELOOK, SET_LOOK_LIMIT, SET_KEEP_WEAPONS, SETTING_COUNT };
 
 typedef struct VideoSetting {
     const char *key, *label;
@@ -98,6 +98,9 @@ static const char *const k_shadow_modes[] = {"xbox", "enhanced"};
 static const char *const k_icons[] = {"xbox", "pc"};
 static const char *const k_mouse_looks[] = {"stick", "raw"};
 static const char *const k_controller_aims[] = {"original", "modern"};
+/* Look limit: how far the view looks up or down -- the game's 70 degrees, or
+ * 85 (video_settings_look_limit). */
+static const char *const k_look_limits[] = {"original", "extended"};
 static const char *const k_speeds[] = {"1", "2", "3", "4", "5", "6", "7", "8", "9", "10"};
 #define COUNT(array) ((int)(sizeof array / sizeof *array))
 
@@ -127,6 +130,7 @@ static const VideoSetting k_settings[SETTING_COUNT] = {
     {"flight_invert", "flight invert", k_switches, COUNT(k_switches), 0},
     {"controller_aim", "pad aim", k_controller_aims, COUNT(k_controller_aims), 0},
     {"ladder_freelook", "ladder freelook", k_switches, COUNT(k_switches), 0},
+    {"look_limit", "look limit", k_look_limits, COUNT(k_look_limits), 0},
     {"keep_weapons", "keep weapons", k_switches, COUNT(k_switches), 0},
 };
 
@@ -754,20 +758,23 @@ static int values_of(int setting)
     }
 }
 
-/* Shadows, controller aiming, ladder freelook, keep weapons, foliage aa and
- * temporal aa use GameOptions.txm, keys 14, 17, 20, 23, 26 and 29 on (after
- * PC Settings' title, 13): Options.txm has no keys left for them. */
+/* Shadows, controller aiming, ladder freelook, keep weapons, foliage aa,
+ * temporal aa and look limit use GameOptions.txm, keys 14, 17, 20, 23, 26, 29
+ * and 32 on (after PC Settings' title, 13): Options.txm has no keys left for
+ * them. */
 #define GAME_TEXT_SHADOWS 14
 #define GAME_TEXT_CONTROLLER_AIM 17
 #define GAME_TEXT_LADDER_FREELOOK 20
 #define GAME_TEXT_KEEP_WEAPONS 23
 #define GAME_TEXT_FOLIAGE_AA 26
 #define GAME_TEXT_TAA 29
+#define GAME_TEXT_LOOK_LIMIT 32
 
 static int in_game_text(int setting)
 {
     return setting == SET_SHADOWS || setting == SET_CONTROLLER_AIM || setting == SET_LADDER_FREELOOK ||
-           setting == SET_KEEP_WEAPONS || setting == SET_FOLIAGE_AA || setting == SET_TAA;
+           setting == SET_KEEP_WEAPONS || setting == SET_FOLIAGE_AA || setting == SET_TAA ||
+           setting == SET_LOOK_LIMIT;
 }
 
 static int text_label(int setting)
@@ -779,6 +786,7 @@ static int text_label(int setting)
     if (setting == SET_KEEP_WEAPONS) return GAME_TEXT_KEEP_WEAPONS;
     if (setting == SET_FOLIAGE_AA) return GAME_TEXT_FOLIAGE_AA;
     if (setting == SET_TAA) return GAME_TEXT_TAA;
+    if (setting == SET_LOOK_LIMIT) return GAME_TEXT_LOOK_LIMIT;
     for (s = 0; s < setting; s++)
         if (!in_game_text(s)) key += 1 + (values_of(s) == s ? k_settings[s].count : 0);
     return key;
@@ -2069,6 +2077,7 @@ static void apply_setting(int setting)
     case SET_FLIGHT_INVERT:
     case SET_CONTROLLER_AIM:
     case SET_LADDER_FREELOOK:
+    case SET_LOOK_LIMIT:             /* read each frame */
     case SET_KEEP_WEAPONS: break;    /* read at each level's start */
     }
 }
@@ -2175,6 +2184,14 @@ int video_settings_modern_aim(void)
 int video_settings_ladder_freelook(void)
 {
     return s_values[SET_LADDER_FREELOOK] != 0;
+}
+
+/* Look limit: the view's pitch limit in degrees, either way -- the game's 70
+ * (its [0x221420]) or, extended, 85: short of straight up or down, where
+ * the view would turn over. */
+float video_settings_look_limit(void)
+{
+    return s_values[SET_LOOK_LIMIT] ? 85.0f : 70.0f;
 }
 
 float video_settings_take_mouse_turn(int axis)
