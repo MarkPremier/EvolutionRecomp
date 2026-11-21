@@ -229,6 +229,10 @@ Recomp/
    `patches/xboxrecomp-aknavj-turok.patch` holds the same changes as one diff
    against 11a8aa1, if you would rather apply them yourself.
 
+   The upstream `xboxrecomp` clone stays as it is: don't patch it or build
+   against it. Built with it, the game boots but has static for sound, no
+   input and broken 3D, so the configure step refuses it.
+
 3. **Generate the C code**
 
    The fork's own disassembler misses about a thousand functions, so the
@@ -278,8 +282,10 @@ Recomp/
 5. **Run**
 
    ```
-   build\Release\turok_evolution.exe 2> stderr.txt
+   build\Release\turok_evolution.exe
    ```
+
+   The log goes to `turok_log.txt` beside the program.
 
 ## Controls
 

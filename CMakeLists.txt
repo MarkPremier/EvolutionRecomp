@@ -30,8 +30,22 @@ add_compile_definitions(
 #   find_package(xboxrecomp REQUIRED)
 #
 # Adjust this path to point to your xboxrecomp clone:
-set(XBOXRECOMP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../xboxrecomp" CACHE PATH
+set(XBOXRECOMP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../xboxrecomp_fork" CACHE PATH
     "Path to the xboxrecomp toolkit root directory")
+
+# The runtime must be MarkPremier/xboxrecomp, branch turok-evolution. The
+# upstream sp00nznet/xboxrecomp clone is only used for its disassembler: built
+# against, the game boots but has static for sound, no input and broken 3D.
+if(NOT EXISTS "${XBOXRECOMP_DIR}/src/kernel/nv2a_gpu_d3d11.cpp")
+    message(FATAL_ERROR
+        "XBOXRECOMP_DIR (${XBOXRECOMP_DIR}) is not the turok-evolution toolkit.
+"
+        "Clone it with
+"
+        "  git clone -b turok-evolution https://github.com/MarkPremier/xboxrecomp.git xboxrecomp_fork
+"
+        "and configure with -DXBOXRECOMP_DIR=../xboxrecomp_fork (see README, Setup).")
+endif()
 
 # Add xboxrecomp as a subdirectory -- this builds all 6 runtime libraries
 # and provides the 'xboxrecomp' umbrella target to link against.
