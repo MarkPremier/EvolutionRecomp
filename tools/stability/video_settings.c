@@ -1,6 +1,7 @@
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
+#include "../../src/video_settings.h"
 static int s_front_end = 1, s_pause_menu, s_cinema, s_loading, dlaa_allowed = -1;
 static int shadow_indoor;
 static void nv2a_gpu_set_shadow_indoor(int indoor) { shadow_indoor = indoor; }
@@ -32,12 +33,14 @@ int main(void)
     assert(value_index(SET_SHADOWS, "Enhanced+") == 2);
     for (int setting = 0; setting < SETTING_COUNT; setting++) {
         if (!in_game_text(setting)) continue;
+        assert(text_values(setting) + k_settings[setting].count <= GAME_TEXT_WEAPONS);
         for (int other = 0; other < SETTING_COUNT; other++) {
             if (other == setting || !in_game_text(other)) continue;
             int key = text_label(other);
             assert(key < text_label(setting) || key >= text_values(setting) + k_settings[setting].count);
         }
     }
+    assert(GAME_TEXT_WEAPONS + VIDEO_WEAPON_SLOTS <= 188);
     video_settings_level("D:\\Data\\Levels\\Pod-12-S-City-Defend-Escape\\sc-12-a.atr");
     assert(shadow_indoor);
     video_settings_level("D:\\Data\\Levels\\Pod-01-Through-The-Jungle\\pod01_03_ttjungle.atr");

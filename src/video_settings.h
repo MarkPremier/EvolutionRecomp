@@ -19,6 +19,7 @@ void video_settings_screen(int front_end, int pause_menu);
 /* The screen loader's object and the file it is loading: a menu screen's
  * entries take the mouse (the menu pointer). */
 void video_settings_menu_screen(uint32_t screen, const char *name);
+void video_settings_draw_menu_widget(void);
 
 /* An in-engine cutscene began (1) or ended (0): shown 4:3, as it was framed. */
 void video_settings_cinema(int on);
@@ -54,5 +55,8 @@ int video_settings_club_charge(void);
 int video_settings_audio_output(void);
 /* Owned weapons carry over between levels (off: as on the Xbox). */
 int video_settings_keep_weapons(void);
+#define VIDEO_WEAPON_SLOTS 10
+/* One bit per configured weapon slot, in default key order 1–0. */
+unsigned video_settings_weapon_input(void);
 
 #endif

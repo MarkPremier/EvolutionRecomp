@@ -3631,7 +3631,7 @@ index 0000000..0b318ad
 +
 +#endif
 diff --git a/src/input/xinput_device.c b/src/input/xinput_device.c
-index 3c7bdd4..87dbf01 100644
+index 3c7bdd4..6aa1132 100644
 --- a/src/input/xinput_device.c
 +++ b/src/input/xinput_device.c
 @@ -12,6 +12,7 @@
@@ -3662,7 +3662,7 @@ index 3c7bdd4..87dbf01 100644
  
  static BOOL kbm_enabled(void)
  {
-@@ -357,70 +364,236 @@ static void kbm_cam_setf(uint32_t camera, uint32_t offset, float v)
+@@ -357,70 +364,241 @@ static void kbm_cam_setf(uint32_t camera, uint32_t offset, float v)
  /* Face/triggers, matching what the build actually does (not what the docs
   * guess): A is jump, B is use, X is melee, LT is crouch. So jump is on Space,
   * melee on F, crouch on Control. A pad is expected to be the primary device,
@@ -3756,7 +3756,9 @@ index 3c7bdd4..87dbf01 100644
 +static int kbm_menu_active;
 +
 +void xbox_KbmSetMenuMode(int on)
-+{
+ {
+-    char *spec = getenv("RECOMP_KBM_MAP");
+-    char *tok;
 +    InterlockedExchange(&kbm_menu_requested, on != 0);
 +}
 +
@@ -3789,9 +3791,7 @@ index 3c7bdd4..87dbf01 100644
 +static void kbm_load_map(void);
 +
 +void xbox_KbmSetBinding(const char *target, const int *keys, int count)
- {
--    char *spec = getenv("RECOMP_KBM_MAP");
--    char *tok;
++{
 +    unsigned i;
 +    int k;
 +    /* Load environment defaults before a title applies saved bindings. The
@@ -3902,6 +3902,11 @@ index 3c7bdd4..87dbf01 100644
 +    }
 +}
 +
++int xbox_KbmInputDown(int code)
++{
++    return !kbm_capture && !kbm_menu_requested && !kbm_menu_active && kbm_input_down(code);
++}
++
 +static BOOL kbm_down(int target)
 +{
 +    const int *vk = kbm_menu_active && kbm_menu_listed[target] ? kbm_menu_binds[target].vk : kbm_binds[target].vk;
@@ -3938,7 +3943,7 @@ index 3c7bdd4..87dbf01 100644
      WORD b = 0;
      int dx, dy, wheel;
  
-@@ -449,28 +622,37 @@ static void kbm_state(XBOX_INPUT_STATE *pState)
+@@ -449,28 +627,37 @@ static void kbm_state(XBOX_INPUT_STATE *pState)
          look_trace  = kbm_number("RECOMP_KBM_LOOK_TRACE", 1, 0);
          look_gain   = (float)kbm_number("RECOMP_KBM_LOOK_GAIN",   1000000, 100) / 1000.0f;
          look_gain_y = (float)kbm_number("RECOMP_KBM_LOOK_GAIN_Y", 1000000, 100) / 1000.0f;
@@ -3987,7 +3992,7 @@ index 3c7bdd4..87dbf01 100644
      if (dx >  (int)maxdelta) dx =  (int)maxdelta;
      if (dx < -(int)maxdelta) dx = -(int)maxdelta;
      if (dy >  (int)maxdelta) dy =  (int)maxdelta;
-@@ -655,52 +837,65 @@ static void kbm_state(XBOX_INPUT_STATE *pState)
+@@ -655,52 +842,65 @@ static void kbm_state(XBOX_INPUT_STATE *pState)
          }
      }
  
@@ -4085,7 +4090,7 @@ index 3c7bdd4..87dbf01 100644
          LONG previous = InterlockedExchange(&g_reported_slot[port], selected);
          if (selected >= 0 && previous != selected)
              fprintf(stderr, "[XINPUT] selected host slot %d -> Xbox port 0\n", g_host_slot);
-@@ -710,6 +905,10 @@ static DWORD poll_host(DWORD port, XINPUT_STATE *state, DWORD *host_slot)
+@@ -710,6 +910,10 @@ static DWORD poll_host(DWORD port, XINPUT_STATE *state, DWORD *host_slot)
          return result;
      }
      DWORD wanted = g_host_slot >= 0 ? port - 1 : port;
@@ -4096,7 +4101,7 @@ index 3c7bdd4..87dbf01 100644
      for (DWORD slot = 0; slot < XBOX_MAX_CONTROLLERS; slot++) {
          if ((int)slot == g_host_slot) continue;
          DWORD result = XInputGetState(slot, state);
-@@ -728,6 +927,9 @@ static DWORD poll_host(DWORD port, XINPUT_STATE *state, DWORD *host_slot)
+@@ -728,6 +932,9 @@ static DWORD poll_host(DWORD port, XINPUT_STATE *state, DWORD *host_slot)
              return ERROR_SUCCESS;
          }
      }
@@ -4106,7 +4111,7 @@ index 3c7bdd4..87dbf01 100644
      if (InterlockedExchange(&g_reported_slot[port], -1) != -1)
          fprintf(stderr, "[XINPUT] Xbox port %lu disconnected\n", port);
      return ERROR_DEVICE_NOT_CONNECTED;
-@@ -843,6 +1045,10 @@ DWORD xbox_InputSetState(DWORD dwPort, const XBOX_VIBRATION *pVibration)
+@@ -843,6 +1050,10 @@ DWORD xbox_InputSetState(DWORD dwPort, const XBOX_VIBRATION *pVibration)
  
      result = poll_host(dwPort, &state, &slot);
      if (result != ERROR_SUCCESS) return result;
@@ -4117,7 +4122,7 @@ index 3c7bdd4..87dbf01 100644
      xi_vib.wLeftMotorSpeed = pVibration->wLeftMotorSpeed;
      xi_vib.wRightMotorSpeed = pVibration->wRightMotorSpeed;
      return XInputSetState(slot, &xi_vib);
-@@ -868,6 +1074,12 @@ DWORD xbox_InputGetCapabilities(DWORD dwPort, DWORD dwFlags, XBOX_INPUT_CAPABILI
+@@ -868,6 +1079,12 @@ DWORD xbox_InputGetCapabilities(DWORD dwPort, DWORD dwFlags, XBOX_INPUT_CAPABILI
  
      result = poll_host(dwPort, &state, &slot);
      if (result != ERROR_SUCCESS) return result;
@@ -4130,6 +4135,20 @@ index 3c7bdd4..87dbf01 100644
      result = XInputGetCapabilities(slot, dwFlags, &xi_caps);
      if (result != ERROR_SUCCESS) return result;
  
+diff --git a/src/input/xinput_xbox.h b/src/input/xinput_xbox.h
+index 4779275..71c6f5f 100644
+--- a/src/input/xinput_xbox.h
++++ b/src/input/xinput_xbox.h
+@@ -104,6 +104,9 @@ DWORD xbox_InputSetState(DWORD dwPort, const XBOX_VIBRATION *pVibration);
+  */
+ BOOL xbox_InputIsConnected(DWORD dwPort);
+ 
++/* Read a gameplay key, mouse button, or latched wheel direction by code. */
++int xbox_KbmInputDown(int code);
++
+ /**
+  * Get controller capabilities.
+  */
 diff --git a/src/kernel/CMakeLists.txt b/src/kernel/CMakeLists.txt
 index a1d3ccb..4997ea8 100644
 --- a/src/kernel/CMakeLists.txt

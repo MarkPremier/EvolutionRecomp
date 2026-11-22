@@ -50,7 +50,8 @@ def game_functions(root, output):
         bridge[bridge.index("/* This application's NGX project id"):], encoding="utf-8")
     input_source = (root.parent / "xboxrecomp_fork/src/input/xinput_device.c").read_text(encoding="utf-8")
     (output / "controls_settings_under_test.inc").write_text(
-        settings[settings.index("enum { SET_RESOLUTION"):settings.index("/* ── Archives")], encoding="utf-8")
+        settings[settings.index("enum { SET_RESOLUTION"):settings.index("/* ── Archives")] +
+        function(settings, "static void controls_set("), encoding="utf-8")
     (output / "controls_input_under_test.inc").write_text(
         input_source[input_source.index("extern int xbox_FramebufferMouseDelta"):input_source.index("/* The `nth` HID pad")],
         encoding="utf-8")

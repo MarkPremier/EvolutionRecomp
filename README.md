@@ -309,12 +309,12 @@ A pad works as on the console. Keyboard and mouse (on by default,
 | Menu select / back | Enter or Space / Esc or Backspace |
 | Menu up / down / left / right | Arrow keys |
 
-The number keys pick a weapon you have, with ammunition, the way the next
-and previous weapon buttons would reach it. Press a number to select its
+By default, the number keys pick a weapon you have, with ammunition, the way the next
+and previous weapon buttons would reach it. Press a slot's binding to select its
 slot directly. Press it again to cycle only through that slot's weapons,
 skipping any you do not have or cannot use. Holding the key does not cycle:
 
-| Key | Weapon |
+| Default key | Weapon slot |
 |-----|--------|
 | 1 | War Club |
 | 2 | Bow, Tek Bow |
@@ -327,9 +327,9 @@ skipping any you do not have or cannot use. Holding the key does not cycle:
 | 9 | Gravity Disruptor |
 | 0 | Grenades, Spider Mines, Dark Matter Cube |
 
-The Crossbow also shares key 2 if available. Number keys work in
-single-player and follow `RECOMP_KBM`; in split-screen, change weapon with
-next and previous weapon.
+The Crossbow also shares the bows slot if available. The slots are rebindable
+in PC Controls and work in single-player with `RECOMP_KBM` enabled. In
+split-screen, change weapon with next and previous weapon.
 
 ### Options are saved when you leave the menu
 
@@ -347,7 +347,9 @@ Enter on a row, or click it, and it shows *Press a Key*: the next key, mouse
 button (including the side buttons) or wheel notch is its new one. A key
 another action had swaps over to the row's old key; six seconds with no
 press keeps the old one. Left and right step through the keys, and a right
-click on a row unbinds it. The choices are kept in `turok_settings.ini`
+click on a row unbinds it. The on-screen Back prompt highlights under the
+pointer and can be clicked. Scroll down with the wheel or move the selection
+with the arrow keys to reach the weapon slots. The choices are kept in `turok_settings.ini`
 under `[controls]` (key names as the page shows them, e.g. `jump=Space`,
 `fire=Mouse 1`).
 

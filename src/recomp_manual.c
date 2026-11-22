@@ -2416,7 +2416,7 @@ recomp_func_t recomp_lookup_manual(uint32_t xbox_va)
      * if (xbox_va == 0x000ABCDE) return fixed_sub_000ABCDE;
      */
 
-    (void)xbox_va;
+    if (xbox_va == 0x0004E1A0u) return video_settings_draw_menu_widget;
     return (recomp_func_t)0;
 }
 
@@ -2796,7 +2796,6 @@ void sub_00080EE0(void)
 extern void sub_00160760_gen(void);
 extern void sub_0015FDA0(void);
 extern void sub_001605A0(void);
-extern int xbox_FramebufferKeyDown(int vk);
 extern __declspec(thread) uint32_t g_eax, g_edx, g_esp;
 
 /* Weapon IDs per key, '1' to '9' then '0' (the table at 0x24B790): 1 War
@@ -2805,7 +2804,7 @@ extern __declspec(thread) uint32_t g_eax, g_edx, g_esp;
  * 11 Guided Device (Spider Mine), 12 Gravity Disruptor, 13 Dark Matter
  * Cube, 14 Crossbow. Spiked Mine is the grenade weapon. Crossbow shares
  * the bow slot if available. */
-static const signed char k_weapon_keys[10][4] = {
+static const signed char k_weapon_keys[VIDEO_WEAPON_SLOTS][4] = {
     {1, -1}, {2, 3, 14, -1}, {5, -1}, {6, -1}, {8, -1},
     {9, -1}, {7, -1}, {10, -1}, {12, -1}, {4, 11, 13, -1},
 };
@@ -2857,7 +2856,7 @@ void sub_00160760(void)
     static int keyboard = -1;
     uint32_t inventory = g_ecx, player = TUROK_MEM32(inventory + 0x4Cu);
     uint32_t first = TUROK_MEM32(0x257E90u);
-    unsigned down = 0, pressed;
+    unsigned down, pressed;
     int key;
 
     if (keyboard < 0) {
@@ -2869,14 +2868,13 @@ void sub_00160760(void)
         return;
     }
 
-    for (key = 0; key < 10; key++)
-        if (xbox_FramebufferKeyDown(key == 9 ? '0' : '1' + key)) down |= 1u << key;
+    down = video_settings_weapon_input();
     pressed = down & ~held;
     held = down;
     if (pressed && player && player == first && !TUROK_MEM32(first + 0x39Cu) &&
             !TUROK_MEM32(inventory + 0x1Cu) && !TUROK_MEM32(inventory + 0x34u) &&
             TUROK_MEM32(inventory + 0x38u) == 0xFFFFFFFFu)
-        for (key = 0; key < 10; key++)
+        for (key = 0; key < VIDEO_WEAPON_SLOTS; key++)
             if (pressed & (1u << key)) { weapon_key(inventory, key); break; }
     g_ecx = inventory;
     sub_00160760_gen();

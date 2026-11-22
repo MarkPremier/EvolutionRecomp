@@ -175,8 +175,8 @@ static int s_mouse_raw = -1;           /* what the input layer was last told */
  * mouse action on one key or mouse input, chosen by pressing it (Enter or a
  * click on the row, then the key) or stepped through with left and right.
  * Row n is PCControls.hst item n + 1, its value an index into k_keys, whose
- * names are what the rows show. Each goes to the toolkit as its pad input's
- * one key (xbox_KbmSetBinding); turok_settings.ini's [controls] keeps them. */
+ * names are what the rows show. The first rows drive the pad overlay. The
+ * weapon slots are read directly by the inventory. All use [controls]. */
 #define KEY_MOUSE_L    0x101      /* the toolkit's mouse codes (xinput_device.c) */
 #define KEY_MOUSE_R    0x102
 #define KEY_MOUSE_M    0x103
@@ -222,7 +222,8 @@ static const KeyName k_keys[] = {
 /* Turok's own pad layout (Control Setup's default), as the keyboard and
  * mouse take it. */
 enum { BIND_FORWARD, BIND_BACK, BIND_LEFT, BIND_RIGHT, BIND_FIRE, BIND_MODE, BIND_JUMP, BIND_DUCK,
-       BIND_NEXT, BIND_PREVIOUS, BIND_ZOOM, BIND_PAUSE, BIND_COUNT };
+       BIND_NEXT, BIND_PREVIOUS, BIND_ZOOM, BIND_PAUSE, BIND_WEAPON_FIRST,
+       BIND_COUNT = BIND_WEAPON_FIRST + VIDEO_WEAPON_SLOTS };
 static const struct {
     const char *key, *label, *target;
     int code;
@@ -233,6 +234,11 @@ static const struct {
     {"jump", "jump", "A", VK_SPACE}, {"duck", "duck", "WHITE", VK_CONTROL},
     {"next_weapon", "next weapon", "X", KEY_WHEEL_DOWN}, {"previous_weapon", "prev weapon", "Y", KEY_WHEEL_UP},
     {"zoom", "zoom", "RTHUMB", KEY_MOUSE_M}, {"pause", "pause", "START", VK_ESCAPE},
+    {"weapon_1", "war club", NULL, '1'}, {"weapon_2", "bows", NULL, '2'},
+    {"weapon_3", "pistol", NULL, '3'}, {"weapon_4", "shotgun", NULL, '4'},
+    {"weapon_5", "rocket launcher", NULL, '5'}, {"weapon_6", "plasma cannon", NULL, '6'},
+    {"weapon_7", "minigun", NULL, '7'}, {"weapon_8", "flamethrower", NULL, '8'},
+    {"weapon_9", "gravity disruptor", NULL, '9'}, {"weapon_0", "explosives", NULL, '0'},
 };
 static int s_binds[BIND_COUNT];       /* each a k_keys index */
 static char s_ini_path[MAX_PATH];
@@ -285,13 +291,24 @@ static void apply_bindings(void)
 {
     static const char *const dpad[] = {"UP", "DOWN", "LEFT", "RIGHT"};
     int b, d;
-    for (b = 0; b < BIND_COUNT; b++) {
+    for (b = 0; b < BIND_WEAPON_FIRST; b++) {
         int code = k_keys[s_binds[b]].code;
         xbox_KbmSetBinding(k_binds[b].target, &code, code > 0);
     }
     for (d = 0; d < COUNT(dpad); d++) {
         xbox_KbmSetBinding(dpad[d], NULL, 0);
     }
+}
+
+extern int xbox_KbmInputDown(int code);
+
+unsigned video_settings_weapon_input(void)
+{
+    unsigned down = 0;
+    int slot;
+    for (slot = 0; slot < VIDEO_WEAPON_SLOTS; slot++)
+        if (xbox_KbmInputDown(k_keys[s_binds[BIND_WEAPON_FIRST + slot]].code)) down |= 1u << slot;
+    return down;
 }
 
 /* A value's index from its text; -1 if it is none of them. */
@@ -358,10 +375,23 @@ void video_settings_load(void)
         fprintf(stderr, " %s %s", k_settings[s].key, k_settings[s].values[s_values[s]]);
     fprintf(stderr, "\n");
 
+    unsigned default_slots = 0;
     for (s = 0; s < BIND_COUNT; s++) {
         GetPrivateProfileStringA("controls", k_binds[s].key, "", text, sizeof text, s_ini_path);
         s_binds[s] = *text ? key_named(text) : -1;
-        if (s_binds[s] < 0) s_binds[s] = key_index(k_binds[s].code);
+        if (s_binds[s] >= 0) continue;
+        s_binds[s] = key_index(k_binds[s].code);
+        if (s >= BIND_WEAPON_FIRST) default_slots |= 1u << (s - BIND_WEAPON_FIRST);
+    }
+    /* An older configuration may already use a number for a custom action.
+     * Keep it available to that action when adding the new slot defaults. */
+    for (s = BIND_WEAPON_FIRST; s < BIND_COUNT; s++) {
+        if (!(default_slots & (1u << (s - BIND_WEAPON_FIRST)))) continue;
+        for (int other = 0; other < BIND_COUNT; other++)
+            if (other != s && s_binds[other] == s_binds[s]) {
+                s_binds[s] = 0;
+                break;
+            }
     }
 }
 
@@ -800,6 +830,7 @@ static int values_of(int setting)
 #define GAME_TEXT_AUDIO_OUTPUT 40
 #define GAME_TEXT_HEAT_HAZE 46   /* after Audio out's five values */
 #define GAME_TEXT_DLAA_WIDTH 51  /* after Heat haze's four */
+#define GAME_TEXT_WEAPONS 54
 
 static int in_game_text(int setting)
 {
@@ -842,7 +873,7 @@ static int text_values(int setting)
 #define TEXT_CONTROLS       text_label(SETTING_COUNT)
 #define TEXT_CONTROLS_TITLE (TEXT_CONTROLS + 1)
 #define TEXT_BIND_LABEL(b)  (TEXT_CONTROLS + 2 + (b))
-#define TEXT_SETTINGS       (TEXT_CONTROLS + 2 + BIND_COUNT)
+#define TEXT_SETTINGS       (TEXT_CONTROLS + 2 + BIND_WEAPON_FIRST)
 #define TEXT_KEYS           (TEXT_SETTINGS + 1)
 #define GAME_TEXT_SETTINGS_TITLE 13
 
@@ -1017,14 +1048,18 @@ typedef struct PageRow {
     const char *text;     /* its label's and values' text file, or NULL for Options.txm */
     const char *history;  /* another page's history item it shows, or NULL */
     int item;             /* (its item) */
+    const char *values_text;  /* override the label's file for the values */
 } PageRow;
 /* Video Options: rows this far apart, VIDEO_SHOWN of them at a time (the
- * page scrolls: video_scroll). Its rows are the settings up to Button
+ * page scrolls: menu_scroll). Its rows are the settings up to Button
  * icons and Audio out; the mouse's, from Mouse look on, are on PC Settings (still
  * Video.hst's items). */
 #define VIDEO_STEP  2.8f
 #define VIDEO_SHOWN 10
 #define VIDEO_ROWS  SET_MOUSE_LOOK
+#define CONTROLS_STEP  2.05f
+#define CONTROLS_SHOWN 12
+#define PAGE_MAX_ROWS  24
 
 typedef struct PageSpec {
     const char *history;
@@ -1032,7 +1067,7 @@ typedef struct PageSpec {
     float step, text_scale;
     const char *font;     /* the rows' font, or NULL for the template's */
     const char *title_text; /* the title's text file, or NULL for Options.txm */
-    PageRow rows[16];
+    PageRow rows[PAGE_MAX_ROWS];
 } PageSpec;
 
 static const char *row_history(const PageSpec *page, int s)
@@ -1071,11 +1106,12 @@ static int make_page(Node *screen, const PageSpec *page)
     Node *title = actor_named(screen, "title", NULL), *bbutton = actor_named(screen, "BButton", NULL);
     Node *deity = actor_named(screen, "DeityNoFade", NULL), *limit = NULL;
     float row_position[3], row_scale[3], value_position[3], value_scale[3];
-    char name[64], row_names[16][32], value_names[16][48];
-    int row_ids[16], value_ids[16], id = 0, s;
+    char name[64], row_names[PAGE_MAX_ROWS][32], value_names[PAGE_MAX_ROWS][48];
+    int row_ids[PAGE_MAX_ROWS], value_ids[PAGE_MAX_ROWS], id = 0, s;
     uint32_t i, j, at = 0;
 
-    if (!row || !value || !title || !bbutton || !deity || !get_vector(child(row, "POS"), row_position) ||
+    if (page->count > PAGE_MAX_ROWS || !row || !value || !title || !bbutton || !deity ||
+            !get_vector(child(row, "POS"), row_position) ||
             !get_vector(child(row, "SCALE"), row_scale) || !get_vector(child(value, "POS"), value_position) ||
             !get_vector(child(value, "SCALE"), value_scale) || !child(row, "ACTOR_VARIABLES") ||
             !child(value, "ACTOR_VARIABLES")) return 0;
@@ -1122,7 +1158,8 @@ static int make_page(Node *screen, const PageSpec *page)
 
         set_text(child(label_vars, "W_TMF"), page->rows[s].text ? page->rows[s].text : OPTIONS_TXM);
         set_byte(child(label_vars, "W_TMN"), page->rows[s].label);
-        set_text(child(box_vars, "W_TMF"), page->rows[s].text ? page->rows[s].text : OPTIONS_TXM);
+        set_text(child(box_vars, "W_TMF"), page->rows[s].values_text ? page->rows[s].values_text :
+                 page->rows[s].text ? page->rows[s].text : OPTIONS_TXM);
         set_byte(child(box_vars, "W_TMN"), page->rows[s].value_text);
         set_text(child(box_vars, "W_THF"), row_history(page, s));
         set_byte(child(box_vars, "W_THI"), row_item(page, s));
@@ -1707,13 +1744,18 @@ static int edit_video_screen(Node *screen, const char *unused)
  * the row waits for its key (a step past the last key reads as none). */
 static int edit_controls_screen(Node *screen, const char *unused)
 {
-    PageSpec page = {CONTROLS_HST, TEXT_CONTROLS_TITLE, BIND_COUNT, 2.05f, TEXT_SCALE,
+    PageSpec page = {CONTROLS_HST, TEXT_CONTROLS_TITLE, BIND_COUNT, CONTROLS_STEP, TEXT_SCALE,
                      "$/Data/Fonts/Proportional.fnt"};
     int b;
     (void)unused;
     for (b = 0; b < BIND_COUNT; b++) {
         snprintf(page.rows[b].key, sizeof page.rows[b].key, "%s", k_binds[b].key);
-        page.rows[b].label = TEXT_BIND_LABEL(b);
+        if (b < BIND_WEAPON_FIRST) page.rows[b].label = TEXT_BIND_LABEL(b);
+        else {
+            page.rows[b].label = GAME_TEXT_WEAPONS + b - BIND_WEAPON_FIRST;
+            page.rows[b].text = GAME_TXM;
+            page.rows[b].values_text = OPTIONS_TXM;
+        }
         page.rows[b].value_text = TEXT_KEYS;
         page.rows[b].last = KEY_COUNT - 1;
     }
@@ -1845,7 +1887,8 @@ static int write_patch(const char *game_dir)
     }
     add_text(&files[OPTIONS_TEXT].data, TEXT_CONTROLS, "PC CONTROLS");
     add_text(&files[OPTIONS_TEXT].data, TEXT_CONTROLS_TITLE, "PC Controls");
-    for (s = 0; s < BIND_COUNT; s++) add_title_text(&files[OPTIONS_TEXT].data, TEXT_BIND_LABEL(s), k_binds[s].label);
+    for (s = 0; s < BIND_WEAPON_FIRST; s++)
+        add_title_text(&files[OPTIONS_TEXT].data, TEXT_BIND_LABEL(s), k_binds[s].label);
     add_text(&files[OPTIONS_TEXT].data, TEXT_SETTINGS, "PC SETTINGS");
     files[GAME_TEXT].key = tree_key("data\\text\\gameoptions.txm");
     if (!trees_read(&trees, "data\\text\\gameoptions.txm", &files[GAME_TEXT].data)) goto done;
@@ -1866,6 +1909,8 @@ static int write_patch(const char *game_dir)
                 add_text(&files[GAME_TEXT].data, text_label(found) + 1 + i, k_settings[found].values[i]);
         }
     }
+    for (s = BIND_WEAPON_FIRST; s < BIND_COUNT; s++)
+        add_title_text(&files[GAME_TEXT].data, GAME_TEXT_WEAPONS + s - BIND_WEAPON_FIRST, k_binds[s].label);
     for (i = 0; i < KEY_COUNT; i++) add_title_text(&files[OPTIONS_TEXT].data, TEXT_KEYS + i, k_keys[i].name);
 
     if (!trees_read(&trees, "data\\history\\history.txt", &files[HISTORY_LIST].data)) goto done;
@@ -2254,7 +2299,7 @@ static void apply_setting(int setting)
 
 static void menu_pointer(void);
 static void controls_frame(void);
-static void video_scroll(void);
+static void menu_scroll(void);
 
 static float s_mouse_turn[2];          /* yaw, pitch: stick units x seconds, not yet used */
 static float s_mouse_steer[2];         /* flight: right, up, the same units */
@@ -2272,7 +2317,7 @@ void video_settings_mouse_look(void)
     stale = now - last_frame > 250;
     last_frame = now;
     controls_frame();
-    video_scroll();
+    menu_scroll();
     menu_pointer();
     /* Raw look works through the on-foot turn functions (Mouse look raw), and
      * on the pteranodon through its flight (Flight mouse on: video_settings_
@@ -2484,7 +2529,8 @@ void video_settings_loading(int on)
  *   - moving over an entry focuses it as the menu's up and down do: the
  *     controller handed from the old entry to the new, then the screen's own
  *     SetFocus (set_focus);
- *   - a left click chooses it (A); on an option row (a SelectionMenuWidget,
+ *   - a left click chooses it (A), or presses a visible Select/Back prompt;
+ *     on an option row (a SelectionMenuWidget,
  *     changed with left and right) it steps the value on (right), a right
  *     click back (left). A right click elsewhere is Back (B, or Start on the
  *     pause menu's first screen, as Escape is), and the wheel steps an option
@@ -2515,6 +2561,9 @@ extern int xbox_KbmMenuWheel(void);
 static char s_game_dir[MAX_PATH];
 static volatile uint32_t s_menu_screen;     /* the screen's object; 0 in a level */
 static volatile uint32_t s_menu_screens;    /* screens entered: the object is reused */
+static enum { SCROLL_NONE, SCROLL_VIDEO, SCROLL_CONTROLS } s_scroll_page;
+typedef struct MenuPrompt { uint32_t icon, label; } MenuPrompt;
+static MenuPrompt s_prompt_hover;
 /* Its option rows: each shows and steps a history item (its value widget's
  * A_HIF/A_HII), kept to 0..max by a "> max" link (COMP 4); max 0 if none. */
 typedef struct OptionRow {
@@ -2638,15 +2687,24 @@ static void find_option_rows(const char *name)
 
 void video_settings_menu_screen(uint32_t screen, const char *name)
 {
-    char lower[160];
+    char lower[160], *page, *extension;
     size_t n;
     for (n = 0; n + 1 < sizeof lower && name[n]; n++) lower[n] = (char)tolower((unsigned char)name[n]);
     lower[n] = 0;
+    s_scroll_page = SCROLL_NONE;
+    s_prompt_hover = (MenuPrompt){0};
     if (!strstr(lower, "\\screens\\")) {
         s_menu_screen = 0;
         return;
     }
     find_option_rows(name);
+    page = strrchr(lower, '\\') + 1;
+    extension = strrchr(page, '.');
+    if (extension) *extension = 0;
+    for (n = 0; n < MENU_COUNT; n++) {
+        if (!_stricmp(page, k_menus[n].page)) s_scroll_page = SCROLL_VIDEO;
+        if (!_stricmp(page, k_menus[n].controls)) s_scroll_page = SCROLL_CONTROLS;
+    }
     s_menu_screen = screen;
     s_menu_screens++;
     fprintf(stderr, "[MENU] screen %08X, %d option rows\n", screen, s_option_row_count);
@@ -2676,6 +2734,63 @@ static int is_widget(uint32_t actor)
         if (!guest_read(type, &type)) type = 0;
     if (slot < 32) { known[slot] = vtable; verdict[slot] = type == WIDGET_TYPE; }
     return type == WIDGET_TYPE;
+}
+
+/* The icons and captions are separate non-focusable widgets. Keep them off
+ * the navigation list and use their actual positions, including translations. */
+static void collect_prompt(uint32_t actor, MenuPrompt prompts[2])
+{
+    uint32_t name_ptr, visible, color;
+    char name[24];
+    if (!guest_read(actor + 0x1E, &visible) || !(visible & 255u) ||
+            !guest_read(actor + 0x2E4, &color) || !(color >> 24) ||
+            !guest_read(actor + 0x5C, &name_ptr) || !name_ptr) return;
+    __try {
+        snprintf(name, sizeof name, "%s", (const char *)((uintptr_t)name_ptr + g_xbox_mem_offset));
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return;
+    }
+    if (!_stricmp(name, "AButton")) prompts[0].icon = actor;
+    else if (!_stricmp(name, "BButton")) prompts[1].icon = actor;
+    else if (!_stricmp(name, "TextSelect")) prompts[0].label = actor;
+    else if (!_stricmp(name, "TextBack") || !_stricmp(name, "TextCancel")) prompts[1].label = actor;
+}
+
+static int widget_box(uint32_t actor, float box[4])
+{
+    return actor && guest_float(actor + 0x2C4, &box[0]) && guest_float(actor + 0x2C8, &box[1]) &&
+           guest_float(actor + 0x2CC, &box[2]) && guest_float(actor + 0x2D0, &box[3]) &&
+           box[2] > 0 && box[3] > 0 && box[2] < 2000 && box[3] < 2000;
+}
+
+static int prompt_contains(MenuPrompt prompt, float x, float y)
+{
+    float icon[4], label[4];
+    if (!widget_box(prompt.icon, icon)) return 0;
+    float left = icon[0], top = icon[1], right = left + icon[2], bottom = top + icon[3];
+    if (widget_box(prompt.label, label)) {
+        left = fminf(left, label[0]);
+        top = fminf(top, label[1]);
+        right = fmaxf(right, label[0] + label[2]);
+        bottom = fmaxf(bottom, label[1] + label[3]);
+    }
+    return x >= left - 5 && x <= right + 5 && y >= top - 5 && y <= bottom + 5;
+}
+
+/* Draw the prompt in the game's focus color without assigning it focus.
+ * The original widget draw uses this ARGB tint for its text or bitmap. */
+extern void sub_0004E1A0(void);
+
+void video_settings_draw_menu_widget(void)
+{
+    const uint32_t widget = g_ecx;
+    if (widget && (widget == s_prompt_hover.icon || widget == s_prompt_hover.label)) {
+        volatile uint32_t *tint = (volatile uint32_t *)((uintptr_t)(widget + 0x2E4u) + g_xbox_mem_offset);
+        uint32_t saved = *tint;
+        *tint = (saved & 0xFF000000u) | 0x0061D2E7u;
+        sub_0004E1A0();
+        *tint = saved;
+    } else sub_0004E1A0();
 }
 
 static const OptionRow *option_row(uint32_t actor)
@@ -2745,20 +2860,22 @@ static uint32_t next_actor(uint32_t actor)
  * its ends missed: off every box, the nearest within 14 pixels up or down
  * and 90 across is the one, the closest row first, measured to where the
  * text is (the box raised by a third of its height). */
-static uint32_t entry_at(uint32_t screen, float x, float y)
+static uint32_t entry_at(uint32_t screen, float x, float y, const char **prompt_button)
 {
     uint32_t actor, owner, flags, nearest = 0;
+    MenuPrompt prompts[2] = {0};
     int n;
     float box[4], best = 1e9f;
     if (!guest_read(screen + 0x9C, &actor)) return 0;
     for (n = 0; actor && n < 2048; n++, actor = next_actor(actor)) {
         float dx, dy;
-        if (!(is_widget(actor) && guest_read(actor + 0x48, &owner) && owner == screen &&
-                guest_read(actor + 0x244, &flags) && (flags & 1) &&
-                guest_float(actor + 0x2C4, &box[0]) && guest_float(actor + 0x2C8, &box[1]) &&
-                guest_float(actor + 0x2CC, &box[2]) && guest_float(actor + 0x2D0, &box[3]) &&
-                box[2] > 0 && box[3] > 0 && box[2] < 2000 && box[3] < 2000))
+        if (!is_widget(actor) || !guest_read(actor + 0x48, &owner) || owner != screen ||
+                !guest_read(actor + 0x244, &flags)) continue;
+        if (!(flags & 1)) {
+            collect_prompt(actor, prompts);
             continue;
+        }
+        if (!widget_box(actor, box)) continue;
         dx = x < box[0] ? box[0] - x : x >= box[0] + box[2] ? x - (box[0] + box[2]) : 0;
         if (!dx && y >= box[1] && y < box[1] + box[3]) return actor;
         box[1] -= box[3] / 3;
@@ -2767,6 +2884,12 @@ static uint32_t entry_at(uint32_t screen, float x, float y)
             best = dy * 8 + dx;
             nearest = actor;
         }
+    }
+    for (n = 0; n < 2; n++) {
+        if (!prompt_contains(prompts[n], x, y)) continue;
+        s_prompt_hover = prompts[n];
+        *prompt_button = n ? (s_pause_menu ? "START" : "B") : "A";
+        return 0;
     }
     return nearest;
 }
@@ -3037,10 +3160,10 @@ static void controls_frame(void)
     else controls_watch();
 }
 
-/* ── Video Options, scrolled ──────────────────────────────────────
+/* ── Scrolling Video Options and PC Controls ─────────────────────────
  *
  * More rows than the panel holds at a roomy spacing: the page is laid out
- * at VIDEO_STEP and shows VIDEO_SHOWN rows from s_scroll_first, each label
+ * at its usual spacing and shows a window of rows from s_scroll_first. Each label
  * and its value widget (found by name: the setting's key, and the key with
  * "ValueWidget") moved by their position's height (actor +0x3C, from which
  * the game places the text and the entry's box each frame); the rows out of
@@ -3048,13 +3171,13 @@ static void controls_frame(void)
  * those before it far above, those after far below, since up and down move
  * the focus to the nearest entry that way (wrapping to the far end). The window
  * follows the focus as the keys or a pad move it, and the mouse wheel
- * scrolls it (video_scroll_by). */
+ * scrolls it (menu_scroll_by). */
 #define SCROLL_OFF 1000.0f
-static struct { uint32_t actor; int row; float y; } s_scroll[2 * VIDEO_ROWS];
+static struct { uint32_t actor; int row; float y; } s_scroll[2 * PAGE_MAX_ROWS];
 static int s_scroll_count, s_scroll_first;
 static uint32_t s_scroll_screens, s_scroll_focus;
 
-static void scroll_collect(uint32_t screen)
+static void scroll_collect(uint32_t screen, int count, int controls)
 {
     uint32_t actor, text;
     int n, k, rows = 0;
@@ -3068,9 +3191,10 @@ static void scroll_collect(uint32_t screen)
         } __except (EXCEPTION_EXECUTE_HANDLER) {
             continue;
         }
-        for (k = 0; k < VIDEO_ROWS; k++) {
-            size_t length = strlen(k_settings[k].key);
-            if (_strnicmp(name, k_settings[k].key, length) ||
+        for (k = 0; k < count; k++) {
+            const char *key = controls ? k_binds[k].key : k_settings[k].key;
+            size_t length = strlen(key);
+            if (_strnicmp(name, key, length) ||
                     (name[length] && _stricmp(name + length, "ValueWidget")))
                 continue;
             if (guest_float(actor + 0x3C, &s_scroll[s_scroll_count].y)) {
@@ -3082,34 +3206,37 @@ static void scroll_collect(uint32_t screen)
             break;
         }
     }
-    if (rows < VIDEO_ROWS) s_scroll_count = 0;        /* not the page (or not built yet) */
+    if (rows < count) s_scroll_count = 0;        /* the page is not built yet */
 }
 
-static void scroll_place(void)
+static void scroll_place(int shown, float step)
 {
     int i;
     for (i = 0; i < s_scroll_count; i++) {
         int row = s_scroll[i].row;
         float y = s_scroll[i].y + (row < s_scroll_first ? SCROLL_OFF :
-                                   row >= s_scroll_first + VIDEO_SHOWN ? -SCROLL_OFF :
-                                   (float)s_scroll_first * VIDEO_STEP);
+                                   row >= s_scroll_first + shown ? -SCROLL_OFF :
+                                   (float)s_scroll_first * step);
         uint32_t bits;
         memcpy(&bits, &y, 4);
         *(volatile uint32_t *)((uintptr_t)(s_scroll[i].actor + 0x3Cu) + g_xbox_mem_offset) = bits;
     }
 }
 
-static void video_scroll(void)
+static void menu_scroll(void)
 {
     uint32_t screen = s_menu_screen, focus = 0;
     int i, row = -1, first = s_scroll_first;
-    if (!s_in_menu || !screen) {
+    int controls = s_scroll_page == SCROLL_CONTROLS;
+    int count = controls ? BIND_COUNT : VIDEO_ROWS;
+    int shown = controls ? CONTROLS_SHOWN : VIDEO_SHOWN;
+    if (!s_in_menu || !screen || !s_scroll_page) {
         s_scroll_screens = 0;
         s_scroll_count = 0;
         return;
     }
     if (s_scroll_screens != s_menu_screens) {
-        scroll_collect(screen);
+        scroll_collect(screen, count, controls);
         if (!s_scroll_count) return;               /* look again next frame */
         s_scroll_screens = s_menu_screens;
         s_scroll_first = first = 0;
@@ -3122,19 +3249,22 @@ static void video_scroll(void)
         for (i = 0; i < s_scroll_count && row < 0; i++)
             if (s_scroll[i].actor == focus) row = s_scroll[i].row;
         if (row >= 0 && row < first) first = row;
-        if (row >= first + VIDEO_SHOWN) first = row - VIDEO_SHOWN + 1;
+        if (row >= first + shown) first = row - shown + 1;
     }
-    s_scroll_first = clamp(first, 0, VIDEO_ROWS - VIDEO_SHOWN);
-    scroll_place();
+    s_scroll_first = clamp(first, 0, count - shown);
+    scroll_place(shown, controls ? CONTROLS_STEP : VIDEO_STEP);
 }
 
 /* The wheel on the page: `notches` up (positive) or down. 0 if the page
  * does not scroll. */
-static int video_scroll_by(int notches)
+static int menu_scroll_by(int notches)
 {
-    if (!s_scroll_count || s_scroll_screens != s_menu_screens) return 0;
-    s_scroll_first = clamp(s_scroll_first - notches, 0, VIDEO_ROWS - VIDEO_SHOWN);
-    scroll_place();
+    int controls = s_scroll_page == SCROLL_CONTROLS;
+    int shown = controls ? CONTROLS_SHOWN : VIDEO_SHOWN;
+    int count = controls ? BIND_COUNT : VIDEO_ROWS;
+    if (!s_scroll_page || !s_scroll_count || s_scroll_screens != s_menu_screens) return 0;
+    s_scroll_first = clamp(s_scroll_first - notches, 0, count - shown);
+    scroll_place(shown, controls ? CONTROLS_STEP : VIDEO_STEP);
     return 1;
 }
 
@@ -3147,7 +3277,9 @@ static void menu_pointer(void)
     uint32_t screen = s_menu_screen, focus = 0, hovered = 0;
     int on = s_in_menu && screen, pressed, wheel, over, moved;
     DWORD now = GetTickCount();
-    float x, y;
+    float x = 0, y = 0;
+    const char *prompt_button = NULL;
+    s_prompt_hover = (MenuPrompt){0};
     if (on != pointer_on) {
         xbox_FramebufferSetMenuPointer(on);
         pointer_on = on;
@@ -3163,7 +3295,7 @@ static void menu_pointer(void)
     pressed = (xbox_FramebufferMouseClicks(0) ? 1 : 0) | (xbox_FramebufferMouseClicks(1) ? 2 : 0);
     wheel = xbox_KbmMenuWheel();
     over = pointer_on_menu(&x, &y);
-    if (over) hovered = entry_at(screen, x, y);
+    if (over) hovered = entry_at(screen, x, y, &prompt_button);
     guest_read(screen + 0x198, &focus);
     moved = over && (x != last_x || y != last_y);
     /* RECOMP_MENU_TRACE: what the pointer saw, when it moved or clicked. */
@@ -3173,7 +3305,8 @@ static void menu_pointer(void)
         if (trace && (moved || pressed || wheel))
             fprintf(stderr, "[MENU] pointer %.0f,%.0f over %d hovered %08X focus %08X pressed %d wheel %d\n",
                     x, y, over, hovered, focus, pressed, wheel);
-        if (trace && pressed && !hovered) {     /* where the entries are */
+        if (trace && (pressed & 1) && prompt_button) fprintf(stderr, "[MENU] clicked %s prompt\n", prompt_button);
+        if (trace && pressed && !hovered && !prompt_button) {     /* where the entries are */
             uint32_t actor, flags;
             float box[4];
             int n;
@@ -3203,6 +3336,10 @@ static void menu_pointer(void)
     last_focus = focus;
     last_screen = s_menu_screens;
     if (pressed || wheel) pointer_busy_until = now + 500;
+    if ((pressed & 1) && prompt_button) {
+        press(prompt_button, 1);
+        return;
+    }
     /* A controls row: Enter or a click waits for its key, a right click
      * unbinds it. */
     {
@@ -3225,7 +3362,7 @@ static void menu_pointer(void)
         if (hovered && is_option_row(hovered)) { if (!wrap_option(hovered, 0)) press("LEFT", 1); }
         else press(s_pause_menu ? "START" : "B", 1);
     }
-    if (wheel && video_scroll_by(wheel)) {
+    if (wheel && menu_scroll_by(wheel)) {
         /* scrolled */
     } else if (wheel) {
         int row = hovered ? is_option_row(hovered) : focus && is_option_row(focus);

@@ -14,6 +14,7 @@ __declspec(thread) int g_df;
 static int keep;
 static uint32_t manager = 0x10000u;
 static unsigned killed;
+static void video_settings_draw_menu_widget(void) {}
 
 #include "game_overrides_under_test.inc"
 #include "effect_part_generated.inc"
