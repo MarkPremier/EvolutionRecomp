@@ -44,7 +44,7 @@ index daaac64..d5059d1 100644
      volatile int     active;       /* 1 = playing, 0 = stopped */
      volatile int     looping;      /* 1 = loop, 0 = one-shot */
 diff --git a/src/apu/apu_core.c b/src/apu/apu_core.c
-index c5c8a86..0136754 100644
+index c5c8a86..c0d6279 100644
 --- a/src/apu/apu_core.c
 +++ b/src/apu/apu_core.c
 @@ -85,9 +85,22 @@ uint8_t *mcpx_apu_ram_address(uint64_t addr, uint32_t bytes)
@@ -238,7 +238,40 @@ index c5c8a86..0136754 100644
  }
  
  /* Declick: a sound that is cut off abruptly makes the mix step from a large
-@@ -569,11 +669,38 @@ static void throttle(MCPXAPUState *d)
+@@ -499,6 +599,32 @@ void mcpx_apu_monitor_frame(MCPXAPUState *d)
+         apu_wav_capture((const int16_t (*)[2])d->monitor.frame_buf,
+                         num_samples, 1);
+ 
++        /* 5.1 (xa2_set_output, the console's audio set to Dolby Digital):
++         * the title's own six channels, as the GP leaves them for the EP's
++         * AC-3 encoder in its scratch rings (mcpx_apu_surround_window, in
++         * AC-3's order: left, centre, right, left surround, right surround,
++         * LFE), sent on as PCM in the host's order (front left, front right,
++         * centre, LFE, back left, back right). The EP itself is not heard:
++         * its encoder needs a ROM the emulation lacks and stalls, which left
++         * Dolby Digital silent. The software mixer's stereo (FMV) goes to the
++         * front pair. */
++        if (xa2_channels() == 6) {
++            static int16_t surround_out[MIXER_FRAME_SAMPLES][6];
++            const int16_t (*rings)[6];
++            mcpx_apu_surround_window(&rings);
++            for (int i = 0; i < num_samples; i++) {
++                int left = rings[i][0] + d->monitor.frame_buf[i][0], right = rings[i][2] + d->monitor.frame_buf[i][1];
++                surround_out[i][0] = (int16_t)(left > 32767 ? 32767 : left < -32768 ? -32768 : left);
++                surround_out[i][1] = (int16_t)(right > 32767 ? 32767 : right < -32768 ? -32768 : right);
++                surround_out[i][2] = rings[i][1];
++                surround_out[i][3] = rings[i][5];
++                surround_out[i][4] = rings[i][3];
++                surround_out[i][5] = rings[i][4];
++            }
++            xa2_submit_samples((const int16_t *)surround_out, num_samples);
++            return;
++        }
++
+         xa2_submit_samples((const int16_t *)d->monitor.frame_buf, num_samples);
+         return;
+     }
+@@ -569,11 +695,38 @@ static void throttle(MCPXAPUState *d)
  
      int64_t now_us = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
  
@@ -278,7 +311,7 @@ index c5c8a86..0136754 100644
      while (!d->pause_requested) {
          now_us = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
          int64_t remaining_ms = (d->next_frame_time_us - now_us) / 1000;
-@@ -592,6 +719,68 @@ static void throttle(MCPXAPUState *d)
+@@ -592,6 +745,68 @@ static void throttle(MCPXAPUState *d)
   * se_frame - Process one audio frame (VP -> GP -> EP pipeline)
   * ============================================================ */
  
@@ -347,7 +380,7 @@ index c5c8a86..0136754 100644
  static void se_frame(MCPXAPUState *d)
  {
      mcpx_apu_update_dsp_preference(d);
-@@ -614,9 +803,31 @@ static void se_frame(MCPXAPUState *d)
+@@ -614,9 +829,31 @@ static void se_frame(MCPXAPUState *d)
      float mixbins[NUM_MIXBINS][NUM_SAMPLES_PER_FRAME];
      memset(mixbins, 0, sizeof(mixbins));
  
@@ -382,7 +415,7 @@ index c5c8a86..0136754 100644
  
      d->ep_frame_div++;
  
-@@ -630,6 +841,9 @@ static void se_frame(MCPXAPUState *d)
+@@ -630,6 +867,9 @@ static void se_frame(MCPXAPUState *d)
  static void *mcpx_apu_frame_thread(void *arg)
  {
      MCPXAPUState *d = MCPX_APU_DEVICE(arg);
@@ -392,7 +425,7 @@ index c5c8a86..0136754 100644
      qemu_mutex_lock(&d->lock);
  
      while (!qatomic_read(&d->exiting)) {
-@@ -695,9 +909,16 @@ static void *mcpx_apu_frame_thread(void *arg)
+@@ -695,9 +935,16 @@ static void *mcpx_apu_frame_thread(void *arg)
           * thread starved there indefinitely: Burnout 3 froze on its vehicle
           * select, blocked in voice_lock at raised IRQL, which in turn held
           * off every USB interrupt. */
@@ -412,7 +445,7 @@ index c5c8a86..0136754 100644
      }
  
      qemu_mutex_unlock(&d->lock);
-@@ -845,27 +1066,27 @@ void mcpx_apu_dispatch_mmio(MCPXAPUState *d, hwaddr addr, uint64_t val,
+@@ -845,27 +1092,27 @@ void mcpx_apu_dispatch_mmio(MCPXAPUState *d, hwaddr addr, uint64_t val,
          /* VP region */
          hwaddr vp_addr = addr - 0x20000;
          if (is_write) {
@@ -445,10 +478,17 @@ index c5c8a86..0136754 100644
      }
  }
 diff --git a/src/apu/apu_dsp.c b/src/apu/apu_dsp.c
-index 5f65480..4db60f4 100644
+index 5f65480..97003c2 100644
 --- a/src/apu/apu_dsp.c
 +++ b/src/apu/apu_dsp.c
-@@ -30,12 +30,14 @@
+@@ -24,18 +24,21 @@
+ #include "apu_state.h"
+ #include "apu.h"
+ #include "fpconv.h"
++#include "apu_xaudio2.h"
+ 
+ #include "dsp/dsp.h"
+ #include "dsp/dsp_dma.h"
  #include "dsp/dsp_state.h"
  #include "dsp/debug.h"
  
@@ -463,7 +503,7 @@ index 5f65480..4db60f4 100644
  
  static uint8_t *dsp_ram_address(uint64_t physical, uint32_t bytes)
  {
-@@ -44,6 +46,15 @@ static uint8_t *dsp_ram_address(uint64_t physical, uint32_t bytes)
+@@ -44,6 +47,15 @@ static uint8_t *dsp_ram_address(uint64_t physical, uint32_t bytes)
      return xbox_ApuPhysicalPointer(physical, bytes);
  }
  
@@ -479,7 +519,7 @@ index 5f65480..4db60f4 100644
  /* ── Engine selection ────────────────────────────────────────────────────
   *
   * Default ON: the DSP56300 interpreter runs the guest-downloaded GP/EP
-@@ -144,7 +155,7 @@ void mcpx_apu_dsp_ack_frame(MCPXAPUState *d)
+@@ -144,7 +156,7 @@ void mcpx_apu_dsp_ack_frame(MCPXAPUState *d)
                          s_dsp_ack[i].offset, last);
                  exit(EXIT_FAILURE);
              }
@@ -488,7 +528,7 @@ index 5f65480..4db60f4 100644
              if (!base) continue;
              physical = (uint64_t)base + (s_dsp_ack[i].offset & 0xFFFu);
          }
-@@ -252,6 +263,33 @@ static void dsp_frame_stub(MCPXAPUState *d,
+@@ -252,6 +264,33 @@ static void dsp_frame_stub(MCPXAPUState *d,
      g_dbg.ep.cycles = 0;
  }
  
@@ -522,7 +562,7 @@ index 5f65480..4db60f4 100644
  /* ============================================================
   * Real GP/EP DSP56300 pipeline (ported from xemu gp_ep.c)
   * ============================================================ */
-@@ -298,13 +336,49 @@ static void scatter_gather_rw(MCPXAPUState *d, hwaddr sge_base,
+@@ -298,13 +337,49 @@ static void scatter_gather_rw(MCPXAPUState *d, hwaddr sge_base,
      unsigned int bytes_to_copy = TARGET_PAGE_SIZE - offset_in_page;
  
      (void)d;
@@ -577,7 +617,7 @@ index 5f65480..4db60f4 100644
  
          /* Diagnostic: force DSP payload writes to ordinary RAM instead of the
           * contiguous redirect, to test whether the write to the window is what
-@@ -319,10 +393,6 @@ static void scatter_gather_rw(MCPXAPUState *d, hwaddr sge_base,
+@@ -319,10 +394,6 @@ static void scatter_gather_rw(MCPXAPUState *d, hwaddr sge_base,
              }
          }
  
@@ -588,7 +628,7 @@ index 5f65480..4db60f4 100644
          if (dir) {
              static int nowrite = -1;
              if (nowrite < 0) nowrite = getenv("RECOMP_APU_DMA_NOWRITE") != NULL;
-@@ -344,10 +414,79 @@ static void scatter_gather_rw(MCPXAPUState *d, hwaddr sge_base,
+@@ -344,10 +415,79 @@ static void scatter_gather_rw(MCPXAPUState *d, hwaddr sge_base,
      }
  }
  
@@ -668,7 +708,7 @@ index 5f65480..4db60f4 100644
      scatter_gather_rw(d, d->regs[NV_PAPU_GPSADDR], d->regs[NV_PAPU_GPSMAXSGE],
                        ptr, addr, len, dir);
  }
-@@ -355,11 +494,32 @@ static void gp_scratch_rw(void *opaque, uint8_t *ptr, uint32_t addr, size_t len,
+@@ -355,11 +495,32 @@ static void gp_scratch_rw(void *opaque, uint8_t *ptr, uint32_t addr, size_t len,
  static void ep_scratch_rw(void *opaque, uint8_t *ptr, uint32_t addr, size_t len,
                            bool dir)
  {
@@ -701,7 +741,7 @@ index 5f65480..4db60f4 100644
  static uint32_t circular_scatter_gather_rw(MCPXAPUState *d, hwaddr sge_base,
                                             unsigned int max_sge, uint8_t *ptr,
                                             uint32_t base, uint32_t end,
-@@ -396,6 +556,7 @@ static uint32_t circular_scatter_gather_rw(MCPXAPUState *d, hwaddr sge_base,
+@@ -396,6 +557,7 @@ static uint32_t circular_scatter_gather_rw(MCPXAPUState *d, hwaddr sge_base,
  static void gp_fifo_rw(void *opaque, uint8_t *ptr, unsigned int index,
                         size_t len, bool dir)
  {
@@ -709,7 +749,7 @@ index 5f65480..4db60f4 100644
      MCPXAPUState *d = opaque;
      uint32_t base;
      uint32_t end;
-@@ -418,8 +579,12 @@ static void gp_fifo_rw(void *opaque, uint8_t *ptr, unsigned int index,
+@@ -418,8 +580,12 @@ static void gp_fifo_rw(void *opaque, uint8_t *ptr, unsigned int index,
  
      uint32_t cur = GET_MASK(d->regs[cur_reg], NV_PAPU_GPOFCUR0_VALUE);
  
@@ -723,7 +763,7 @@ index 5f65480..4db60f4 100644
      if (cur < base) {
          cur = base;
      }
-@@ -448,6 +613,7 @@ static bool ep_sink_samples(MCPXAPUState *d, uint8_t *ptr, size_t len)
+@@ -448,6 +614,7 @@ static bool ep_sink_samples(MCPXAPUState *d, uint8_t *ptr, size_t len)
  static void ep_fifo_rw(void *opaque, uint8_t *ptr, unsigned int index,
                         size_t len, bool dir)
  {
@@ -731,7 +771,7 @@ index 5f65480..4db60f4 100644
      MCPXAPUState *d = opaque;
      uint32_t base;
      uint32_t end;
-@@ -473,12 +639,15 @@ static void ep_fifo_rw(void *opaque, uint8_t *ptr, unsigned int index,
+@@ -473,12 +640,15 @@ static void ep_fifo_rw(void *opaque, uint8_t *ptr, unsigned int index,
      if (dir && index == 0) {
          bool did_sink = ep_sink_samples(d, ptr, len);
          if (did_sink) {
@@ -750,7 +790,7 @@ index 5f65480..4db60f4 100644
      /* DSP hangs if current >= end; but forces current >= base */
      if (cur >= end) {
          cur = cur % (end - base);
-@@ -619,10 +788,52 @@ void mcpx_apu_ep_write(void *opaque, hwaddr addr, uint64_t val, unsigned int siz
+@@ -619,10 +789,52 @@ void mcpx_apu_ep_write(void *opaque, hwaddr addr, uint64_t val, unsigned int siz
      }
  }
  
@@ -803,7 +843,7 @@ index 5f65480..4db60f4 100644
  
      /* Write VP results to the GP DSP MIXBUF */
      for (int mixbin = 0; mixbin < NUM_MIXBINS; mixbin++) {
-@@ -642,10 +853,16 @@ static void dsp_frame_engine(MCPXAPUState *d,
+@@ -642,10 +854,16 @@ static void dsp_frame_engine(MCPXAPUState *d,
          dsp_start_frame(d->gp.dsp);
          d->gp.dsp->core.is_idle = false;
          d->gp.dsp->core.cycle_count = 0;
@@ -821,7 +861,22 @@ index 5f65480..4db60f4 100644
          mcpx_apu_dsp_gp_runs++;
          if (!logged_gp) {
              logged_gp = true;
-@@ -675,8 +892,10 @@ static void dsp_frame_engine(MCPXAPUState *d,
+@@ -666,8 +884,12 @@ static void dsp_frame_engine(MCPXAPUState *d,
+         }
+     }
+ 
+-    /* Run EP */
+-    if ((d->ep.regs[NV_PAPU_EPRST] & NV_PAPU_GPRST_GPRST) &&
++    /* Run EP -- except with 5.1 output (xa2_set_output), which takes the
++     * GP's six channels itself: the EP then holds the title's AC-3 encoder,
++     * which needs a ROM the emulation lacks and spins through its whole
++     * budget (a second of every second), starving the frame thread. */
++    if (xa2_channels() != 6 &&
++        (d->ep.regs[NV_PAPU_EPRST] & NV_PAPU_GPRST_GPRST) &&
+         (d->ep.regs[NV_PAPU_EPRST] & NV_PAPU_GPRST_GPDSPRST)) {
+         if (d->ep_frame_div % 8 == 0) {
+             dsp_start_frame(d->ep.dsp);
+@@ -675,8 +897,10 @@ static void dsp_frame_engine(MCPXAPUState *d,
              d->ep.dsp->core.cycle_count = 0;
              do {
                  dsp_run(d->ep.dsp, 1000);
@@ -833,7 +888,7 @@ index 5f65480..4db60f4 100644
              mcpx_apu_dsp_ep_runs++;
              if (!logged_ep) {
                  logged_ep = true;
-@@ -734,7 +953,18 @@ void mcpx_apu_update_dsp_preference(MCPXAPUState *d)
+@@ -734,7 +958,18 @@ void mcpx_apu_update_dsp_preference(MCPXAPUState *d)
      }
  
      if (preference) {
@@ -1677,13 +1732,560 @@ index 7c36737..e60cfa1 100644
  
  void mcpx_apu_vp_reset(MCPXAPUState *d)
 diff --git a/src/apu/apu_xaudio2.c b/src/apu/apu_xaudio2.c
-index bc29ee9..295faa0 100644
+index bc29ee9..0b4d393 100644
 --- a/src/apu/apu_xaudio2.c
 +++ b/src/apu/apu_xaudio2.c
-@@ -193,6 +193,14 @@ int xa2_get_buffer_size(void)
+@@ -4,6 +4,17 @@
+  * Provides low-latency audio output via XAudio2 (Win7+).
+  * Called from the APU monitor frame to submit mixed samples.
+  * Falls back gracefully if XAudio2 is unavailable.
++ *
++ * The output (xa2_set_output, before xa2_init): stereo, mono, or 5.1 -- the
++ * title's own six channels -- and "auto", 7.1 or 5.1 when the Windows device
++ * has the speakers for it. 5.1 plays each channel on its own speaker, or
++ * folds it to stereo as the console's Dolby image does for its stereo
++ * outputs. 7.1 is the same six channels, each surround played on both the
++ * side and the back speaker of its side at -3 dB: the console mixes no more
++ * than 5.1, so the two pairs carry the same sound. Mono hears the average of
++ * left and right, as the console's mono. A device that goes
++ * (unplugged, an HDMI display changing mode) or a new Windows default is
++ * reopened from the audio thread, a second between tries.
+  */
+ 
+ #include <stdint.h>
+@@ -19,20 +30,34 @@
+ #define COBJMACROS
+ #include <windows.h>
+ #include <xaudio2.h>
++#include <mmdeviceapi.h>
+ 
+ #pragma comment(lib, "xaudio2.lib")
+ #pragma comment(lib, "ole32.lib")
+ 
+ #define XA2_SAMPLE_RATE   48000
+-#define XA2_CHANNELS      2
++#define XA2_MAX_CHANNELS  6
+ #define XA2_BUF_SAMPLES   1024
+ #define XA2_NUM_BUFS      16 /* queued packets of 256 frames = ~85ms headroom */
++#define XA2_RETRY_MS      1000
++
++/* The console's stereo downmix of 5.1: centre and the back pair at -3 dB, no LFE. */
++#define XA2_FOLD          0.7071f
++
++#define XA2_FRONT (SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT | SPEAKER_FRONT_CENTER | SPEAKER_LOW_FREQUENCY)
++#define XA2_BACK  (SPEAKER_BACK_LEFT | SPEAKER_BACK_RIGHT)
++#define XA2_SIDE  (SPEAKER_SIDE_LEFT | SPEAKER_SIDE_RIGHT)
+ 
++/* The speaker of each 5.1 source channel, in xa2_submit_samples' order. */
++static const DWORD k_xa2_speakers[6] = {SPEAKER_FRONT_LEFT, SPEAKER_FRONT_RIGHT, SPEAKER_FRONT_CENTER,
++                                        SPEAKER_LOW_FREQUENCY, SPEAKER_BACK_LEFT, SPEAKER_BACK_RIGHT};
+ 
+ static IXAudio2               *g_xa2 = NULL;
+ static IXAudio2MasteringVoice *g_xa2_master = NULL;
+ static IXAudio2SourceVoice    *g_xa2_source = NULL;
+-static int16_t                 g_xa2_bufs[XA2_NUM_BUFS][XA2_BUF_SAMPLES][2];
++static int16_t                 g_xa2_bufs[XA2_NUM_BUFS][XA2_BUF_SAMPLES][XA2_MAX_CHANNELS];
++static int                     g_xa2_mode = XA2_OUTPUT_STEREO;   /* resolved: never auto */
++static int                     g_xa2_channels = 2;
+ static int                     g_xa2_next_buf = 0;
+ static int                     g_xa2_initialized = 0;
+ static int                     g_xa2_frames_written = 0;
+@@ -41,88 +66,343 @@ static DWORD                   g_xa2_last_report;
+ static int                     g_xa2_started;
+ static int                     g_xa2_diagnostic;
+ 
+-int xa2_init(void)
++/* Device loss and default-device changes, flagged from XAudio2's and
++ * Windows' threads, acted on by the audio thread (xa2_submit_samples). */
++static volatile LONG           g_xa2_lost;
++static volatile LONG           g_xa2_default_changed;
++static DWORD                   g_xa2_retry_at;
++static int                     g_xa2_reopens;
++
++static const char *mode_name(int mode)
+ {
+-    HRESULT hr;
+-    int com_initialized;
+-    WAVEFORMATEX wfx = { 0 };
++    return mode == XA2_OUTPUT_SURROUND ? "5.1" : mode == XA2_OUTPUT_7_1 ? "7.1" : mode == XA2_OUTPUT_MONO ? "mono" :
++           mode == XA2_OUTPUT_AUTO ? "auto" : "stereo";
++}
+ 
+-    if (g_xa2_initialized) return 1;
++/* ── XAudio2's critical error: the device is gone ─────────────── */
+ 
+-    hr = CoInitializeEx(NULL, COINIT_MULTITHREADED);
+-    if (FAILED(hr) && hr != RPC_E_CHANGED_MODE) {
+-        fprintf(stderr, "[XA2] CoInitializeEx failed: 0x%08lX\n", hr);
+-        return 0;
++static void STDMETHODCALLTYPE engine_pass_start(IXAudio2EngineCallback *self) { (void)self; }
++static void STDMETHODCALLTYPE engine_pass_end(IXAudio2EngineCallback *self) { (void)self; }
++static void STDMETHODCALLTYPE engine_critical_error(IXAudio2EngineCallback *self, HRESULT error)
++{
++    (void)self;
++    fprintf(stderr, "[XA2] audio device lost (0x%08lX); reopening\n", error);
++    InterlockedExchange(&g_xa2_lost, 1);
++}
++static IXAudio2EngineCallbackVtbl g_engine_vtbl = {engine_pass_start, engine_pass_end, engine_critical_error};
++static IXAudio2EngineCallback g_engine_callback = {&g_engine_vtbl};
++
++/* ── Windows' default output device changing ──────────────────── */
++
++static const GUID k_clsid_device_enumerator =
++    {0xBCDE0395, 0xE52F, 0x467C, {0x8E, 0x3D, 0xC4, 0x57, 0x92, 0x91, 0x69, 0x2E}};
++static const GUID k_iid_device_enumerator =
++    {0xA95664D2, 0x9614, 0x4F35, {0xA7, 0x46, 0xDE, 0x8D, 0xB6, 0x36, 0x17, 0xE6}};
++static const GUID k_iid_notification_client =
++    {0x7991EEC9, 0x7E89, 0x4D85, {0x83, 0x90, 0x6C, 0x70, 0x3C, 0xEC, 0x60, 0xC0}};
++static IMMDeviceEnumerator *g_xa2_enumerator;
++
++static HRESULT STDMETHODCALLTYPE notify_query(IMMNotificationClient *self, REFIID riid, void **out)
++{
++    if (IsEqualIID(riid, &IID_IUnknown) || IsEqualIID(riid, &k_iid_notification_client)) {
++        *out = self;
++        return S_OK;
+     }
+-    com_initialized = SUCCEEDED(hr);
++    *out = NULL;
++    return E_NOINTERFACE;
++}
++static ULONG STDMETHODCALLTYPE notify_add_ref(IMMNotificationClient *self) { (void)self; return 1; }
++static ULONG STDMETHODCALLTYPE notify_release(IMMNotificationClient *self) { (void)self; return 1; }
++static HRESULT STDMETHODCALLTYPE notify_state(IMMNotificationClient *self, LPCWSTR id, DWORD state)
++{
++    (void)self; (void)id; (void)state;
++    return S_OK;
++}
++static HRESULT STDMETHODCALLTYPE notify_device(IMMNotificationClient *self, LPCWSTR id)
++{
++    (void)self; (void)id;
++    return S_OK;
++}
++static HRESULT STDMETHODCALLTYPE notify_default(IMMNotificationClient *self, EDataFlow flow, ERole role, LPCWSTR id)
++{
++    (void)self; (void)id;
++    if (flow == eRender && role == eConsole) InterlockedExchange(&g_xa2_default_changed, 1);
++    return S_OK;
++}
++static HRESULT STDMETHODCALLTYPE notify_property(IMMNotificationClient *self, LPCWSTR id, const PROPERTYKEY key)
++{
++    (void)self; (void)id; (void)key;
++    return S_OK;
++}
++static IMMNotificationClientVtbl g_notify_vtbl = {notify_query, notify_add_ref, notify_release, notify_state,
++                                                  notify_device, notify_device, notify_default, notify_property};
++static IMMNotificationClient g_notify_client = {&g_notify_vtbl};
++
++/* ── The device ───────────────────────────────────────────────── */
++
++static int device_has_surround(DWORD mask)
++{
++    return (mask & XA2_FRONT) == XA2_FRONT && ((mask & XA2_BACK) == XA2_BACK || (mask & XA2_SIDE) == XA2_SIDE);
++}
++
++/* 7.1: the front four, a back pair and a side pair. */
++static int device_has_eight(DWORD mask)
++{
++    return (mask & (XA2_FRONT | XA2_BACK | XA2_SIDE)) == (XA2_FRONT | XA2_BACK | XA2_SIDE);
++}
++
++/* The output index of `speaker` in `mask`: outputs follow the mask's bit order. */
++static int output_of(DWORD mask, DWORD speaker)
++{
++    int index = 0;
++    DWORD bit;
++    if (!(mask & speaker)) return -1;
++    for (bit = 1; bit < speaker; bit <<= 1)
++        if (mask & bit) index++;
++    return index;
++}
++
++/* How the source's channels reach the device's. 5.1: each on its own speaker
++ * (the back pair on the side pair when there is no back pair), or folded to
++ * the first two outputs; mono (or a one-channel device): the average of the
++ * left and right that stereo would have. */
++static void apply_matrix(void)
++{
++    float matrix[XA2_MAX_CHANNELS * 8];
++    XAUDIO2_VOICE_DETAILS details;
++    DWORD mask = 0;
++    UINT32 outputs, s;
++    int mono;
++
++    IXAudio2MasteringVoice_GetVoiceDetails(g_xa2_master, &details);
++    IXAudio2MasteringVoice_GetChannelMask(g_xa2_master, &mask);
++    outputs = details.InputChannels;
++    if (outputs > 8) outputs = 8;
++    mono = g_xa2_mode == XA2_OUTPUT_MONO || outputs == 1;
++    memset(matrix, 0, sizeof matrix);
++
++    if (g_xa2_channels == 6 && !mono && g_xa2_mode == XA2_OUTPUT_7_1 && device_has_eight(mask)) {
++        for (s = 0; s < 6; s++) {
++            DWORD speaker = k_xa2_speakers[s];
++            int o = output_of(mask, speaker);
++            float level = speaker & XA2_BACK ? XA2_FOLD : 1.0f;
++            if (o >= 0 && (UINT32)o < outputs) matrix[o * 6 + s] = level;
++            if (speaker & XA2_BACK) {
++                o = output_of(mask, speaker == SPEAKER_BACK_LEFT ? SPEAKER_SIDE_LEFT : SPEAKER_SIDE_RIGHT);
++                if (o >= 0 && (UINT32)o < outputs) matrix[o * 6 + s] = XA2_FOLD;
++            }
++        }
++        fprintf(stderr, "[XA2] output: 7.1, the surrounds on the side and back pairs (%u channels, mask 0x%lX)\n",
++                outputs, mask);
++    } else if (g_xa2_channels == 6 && !mono && device_has_surround(mask)) {
++        int no_back = (mask & XA2_BACK) != XA2_BACK;
++        for (s = 0; s < 6; s++) {
++            DWORD speaker = k_xa2_speakers[s];
++            int o;
++            if (no_back && speaker == SPEAKER_BACK_LEFT) speaker = SPEAKER_SIDE_LEFT;
++            if (no_back && speaker == SPEAKER_BACK_RIGHT) speaker = SPEAKER_SIDE_RIGHT;
++            o = output_of(mask, speaker);
++            if (o >= 0 && (UINT32)o < outputs) matrix[o * 6 + s] = 1.0f;
++        }
++        fprintf(stderr, "[XA2] output: 5.1 on the device's own speakers (%u channels, mask 0x%lX)\n",
++                outputs, mask);
++    } else if (g_xa2_channels == 6) {
++        static const float left[6] = {1, 0, XA2_FOLD, 0, XA2_FOLD, 0};
++        static const float right[6] = {0, 1, XA2_FOLD, 0, 0, XA2_FOLD};
++        for (s = 0; s < 6; s++) {
++            float l = left[s], r = right[s];
++            if (mono) l = r = (left[s] + right[s]) * 0.5f;
++            matrix[s] = l;
++            if (outputs > 1) matrix[6 + s] = r;
++        }
++        fprintf(stderr, "[XA2] output: 5.1 folded to %s (%u device channels)\n", mono ? "mono" : "stereo", outputs);
++    } else {
++        for (s = 0; s < 2; s++) {
++            matrix[s] = mono ? 0.5f : (s == 0);
++            if (outputs > 1) matrix[2 + s] = mono ? 0.5f : (s == 1);
++        }
++        fprintf(stderr, "[XA2] output: %s (%u device channels)\n", mono ? "mono" : "stereo", outputs);
++    }
++    IXAudio2SourceVoice_SetOutputMatrix(g_xa2_source, NULL, (UINT32)g_xa2_channels, outputs, matrix,
++                                        XAUDIO2_COMMIT_NOW);
++}
++
++static void close_device(void)
++{
++    if (g_xa2_source) {
++        IXAudio2SourceVoice_Stop(g_xa2_source, 0, XAUDIO2_COMMIT_NOW);
++        IXAudio2SourceVoice_FlushSourceBuffers(g_xa2_source);
++        g_xa2_source->lpVtbl->DestroyVoice(g_xa2_source);
++        g_xa2_source = NULL;
++    }
++    if (g_xa2_master) {
++        g_xa2_master->lpVtbl->DestroyVoice(g_xa2_master);
++        g_xa2_master = NULL;
++    }
++    if (g_xa2) {
++        IXAudio2_UnregisterForCallbacks(g_xa2, &g_engine_callback);
++        IXAudio2_Release(g_xa2);
++        g_xa2 = NULL;
++    }
++    g_xa2_started = 0;
++}
++
++/* The engine, the default device's mastering voice and the source voice in
++ * the run's format. 0 (and nothing open) when any fails. */
++static int open_device(int quiet)
++{
++    WAVEFORMATEXTENSIBLE format = { 0 };
++    HRESULT hr;
+ 
+     hr = XAudio2Create(&g_xa2, 0, XAUDIO2_DEFAULT_PROCESSOR);
+     if (FAILED(hr) || !g_xa2) {
+-        fprintf(stderr, "[XA2] XAudio2Create failed: 0x%08lX\n", hr);
+-        goto fail;
++        if (!quiet) fprintf(stderr, "[XA2] XAudio2Create failed: 0x%08lX\n", hr);
++        g_xa2 = NULL;
++        return 0;
+     }
++    IXAudio2_RegisterForCallbacks(g_xa2, &g_engine_callback);
+ 
++    /* Stereo and mono: two channels, which Windows takes to the device as it
++     * does any stereo. 5.1: the device's own channels, mapped by apply_matrix. */
+     hr = IXAudio2_CreateMasteringVoice(g_xa2, &g_xa2_master,
+-        XA2_CHANNELS, XA2_SAMPLE_RATE, 0, NULL, NULL, 0);
++        g_xa2_channels == 6 ? XAUDIO2_DEFAULT_CHANNELS : 2, XA2_SAMPLE_RATE, 0, NULL, NULL, 0);
+     if (FAILED(hr)) {
+-        fprintf(stderr, "[XA2] CreateMasteringVoice failed: 0x%08lX\n", hr);
+-        goto fail;
++        if (!quiet) fprintf(stderr, "[XA2] CreateMasteringVoice failed: 0x%08lX\n", hr);
++        close_device();
++        return 0;
+     }
+ 
+-    wfx.wFormatTag      = WAVE_FORMAT_PCM;
+-    wfx.nChannels       = XA2_CHANNELS;
+-    wfx.nSamplesPerSec  = XA2_SAMPLE_RATE;
+-    wfx.wBitsPerSample  = 16;
+-    wfx.nBlockAlign     = XA2_CHANNELS * 2;
+-    wfx.nAvgBytesPerSec = XA2_SAMPLE_RATE * wfx.nBlockAlign;
++    format.Format.wFormatTag      = g_xa2_channels == 6 ? WAVE_FORMAT_EXTENSIBLE : WAVE_FORMAT_PCM;
++    format.Format.nChannels       = (WORD)g_xa2_channels;
++    format.Format.nSamplesPerSec  = XA2_SAMPLE_RATE;
++    format.Format.wBitsPerSample  = 16;
++    format.Format.nBlockAlign     = (WORD)(g_xa2_channels * 2);
++    format.Format.nAvgBytesPerSec = XA2_SAMPLE_RATE * format.Format.nBlockAlign;
++    if (g_xa2_channels == 6) {
++        static const GUID pcm = {0x00000001, 0x0000, 0x0010, {0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71}};
++        format.Format.cbSize = sizeof format - sizeof format.Format;
++        format.Samples.wValidBitsPerSample = 16;
++        format.dwChannelMask = SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT | SPEAKER_FRONT_CENTER |
++                               SPEAKER_LOW_FREQUENCY | SPEAKER_BACK_LEFT | SPEAKER_BACK_RIGHT;
++        format.SubFormat = pcm;
++    }
+ 
+     hr = IXAudio2_CreateSourceVoice(g_xa2, &g_xa2_source,
+-        &wfx, 0, XAUDIO2_DEFAULT_FREQ_RATIO, NULL, NULL, NULL);
++        &format.Format, 0, XAUDIO2_DEFAULT_FREQ_RATIO, NULL, NULL, NULL);
+     if (FAILED(hr)) {
+-        fprintf(stderr, "[XA2] CreateSourceVoice failed: 0x%08lX\n", hr);
+-        goto fail;
++        if (!quiet) fprintf(stderr, "[XA2] CreateSourceVoice failed: 0x%08lX\n", hr);
++        g_xa2_source = NULL;
++        close_device();
++        return 0;
+     }
+-
++    apply_matrix();
+     g_xa2_next_buf = 0;
++    g_xa2_started = 0;
++    return 1;
++}
++
++/* ── Choosing the output ──────────────────────────────────────── */
++
++/* Whether the default device has the speakers for 5.1, asked on a thread of
++ * its own so the caller's COM apartment is left as it was. */
++static DWORD WINAPI probe_thread(LPVOID result)
++{
++    IXAudio2 *xa = NULL;
++    IXAudio2MasteringVoice *master = NULL;
++    DWORD mask = 0;
++    HRESULT co = CoInitializeEx(NULL, COINIT_MULTITHREADED);
++    if (SUCCEEDED(XAudio2Create(&xa, 0, XAUDIO2_DEFAULT_PROCESSOR)) && xa) {
++        if (SUCCEEDED(IXAudio2_CreateMasteringVoice(xa, &master, XAUDIO2_DEFAULT_CHANNELS, XA2_SAMPLE_RATE,
++                                                    0, NULL, NULL, 0))) {
++            IXAudio2MasteringVoice_GetChannelMask(master, &mask);
++            master->lpVtbl->DestroyVoice(master);
++        }
++        IXAudio2_Release(xa);
++    }
++    if (SUCCEEDED(co)) CoUninitialize();
++    *(DWORD *)result = mask;
++    return 0;
++}
++
++int xa2_set_output(int mode)
++{
++    if (mode == XA2_OUTPUT_AUTO) {
++        DWORD mask = 0;
++        HANDLE thread = CreateThread(NULL, 0, probe_thread, &mask, 0, NULL);
++        if (thread) {
++            WaitForSingleObject(thread, 5000);
++            CloseHandle(thread);
++        }
++        mode = device_has_eight(mask) ? XA2_OUTPUT_7_1 :
++               device_has_surround(mask) ? XA2_OUTPUT_SURROUND : XA2_OUTPUT_STEREO;
++        fprintf(stderr, "[XA2] output auto: the device's speakers (mask 0x%lX) -> %s\n", mask, mode_name(mode));
++    }
++    if (mode != XA2_OUTPUT_SURROUND && mode != XA2_OUTPUT_7_1 && mode != XA2_OUTPUT_MONO) mode = XA2_OUTPUT_STEREO;
++    g_xa2_mode = mode;
++    g_xa2_channels = mode == XA2_OUTPUT_SURROUND || mode == XA2_OUTPUT_7_1 ? 6 : 2;
++    return mode;
++}
++
++int xa2_output(void)
++{
++    return g_xa2_mode;
++}
++
++int xa2_init(void)
++{
++    HRESULT hr;
++    int com_initialized;
++
++    if (g_xa2_initialized) return 1;
++
++    hr = CoInitializeEx(NULL, COINIT_MULTITHREADED);
++    if (FAILED(hr) && hr != RPC_E_CHANGED_MODE) {
++        fprintf(stderr, "[XA2] CoInitializeEx failed: 0x%08lX\n", hr);
++        return 0;
++    }
++    com_initialized = SUCCEEDED(hr);
++
++    if (!open_device(0)) {
++        /* Failed initialization still runs on the COM-initializing thread. */
++        if (com_initialized) CoUninitialize();
++        return 0;
++    }
++
++    /* Told when Windows' default output changes, to follow it. */
++    if (SUCCEEDED(CoCreateInstance(&k_clsid_device_enumerator, NULL, CLSCTX_ALL, &k_iid_device_enumerator,
++                                   (void **)&g_xa2_enumerator)) && g_xa2_enumerator) {
++        if (FAILED(IMMDeviceEnumerator_RegisterEndpointNotificationCallback(g_xa2_enumerator, &g_notify_client))) {
++            IMMDeviceEnumerator_Release(g_xa2_enumerator);
++            g_xa2_enumerator = NULL;
++        }
++    }
++
+     g_xa2_initialized = 1;
+     g_xa2_frames_written = 0;
+     g_xa2_empty_queue_events = 0;
+     g_xa2_last_report = 0;
+-    g_xa2_started = 0;
++    g_xa2_lost = 0;
++    g_xa2_default_changed = 0;
+     g_xa2_diagnostic = getenv("RECOMP_APU_DIAG") != NULL;
+ 
+-    fprintf(stderr, "[XA2] XAudio2 initialized (%d Hz stereo 16-bit, %d x %d-sample buffers)\n",
+-            XA2_SAMPLE_RATE, XA2_NUM_BUFS, XA2_BUF_SAMPLES);
++    fprintf(stderr, "[XA2] XAudio2 initialized (%d Hz %s 16-bit, %d x %d-sample buffers)\n",
++            XA2_SAMPLE_RATE, mode_name(g_xa2_mode), XA2_NUM_BUFS, XA2_BUF_SAMPLES);
+     return 1;
+-
+-fail:
+-    xa2_shutdown();
+-    /* Failed initialization still runs on the COM-initializing thread. */
+-    if (com_initialized) CoUninitialize();
+-    return 0;
+ }
+ 
+ void xa2_shutdown(void)
+ {
+-    if (g_xa2_source) {
+-        IXAudio2SourceVoice_Stop(g_xa2_source, 0, XAUDIO2_COMMIT_NOW);
+-        IXAudio2SourceVoice_FlushSourceBuffers(g_xa2_source);
+-        g_xa2_source->lpVtbl->DestroyVoice(g_xa2_source);
+-        g_xa2_source = NULL;
+-    }
+-    if (g_xa2_master) {
+-        g_xa2_master->lpVtbl->DestroyVoice(g_xa2_master);
+-        g_xa2_master = NULL;
+-    }
+-    if (g_xa2) {
+-        IXAudio2_Release(g_xa2);
+-        g_xa2 = NULL;
++    if (g_xa2_enumerator) {
++        IMMDeviceEnumerator_UnregisterEndpointNotificationCallback(g_xa2_enumerator, &g_notify_client);
++        IMMDeviceEnumerator_Release(g_xa2_enumerator);
++        g_xa2_enumerator = NULL;
+     }
++    close_device();
+ 
+     if (g_xa2_initialized)
+-        fprintf(stderr, "[XA2] Shut down (%d frames written)\n", g_xa2_frames_written);
++        fprintf(stderr, "[XA2] Shut down (%d frames written, %d device reopens)\n", g_xa2_frames_written,
++                g_xa2_reopens);
+     g_xa2_initialized = 0;
+-    g_xa2_started = 0;
+ }
+ 
+ int xa2_is_active(void)
+@@ -130,6 +410,43 @@ int xa2_is_active(void)
+     return g_xa2_initialized;
+ }
+ 
++/* The device lost, or a new default: closed, then reopened -- at once, and
++ * after that a second between tries, the samples meanwhile dropped. 1 with
++ * a device to play on. */
++static int follow_device(void)
++{
++    static int com_ready;
++    static DWORD test_at;
++    /* RECOMP_XA2_TEST_LOSS=<seconds> (test): the device taken as lost every
++     * that many seconds, as an unplugged one is. */
++    if (!test_at) {
++        const char *test = getenv("RECOMP_XA2_TEST_LOSS");
++        test_at = test && atoi(test) > 0 ? GetTickCount() + (DWORD)atoi(test) * 1000 : 0xFFFFFFFFu;
++    }
++    if (test_at != 0xFFFFFFFFu && (LONG)(GetTickCount() - test_at) >= 0) {
++        test_at += (DWORD)atoi(getenv("RECOMP_XA2_TEST_LOSS")) * 1000;
++        fprintf(stderr, "[XA2] test: device lost\n");
++        InterlockedExchange(&g_xa2_lost, 1);
++    }
++    if (InterlockedExchange(&g_xa2_lost, 0) | InterlockedExchange(&g_xa2_default_changed, 0)) {
++        close_device();
++        g_xa2_retry_at = GetTickCount();
++    }
++    if (g_xa2_source) return 1;
++    if ((LONG)(GetTickCount() - g_xa2_retry_at) < 0) return 0;
++    if (!com_ready) {
++        HRESULT hr = CoInitializeEx(NULL, COINIT_MULTITHREADED);
++        com_ready = SUCCEEDED(hr) || hr == RPC_E_CHANGED_MODE;
++    }
++    if (open_device(1)) {
++        g_xa2_reopens++;
++        fprintf(stderr, "[XA2] audio device reopened (%s)\n", mode_name(g_xa2_mode));
++        return 1;
++    }
++    g_xa2_retry_at = GetTickCount() + XA2_RETRY_MS;
++    return 0;
++}
++
+ /* Submit a buffer of mixed samples to XAudio2.
+  * Called from APU frame thread. Returns 1 if buffer was submitted. */
+ int xa2_submit_samples(const int16_t *samples, int num_samples)
+@@ -139,11 +456,11 @@ int xa2_submit_samples(const int16_t *samples, int num_samples)
+     int idx;
+     HRESULT hr;
+ 
+-    if (!g_xa2_initialized || !g_xa2_source ||
+-        !samples || num_samples <= 0 || num_samples > XA2_BUF_SAMPLES) {
++    if (!g_xa2_initialized || !samples || num_samples <= 0 || num_samples > XA2_BUF_SAMPLES) {
+         fprintf(stderr, "[XA2] invalid submission or inactive output; audio output stopped\n");
+         return -1;
+     }
++    if (!follow_device()) return 0;
+ 
+     IXAudio2SourceVoice_GetState(g_xa2_source, &state, XAUDIO2_VOICE_NOSAMPLESPLAYED);
+     if ((int)state.BuffersQueued >= XA2_NUM_BUFS) return 0;
+@@ -163,16 +480,19 @@ int xa2_submit_samples(const int16_t *samples, int num_samples)
+     }
+ 
+     idx = g_xa2_next_buf;
+-    memcpy(g_xa2_bufs[idx], samples, num_samples * XA2_CHANNELS * sizeof(int16_t));
++    memcpy(g_xa2_bufs[idx], samples, num_samples * g_xa2_channels * sizeof(int16_t));
+ 
+     memset(&xbuf, 0, sizeof(xbuf));
+-    xbuf.AudioBytes = num_samples * XA2_CHANNELS * sizeof(int16_t);
++    xbuf.AudioBytes = num_samples * g_xa2_channels * sizeof(int16_t);
+     xbuf.pAudioData = (const BYTE *)g_xa2_bufs[idx];
+ 
+     hr = IXAudio2SourceVoice_SubmitSourceBuffer(g_xa2_source, &xbuf, NULL);
+     if (FAILED(hr)) {
+-        fprintf(stderr, "[XA2] SubmitSourceBuffer failed: 0x%08lX; audio output stopped\n", hr);
+-        return -1;
++        /* A device going makes this fail before (or without) the critical
++         * error: reopened as for one. */
++        fprintf(stderr, "[XA2] SubmitSourceBuffer failed: 0x%08lX; reopening the device\n", hr);
++        InterlockedExchange(&g_xa2_lost, 1);
++        return 0;
+     }
+ 
+     g_xa2_next_buf = (idx + 1) % XA2_NUM_BUFS;
+@@ -180,8 +500,9 @@ int xa2_submit_samples(const int16_t *samples, int num_samples)
+     if (!g_xa2_started) {
+         hr = IXAudio2SourceVoice_Start(g_xa2_source, 0, XAUDIO2_COMMIT_NOW);
+         if (FAILED(hr)) {
+-            fprintf(stderr, "[XA2] Start after prefill failed: 0x%08lX\n", hr);
+-            return -1;
++            fprintf(stderr, "[XA2] Start after prefill failed: 0x%08lX; reopening the device\n", hr);
++            InterlockedExchange(&g_xa2_lost, 1);
++            return 0;
+         }
+         g_xa2_started = 1;
+     }
+@@ -193,12 +514,29 @@ int xa2_get_buffer_size(void)
      return XA2_BUF_SAMPLES;
  }
  
++int xa2_channels(void)
++{
++    return g_xa2_channels;
++}
++
 +int xa2_queued(void)
 +{
 +    XAUDIO2_VOICE_STATE state;
@@ -1694,24 +2296,65 @@ index bc29ee9..295faa0 100644
 +
  #else /* !_WIN32 -- POSIX stubs (no audio output yet) */
  
++int  xa2_set_output(int mode)                         { (void)mode; return XA2_OUTPUT_STEREO; }
++int  xa2_output(void)                                 { return XA2_OUTPUT_STEREO; }
  int  xa2_init(void)                                   { return 0; }
-@@ -200,5 +208,6 @@ void xa2_shutdown(void)                               {}
+ void xa2_shutdown(void)                               {}
  int  xa2_is_active(void)                              { return 0; }
  int  xa2_submit_samples(const int16_t *s, int n)      { (void)s; (void)n; return 0; }
  int  xa2_get_buffer_size(void)                        { return 0; }
 +int  xa2_queued(void)                                 { return -1; }
++int  xa2_channels(void)                               { return 2; }
  
  #endif /* _WIN32 */
 diff --git a/src/apu/apu_xaudio2.h b/src/apu/apu_xaudio2.h
-index 9f69bdf..ea5373f 100644
+index 9f69bdf..dc25383 100644
 --- a/src/apu/apu_xaudio2.h
 +++ b/src/apu/apu_xaudio2.h
-@@ -21,4 +21,7 @@ int xa2_submit_samples(const int16_t *samples, int num_samples);
+@@ -6,6 +6,25 @@
+ 
+ #include <stdint.h>
+ 
++/* The output: auto (7.1 or 5.1 when the Windows device has the speakers for
++ * it, otherwise stereo), stereo, 5.1 (the title's own six channels: front
++ * left, front right, centre, LFE, back left, back right), 7.1 (the same six,
++ * the surround pair spread over the side and back speakers), or mono. */
++#define XA2_OUTPUT_AUTO     0
++#define XA2_OUTPUT_STEREO   1
++#define XA2_OUTPUT_SURROUND 2
++#define XA2_OUTPUT_7_1      3
++#define XA2_OUTPUT_MONO     4
++
++/* Chooses the output, before xa2_init (stereo if never called), and returns
++ * it resolved: auto becomes stereo, 5.1 or 7.1. The console's audio setting
++ * should match it -- Dolby Digital for 5.1 and 7.1, mono for mono -- as the
++ * title mixes by it. */
++int xa2_set_output(int mode);
++
++/* The resolved output. */
++int xa2_output(void);
++
+ /* Initialize XAudio2. Returns 1 on success, 0 on failure. */
+ int xa2_init(void);
+ 
+@@ -15,10 +34,18 @@ void xa2_shutdown(void);
+ /* Returns 1 if XAudio2 is active. */
+ int xa2_is_active(void);
+ 
+-/* Submit interleaved stereo 16-bit frames: 1 accepted, 0 queue full, -1 error. */
++/* Submit interleaved 16-bit frames of xa2_channels() channels: 1 accepted,
++ * 0 queue full (or no device for now: one lost or changed is reopened from
++ * here), -1 error. */
+ int xa2_submit_samples(const int16_t *samples, int num_samples);
+ 
  /* Get the preferred buffer size in samples. */
  int xa2_get_buffer_size(void);
  
 +/* Packets submitted and not yet played, or -1 with no XAudio2 output. */
 +int xa2_queued(void);
++
++/* The source's channels: 6 for 5.1 and 7.1, otherwise 2. */
++int xa2_channels(void);
 +
  #endif /* APU_XAUDIO2_H */
 diff --git a/src/apu/dsp/dsp_cpu.c b/src/apu/dsp/dsp_cpu.c
@@ -4139,10 +4782,10 @@ index 6f8b112..3add01b 100644
              if (ResultLength) *ResultLength = sizeof(ULONG);
          }
 diff --git a/src/kernel/nv2a_gpu.h b/src/kernel/nv2a_gpu.h
-index b8d804a..8af3616 100644
+index b8d804a..610c082 100644
 --- a/src/kernel/nv2a_gpu.h
 +++ b/src/kernel/nv2a_gpu.h
-@@ -14,6 +14,49 @@ void nv2a_gpu_sync(void);
+@@ -14,6 +14,50 @@ void nv2a_gpu_sync(void);
  void nv2a_gpu_wait(void);
  void nv2a_gpu_flush(void);
  uint32_t nv2a_gpu_flip(const void *presented, size_t bytes, uint32_t va, uint32_t pitch);
@@ -4188,11 +4831,12 @@ index b8d804a..8af3616 100644
 + * program (the renderer's own when that cannot run). Any thread; from the
 + * next frame. */
 +void nv2a_gpu_set_taa(int mode);
++void nv2a_gpu_allow_dlaa(int allowed);
 +void nv2a_gpu_set_shadow_scale(int factor);
  void nv2a_gpu_surface_modified(const void *addr, size_t bytes);
  void nv2a_gpu_surface_publish(const void *addr, size_t bytes);
  void nv2a_gpu_invalidate(void);
-@@ -42,6 +85,8 @@ typedef struct Nv2aGpuTexture {
+@@ -42,6 +86,8 @@ typedef struct Nv2aGpuTexture {
  	uint32_t color_key;
  	uint32_t mip_levels;
  	uint32_t disabled; /* sampled by the stage program but the texture unit is off */
@@ -4201,7 +4845,7 @@ index b8d804a..8af3616 100644
  	float bump_matrix[4], bump_scale, bump_offset;
  	void *decode_context;
  	int (*decode)(void *, uint32_t, uint32_t, uint32_t *);
-@@ -96,6 +141,9 @@ typedef struct Nv2aGpuDraw {
+@@ -96,6 +142,9 @@ typedef struct Nv2aGpuDraw {
  	const uint32_t *vertex_valid;
  	const float (*vertex_constants)[4];
  	uint32_t vertex_start, fixed_transform, flat_shading;
@@ -4211,7 +4855,7 @@ index b8d804a..8af3616 100644
  	const uint32_t *indices;
  	uint32_t index_count;
  	uint32_t topology, point_size;
-@@ -111,11 +159,28 @@ typedef struct Nv2aGpuDraw {
+@@ -111,11 +160,29 @@ typedef struct Nv2aGpuDraw {
  	float light_infinite_direction[8][4];
  	float light_infinite_half_vector[8][4];
  	float light_spot_direction[8][4];    /* xyz = direction, w = spot cone parameter */
@@ -4234,14 +4878,15 @@ index b8d804a..8af3616 100644
 +int nv2a_pb_exec_batch_spans(float width);
  /* 1 = queued, 0 = use CPU clear, -1 = native resource failure. */
  int nv2a_gpu_clear(const Nv2aGpuDraw *state, uint32_t flags, uint32_t color, uint32_t depth);
-+/* Shadow maps as exact (float) depth, or the Xbox's 16-bit (see
-+ * exact_shadow_depth in nv2a_gpu_d3d11.cpp); from any thread. */
-+void nv2a_gpu_set_exact_shadows(int on);
++/* Shadows: 0 Xbox, 1 Enhanced (exact float depth), 2 Enhanced+ (also fades
++ * spill across indoor floors). The level and mode can change independently. */
++void nv2a_gpu_set_shadow_mode(int mode);
++void nv2a_gpu_set_shadow_indoor(int indoor);
  int nv2a_gpu_execute_state(const uint32_t program[136][4], const uint32_t valid[136], uint32_t start,
  						  const float attributes[16][4], float constants[192][4]);
  
 diff --git a/src/kernel/nv2a_gpu_d3d11.cpp b/src/kernel/nv2a_gpu_d3d11.cpp
-index f031faf..6be2cfd 100644
+index f031faf..781a72c 100644
 --- a/src/kernel/nv2a_gpu_d3d11.cpp
 +++ b/src/kernel/nv2a_gpu_d3d11.cpp
 @@ -1,6 +1,7 @@
@@ -4578,7 +5223,7 @@ index f031faf..6be2cfd 100644
  };
  
  struct CachedTexture {
-@@ -359,17 +599,240 @@ struct CachedTexture {
+@@ -359,17 +599,252 @@ struct CachedTexture {
  struct DepthSurface {
      uint8_t *memory;
      uint32_t width, height, pitch, format;
@@ -4755,15 +5400,21 @@ index f031faf..6be2cfd 100644
 + * colour) is drawn as float depth, unrounded and without the title's polygon
 + * offset (a tenth of a step, there for the rounding; exact, it would lift a
 + * body lying flat off its own shadow). Guest RAM still gets 16-bit depth.
-+ * nv2a_gpu_set_exact_shadows switches it (a map changes kind at its next
++ * nv2a_gpu_set_shadow_mode switches it (a map changes kind at its next
 + * draw, get_depth); RECOMP_SHADOW_EXACT=0/1 overrides that. Off is the 16-bit
 + * map, as the Xbox draws it. */
 +static std::set<const uint8_t *> shadow_map_targets;
-+static std::atomic<int> exact_shadows_setting{1};
++static std::atomic<int> shadow_mode{1};
++static std::atomic<bool> shadow_indoor{false};
 +
-+extern "C" void nv2a_gpu_set_exact_shadows(int on)
++extern "C" void nv2a_gpu_set_shadow_mode(int mode)
 +{
-+    exact_shadows_setting = on ? 1 : 0;
++    shadow_mode.store(mode, std::memory_order_relaxed);
++}
++
++extern "C" void nv2a_gpu_set_shadow_indoor(int indoor)
++{
++    shadow_indoor.store(indoor != 0, std::memory_order_relaxed);
 +}
 +
 +static bool exact_shadow_depth()
@@ -4772,7 +5423,13 @@ index f031faf..6be2cfd 100644
 +        const char *value = std::getenv("RECOMP_SHADOW_EXACT");
 +        return value ? (std::strcmp(value, "0") != 0 ? 1 : 0) : -1;
 +    }();
-+    return forced >= 0 ? forced != 0 : exact_shadows_setting.load() != 0;
++    return forced >= 0 ? forced != 0 : shadow_mode.load(std::memory_order_relaxed) != 0;
++}
++
++static bool balcony_shadow_fade(bool exact, uint32_t stage, uint32_t format)
++{
++    return exact && stage == 3 && format == 0x30 && shadow_mode.load(std::memory_order_relaxed) == 2 &&
++           shadow_indoor.load(std::memory_order_relaxed);
 +}
 +
 +static bool wants_exact_depth(const uint8_t *memory, uint32_t format)
@@ -4819,7 +5476,7 @@ index f031faf..6be2cfd 100644
  struct Constants {
      uint32_t control[4], misc[4], stages[8][4], final_input[4];
      uint32_t texture_control[4];
-@@ -399,6 +862,8 @@ struct Constants {
+@@ -399,6 +874,8 @@ struct Constants {
      float light_spot_direction[8][4];    /* xyz=direction, w=spot parameter */
      uint32_t texgen[4][4], texture_matrix_enable[4];
      uint32_t window_clip_control[4], window_clip_rects[8][4];
@@ -4828,7 +5485,7 @@ index f031faf..6be2cfd 100644
  };
  
  static_assert(sizeof(Constants) % 16 == 0 && sizeof(Constants) <= 65536, "D3D11 constant-buffer extent");
-@@ -406,6 +871,7 @@ static_assert(sizeof(Constants) % 16 == 0 && sizeof(Constants) <= 65536, "D3D11
+@@ -406,6 +883,7 @@ static_assert(sizeof(Constants) % 16 == 0 && sizeof(Constants) <= 65536, "D3D11
  static std::vector<Surface> surfaces;
  static std::vector<DepthSurface> depth_surfaces;
  static uint64_t surface_use_serial;
@@ -4836,7 +5493,7 @@ index f031faf..6be2cfd 100644
  static uint64_t target_content_serial;
  static std::vector<CachedTexture> textures;
  /* Bind-time lookup is limited to entries with the same guest source address.
-@@ -429,8 +895,14 @@ struct DynamicStream {
+@@ -429,8 +907,14 @@ struct DynamicStream {
      ComPtr<ID3D11Buffer> buffer;
      UINT capacity = 0, used = 0;
      D3D11_MAPPED_SUBRESOURCE mapped = {};
@@ -4852,7 +5509,7 @@ index f031faf..6be2cfd 100644
  static std::array<DynamicStream,2> vertex_streams;
  static DynamicStream constant_stream;
  static DynamicStream index_stream;
-@@ -470,6 +942,7 @@ struct VertexVariant {
+@@ -470,6 +954,7 @@ struct VertexVariant {
      std::vector<uint32_t> key;
      ComPtr<ID3D11VertexShader> shader;
      ComPtr<ID3D11InputLayout> layout;
@@ -4860,7 +5517,7 @@ index f031faf..6be2cfd 100644
      uint64_t last_used, bytecode_bytes;
  };
  static std::vector<VertexVariant> vertex_variants;
-@@ -564,7 +1037,9 @@ static std::string vertex_program_source(const std::vector<uint32_t> &key, bool
+@@ -564,7 +1049,9 @@ static std::string vertex_program_source(const std::vector<uint32_t> &key, bool
              source += "input.attribute" + std::to_string(attribute) + "=stateAttributes[" + std::to_string(attribute) + "];\n";
      } else source += "Pixel vs_guest(GuestVertex input) {\n";
      source += "float4 temporary[13]; float4 outputs[16]; int address=0;\n";
@@ -4871,7 +5528,7 @@ index f031faf..6be2cfd 100644
      for (size_t instruction = 0; instruction < key.size(); instruction += 4) {
          const uint32_t *words = key.data() + instruction;
          uint32_t mac = (words[1] >> 21) & 15, ilu = (words[1] >> 25) & 7;
-@@ -632,47 +1107,167 @@ static std::string vertex_program_source(const std::vector<uint32_t> &key, bool
+@@ -632,47 +1119,167 @@ static std::string vertex_program_source(const std::vector<uint32_t> &key, bool
          }
          source += "}\n";
      }
@@ -5073,7 +5730,7 @@ index f031faf..6be2cfd 100644
  }
  
  extern "C" int nv2a_gpu_execute_state(const uint32_t program[136][4], const uint32_t valid[136], uint32_t start,
-@@ -695,8 +1290,8 @@ extern "C" int nv2a_gpu_execute_state(const uint32_t program[136][4], const uint
+@@ -695,8 +1302,8 @@ extern "C" int nv2a_gpu_execute_state(const uint32_t program[136][4], const uint
          std::string source = vertex_program_source(variant.key, true);
          if (source.empty()) return 0;
          ComPtr<ID3DBlob> code, errors;
@@ -5084,7 +5741,7 @@ index f031faf..6be2cfd 100644
          if (FAILED(result)) {
              std::fprintf(stderr, "[GPU-D3D11] state compile: %s\n", errors ? (const char *)errors->GetBufferPointer() : "failed");
              return 0;
-@@ -738,6 +1333,269 @@ extern "C" int nv2a_gpu_execute_state(const uint32_t program[136][4], const uint
+@@ -738,6 +1345,269 @@ extern "C" int nv2a_gpu_execute_state(const uint32_t program[136][4], const uint
      return 1;
  }
  
@@ -5354,7 +6011,7 @@ index f031faf..6be2cfd 100644
  static ID3D11PixelShader *get_pixel_shader(const Nv2aGpuDraw &state, uint32_t window_clip_mode)
  {
      ShaderVariant variant = {};
-@@ -753,14 +1611,30 @@ static ID3D11PixelShader *get_pixel_shader(const Nv2aGpuDraw &state, uint32_t wi
+@@ -753,14 +1623,30 @@ static ID3D11PixelShader *get_pixel_shader(const Nv2aGpuDraw &state, uint32_t wi
          variant.key[4+stage*4] = state.combiners.rgb_input[stage]; variant.key[5+stage*4] = state.combiners.alpha_input[stage];
          variant.key[6+stage*4] = state.combiners.rgb_output[stage]; variant.key[7+stage*4] = state.combiners.alpha_output[stage];
      }
@@ -5386,7 +6043,7 @@ index f031faf..6be2cfd 100644
      values[0] = std::to_string(variant.key[0] & 255u) + "u";
      values[1] = std::to_string(variant.key[0]) + "u"; values[2] = std::to_string(variant.key[1]) + "u";
      values[3] = std::to_string(variant.key[2]) + "u"; values[4] = std::to_string(variant.key[3]) + "u";
-@@ -782,27 +1656,38 @@ static ID3D11PixelShader *get_pixel_shader(const Nv2aGpuDraw &state, uint32_t wi
+@@ -782,27 +1668,38 @@ static ID3D11PixelShader *get_pixel_shader(const Nv2aGpuDraw &state, uint32_t wi
      }
      values[6] += ")";
      values[7] = std::to_string(variant.key[42]) + "u";
@@ -5441,7 +6098,7 @@ index f031faf..6be2cfd 100644
  }
  
  template<typename SurfaceType>
-@@ -824,6 +1709,29 @@ static void mark_written_mask(SurfaceType &surface, const D3D11_BOX &region)
+@@ -824,6 +1721,29 @@ static void mark_written_mask(SurfaceType &surface, const D3D11_BOX &region)
      }
  }
  
@@ -5471,7 +6128,7 @@ index f031faf..6be2cfd 100644
  template<typename SurfaceType>
  static void mark_written_region(SurfaceType &surface, const D3D11_BOX &region)
  {
-@@ -831,6 +1739,10 @@ static void mark_written_region(SurfaceType &surface, const D3D11_BOX &region)
+@@ -831,6 +1751,10 @@ static void mark_written_region(SurfaceType &surface, const D3D11_BOX &region)
      if (!surface.dirty) {
          surface.written_region = region;
          surface.written_mask.clear();
@@ -5482,41 +6139,10 @@ index f031faf..6be2cfd 100644
      }
      else {
          auto &written = surface.written_region;
-@@ -916,26 +1828,168 @@ static void encode_depth_row(uint32_t format, const uint8_t *source, uint8_t *de
- template<typename SurfaceType>
- static bool prepare_surface_snapshot(SurfaceType &surface, uint32_t bytes)
- {
--    if (!surface.source_snapshot.empty()) return true;
--    const size_t budget = 64 * 1024 * 1024;
--    size_t required = (size_t)surface.width * surface.height * bytes;
--    size_t allocated = 0;
--    for (const auto &entry : surfaces) allocated += entry.source_snapshot.size();
--    for (const auto &entry : depth_surfaces) allocated += entry.source_snapshot.size();
--    if (required > budget - allocated) return false;
--    surface.source_snapshot.resize(required);
--    return true;
-+    if (!surface.source_snapshot.empty()) return true;
-+    const size_t budget = 64 * 1024 * 1024;
-+    size_t required = (size_t)surface.width * surface.height * bytes;
-+    size_t allocated = 0;
-+    for (const auto &entry : surfaces) allocated += entry.source_snapshot.size();
-+    for (const auto &entry : depth_surfaces) allocated += entry.source_snapshot.size();
-+    if (required > budget - allocated) return false;
-+    surface.source_snapshot.resize(required);
-+    return true;
-+}
-+
-+template<typename SurfaceType>
-+static bool surface_memory_matches(const SurfaceType &surface, uint32_t bytes)
-+{
-+    if (!surface.snapshot_valid || surface.dirty) return false;
-+    size_t row_bytes = (size_t)surface.width * bytes;
-+    for (uint32_t row = 0; row < surface.height; row++)
-+        if (std::memcmp(surface.memory + (size_t)row * surface.pitch,
-+                        surface.source_snapshot.data() + (size_t)row * row_bytes, row_bytes)) return false;
-+    return true;
-+}
-+
+@@ -938,6 +1862,148 @@ static bool surface_memory_matches(const SurfaceType &surface, uint32_t bytes)
+     return true;
+ }
+ 
 +/* Draw `source` onto a target of another size, nearest texel: colour onto a
 + * render target, or depth (the source's red channel, as SV_Depth) onto a depth
 + * view. Only `box` (target pixels) is written when one is given. This is the
@@ -5649,26 +6275,20 @@ index f031faf..6be2cfd 100644
 +    if (!is_scaled(surface)) return surface.texture.Get();
 +    scale_blit(surface.view.Get(), surface.resolve_target.Get(), nullptr, surface.width, surface.height);
 +    return surface.resolve.Get();
- }
- 
--template<typename SurfaceType>
--static bool surface_memory_matches(const SurfaceType &surface, uint32_t bytes)
++}
++
 +static ID3D11Texture2D *publish_source(DepthSurface &surface)
- {
--    if (!surface.snapshot_valid || surface.dirty) return false;
--    size_t row_bytes = (size_t)surface.width * bytes;
--    for (uint32_t row = 0; row < surface.height; row++)
--        if (std::memcmp(surface.memory + (size_t)row * surface.pitch,
--                        surface.source_snapshot.data() + (size_t)row * row_bytes, row_bytes)) return false;
--    return true;
++{
 +    resolve_depth(surface);
 +    if (!is_scaled(surface)) return surface.texture.Get();
 +    scale_blit(surface.sample_view.Get(), nullptr, surface.resolve_view.Get(), surface.width, surface.height);
 +    return surface.resolve.Get();
- }
- 
++}
++
  static void refresh_surface(Surface &surface)
-@@ -968,9 +2022,9 @@ static void refresh_surface(Surface &surface)
+ {
+     if (!surface.needs_refresh) return;
+@@ -968,9 +2034,9 @@ static void refresh_surface(Surface &surface)
                  std::memcpy(surface.source_snapshot.data() + (size_t)row * row_bytes + changed.left * 4,
                              surface.memory + (size_t)row * surface.pitch + changed.left * 4,
                              (size_t)(changed.right - changed.left) * 4);
@@ -5681,7 +6301,7 @@ index f031faf..6be2cfd 100644
              surface.alias_copy_serial = 0;
              gpu_timing.color_refreshed++;
              gpu_timing.color_refresh_bytes += (uint64_t)(changed.right - changed.left) * (changed.bottom - changed.top) * 4;
-@@ -979,7 +2033,7 @@ static void refresh_surface(Surface &surface)
+@@ -979,7 +2045,7 @@ static void refresh_surface(Surface &surface)
          surface.needs_refresh = false;
          return;
      }
@@ -5690,7 +6310,7 @@ index f031faf..6be2cfd 100644
      surface.clear_value_valid = false;
      surface.alias_copy_serial = 0;
      gpu_timing.color_refresh_bytes += (uint64_t)surface.width * surface.height * 4;
-@@ -1015,7 +2069,13 @@ static bool refresh_depth(DepthSurface &surface)
+@@ -1015,7 +2081,13 @@ static bool refresh_depth(DepthSurface &surface)
          encode_depth_row(surface.format, source, destination, surface.width);
      }
      context->Unmap(surface.staging.Get(), 0);
@@ -5705,7 +6325,7 @@ index f031faf..6be2cfd 100644
      surface.clear_value_valid = false;
      surface.needs_refresh = false;
      surface.snapshot_valid = false;
-@@ -1023,33 +2083,243 @@ static bool refresh_depth(DepthSurface &surface)
+@@ -1023,33 +2095,243 @@ static bool refresh_depth(DepthSurface &surface)
      return true;
  }
  
@@ -5959,7 +6579,7 @@ index f031faf..6be2cfd 100644
  }
  
  static DepthSurface *get_depth(const Nv2aGpuDraw &state, bool preserve = true, TargetExtent extent = {})
-@@ -1066,26 +2336,44 @@ static DepthSurface *get_depth(const Nv2aGpuDraw &state, bool preserve = true, T
+@@ -1066,26 +2348,44 @@ static DepthSurface *get_depth(const Nv2aGpuDraw &state, bool preserve = true, T
                       state.depth_pitch, extent.width, state.depth_format);
          return nullptr;
      }
@@ -6014,7 +6634,7 @@ index f031faf..6be2cfd 100644
      if (!target_operation_succeeded("depth", "create staging", device->CreateTexture2D(&description, nullptr, &surface.staging))) return nullptr;
      // Creation-data uploads can round D24 values; use the bit-preserving refresh path.
      surface.needs_refresh = preserve;
-@@ -1094,6 +2382,153 @@ static DepthSurface *get_depth(const Nv2aGpuDraw &state, bool preserve = true, T
+@@ -1094,6 +2394,153 @@ static DepthSurface *get_depth(const Nv2aGpuDraw &state, bool preserve = true, T
      return &depth_surfaces.back();
  }
  
@@ -6168,7 +6788,7 @@ index f031faf..6be2cfd 100644
  static void readback_failed(const char *kind, HRESULT result, const char *operation = "map")
  {
      std::fprintf(stderr, "[GPU-D3D11] readback failed: %s %s 0x%08X; device 0x%08X\n",
-@@ -1224,6 +2659,54 @@ static void wait_ordering_completion(void)
+@@ -1224,6 +2671,54 @@ static void wait_ordering_completion(void)
      }
  }
  
@@ -6223,7 +6843,7 @@ index f031faf..6be2cfd 100644
  static void gpu_sync_impl(bool publish, const void *only = nullptr, size_t only_bytes = 0)
  {
      GpuTimer sync_timer(gpu_timing.sync);
-@@ -1253,6 +2736,36 @@ static void gpu_sync_impl(bool publish, const void *only = nullptr, size_t only_
+@@ -1253,6 +2748,36 @@ static void gpu_sync_impl(bool publish, const void *only = nullptr, size_t only_
          }
          return;
      }
@@ -6260,7 +6880,7 @@ index f031faf..6be2cfd 100644
      ID3D11RenderTargetView *empty = nullptr;
      context->OMSetRenderTargets(1, &empty, nullptr);
      bool has_readback = false;
-@@ -1266,13 +2779,14 @@ static void gpu_sync_impl(bool publish, const void *only = nullptr, size_t only_
+@@ -1266,13 +2791,14 @@ static void gpu_sync_impl(bool publish, const void *only = nullptr, size_t only_
                      has_known_clear = true;
                      continue;
                  }
@@ -6277,7 +6897,7 @@ index f031faf..6be2cfd 100644
                      gpu_timing.color_copy_bytes += (uint64_t)surface.width * surface.height * 4;
                  }
                  has_readback = true;
-@@ -1284,7 +2798,7 @@ static void gpu_sync_impl(bool publish, const void *only = nullptr, size_t only_
+@@ -1284,7 +2810,7 @@ static void gpu_sync_impl(bool publish, const void *only = nullptr, size_t only_
                      has_known_clear = true;
                      continue;
                  }
@@ -6286,7 +6906,7 @@ index f031faf..6be2cfd 100644
                  has_readback = true;
              }
      }
-@@ -1659,12 +3173,13 @@ static bool stage_flip(const void *presented, size_t bytes, uint32_t va, uint32_
+@@ -1659,12 +3185,13 @@ static bool stage_flip(const void *presented, size_t bytes, uint32_t va, uint32_
  {
      Surface *surface = surface_for_memory(presented);
      if (!surface) return false;
@@ -6302,7 +6922,7 @@ index f031faf..6be2cfd 100644
      }
      if (!s_pending_flip.event) {
          D3D11_QUERY_DESC description = {D3D11_QUERY_EVENT, 0};
-@@ -1684,11 +3199,47 @@ static bool stage_flip(const void *presented, size_t bytes, uint32_t va, uint32_
+@@ -1684,11 +3211,47 @@ static bool stage_flip(const void *presented, size_t bytes, uint32_t va, uint32_
      return true;
  }
  
@@ -6350,7 +6970,7 @@ index f031faf..6be2cfd 100644
      if (!presented) { nv2a_gpu_flush(); return va; }
      uint32_t show = va;
      if (async_flip_enabled()) {
-@@ -1708,17 +3259,269 @@ extern "C" uint32_t nv2a_gpu_flip(const void *presented, size_t bytes, uint32_t
+@@ -1708,17 +3271,269 @@ extern "C" uint32_t nv2a_gpu_flip(const void *presented, size_t bytes, uint32_t
      } else {
          gpu_sync_impl(true, presented, bytes);
      }
@@ -6628,7 +7248,7 @@ index f031faf..6be2cfd 100644
  /* A GPU-engine blit wrote guest RAM a cached surface mirrors. Refresh only the
   * surfaces that overlap those bytes from guest RAM; never bump the global
   * texture-validation serial, which would re-upload GPU-only textures (UI). */
-@@ -1754,8 +3557,11 @@ static bool matches_color_target(const Surface &surface, const Nv2aGpuDraw &stat
+@@ -1754,8 +3569,11 @@ static bool matches_color_target(const Surface &surface, const Nv2aGpuDraw &stat
  
  static bool matches_depth_target(const DepthSurface &surface, const Nv2aGpuDraw &state, TargetExtent extent)
  {
@@ -6641,7 +7261,7 @@ index f031faf..6be2cfd 100644
  }
  
  static TargetExtent reusable_target_extent(const Nv2aGpuDraw &state)
-@@ -1894,12 +3700,30 @@ extern "C" int nv2a_gpu_clear(const Nv2aGpuDraw *state, uint32_t flags, uint32_t
+@@ -1894,12 +3712,30 @@ extern "C" int nv2a_gpu_clear(const Nv2aGpuDraw *state, uint32_t flags, uint32_t
          const float rgba[] = {(float)((color >> 16) & 255u) / 255.0f, (float)((color >> 8) & 255u) / 255.0f,
                                (float)(color & 255u) / 255.0f, (float)(color >> 24) / 255.0f};
          context->ClearRenderTargetView(surface->target.Get(), rgba);
@@ -6673,7 +7293,7 @@ index f031faf..6be2cfd 100644
      }
      if (surface) {
          mark_written_region(*surface, region);
-@@ -1908,7 +3732,7 @@ extern "C" int nv2a_gpu_clear(const Nv2aGpuDraw *state, uint32_t flags, uint32_t
+@@ -1908,7 +3744,7 @@ extern "C" int nv2a_gpu_clear(const Nv2aGpuDraw *state, uint32_t flags, uint32_t
      if (depth) {
          bool known = known_clears && !partial && (depth->format == 1 ? clear_depth :
              (clear_depth && clear_stencil) || depth->clear_value_valid);
@@ -6682,7 +7302,7 @@ index f031faf..6be2cfd 100644
              (clear_depth ? depth_value & 0xFFFFFF00u : depth->clear_value & 0xFFFFFF00u) |
              (clear_stencil ? depth_value & 255u : depth->clear_value & 255u);
          mark_written_region(*depth, region);
-@@ -1928,10 +3752,16 @@ static void release_stream(DynamicStream &stream)
+@@ -1928,10 +3764,16 @@ static void release_stream(DynamicStream &stream)
      }
  }
  
@@ -6703,7 +7323,7 @@ index f031faf..6be2cfd 100644
  static bool map_stream(DynamicStream &stream, UINT bytes, UINT bind, const char *kind, UINT &offset)
  {
      if (!stream.buffer || bytes > stream.capacity) {
-@@ -1953,18 +3783,18 @@ static bool map_stream(DynamicStream &stream, UINT bytes, UINT bind, const char
+@@ -1953,18 +3795,18 @@ static bool map_stream(DynamicStream &stream, UINT bytes, UINT bind, const char
          stream.capacity = capacity;
          stream.used = 0;
      }
@@ -6733,7 +7353,7 @@ index f031faf..6be2cfd 100644
          gpu_timing.stream_discards++;
      } else {
          gpu_timing.stream_appends++;
-@@ -2011,26 +3841,109 @@ static bool initialize_pipeline()
+@@ -2011,26 +3853,109 @@ static bool initialize_pipeline()
  static ComPtr<ID3D11Texture2D> feedback_texture;
  static ComPtr<ID3D11ShaderResourceView> feedback_view;
  
@@ -6852,7 +7472,7 @@ index f031faf..6be2cfd 100644
  }
  
  static ID3D11ShaderResourceView *default_white_view()
-@@ -2050,12 +3963,162 @@ static ID3D11ShaderResourceView *default_white_view()
+@@ -2050,12 +3975,162 @@ static ID3D11ShaderResourceView *default_white_view()
      return view.Get();
  }
  
@@ -6951,7 +7571,7 @@ index f031faf..6be2cfd 100644
 +
 +/* Receivers beyond the shadow light's depth range count as lit where no
 + * caster was drawn (see the shader's compare): on with the title's enhanced
-+ * shadows (nv2a_gpu_set_exact_shadows), off with its own, where the far sky
++ * shadow modes, off with the Xbox settings, where the far sky
 + * stays darkened over the map's footprint as on the Xbox.
 + * RECOMP_SHADOW_FAR_LIT=0/1 overrides that. */
 +static bool shadow_far_lit()
@@ -6960,7 +7580,7 @@ index f031faf..6be2cfd 100644
 +        const char *value = std::getenv("RECOMP_SHADOW_FAR_LIT");
 +        return value && *value ? (*value != '0' ? 1 : 0) : -1;
 +    }();
-+    return forced >= 0 ? forced != 0 : exact_shadows_setting.load() != 0;
++    return forced >= 0 ? forced != 0 : shadow_mode.load(std::memory_order_relaxed) != 0;
 +}
 +
 +/* Whether the shadow map get_texture last returned is exact (float depth). */
@@ -7015,7 +7635,7 @@ index f031faf..6be2cfd 100644
      static const bool mirror_aliases = []() {
          const char *setting = std::getenv("RECOMP_NV2A_GPU_ALIAS_COPIES");
          return !setting || std::strcmp(setting, "0") != 0;
-@@ -2153,14 +4216,22 @@ static ID3D11ShaderResourceView *get_texture(const Nv2aGpuTexture &binding, cons
+@@ -2153,14 +4228,22 @@ static ID3D11ShaderResourceView *get_texture(const Nv2aGpuTexture &binding, cons
              direct->needs_refresh = true;
              refresh_surface(*direct);
              if (direct->alias_copy_serial != alias_serial) {
@@ -7040,7 +7660,7 @@ index f031faf..6be2cfd 100644
                          context->CopySubresourceRegion(direct->texture.Get(), 0, box.left, box.top, 0,
                                                        surface.texture.Get(), 0, &box);
                          direct->clear_value_valid = false;
-@@ -2207,6 +4278,20 @@ static ID3D11ShaderResourceView *get_texture(const Nv2aGpuTexture &binding, cons
+@@ -2207,6 +4290,20 @@ static ID3D11ShaderResourceView *get_texture(const Nv2aGpuTexture &binding, cons
          nv2a_gpu_surface_publish(binding.source, binding.source_bytes);
      }
      if (direct) {
@@ -7061,7 +7681,7 @@ index f031faf..6be2cfd 100644
          direct->last_used = ++surface_use_serial;
          if (cloak_debug())
              std::fprintf(stderr, "[CLOAKDBG] direct src=%p %ux%u fmt=%X linear=%u pitch=%u; surf %ux%u pitch=%u dirty=%u needs_refresh=%u snapshot_valid=%u\n",
-@@ -2223,6 +4308,7 @@ static ID3D11ShaderResourceView *get_texture(const Nv2aGpuTexture &binding, cons
+@@ -2223,6 +4320,7 @@ static ID3D11ShaderResourceView *get_texture(const Nv2aGpuTexture &binding, cons
           * GPU stale data -- see RECOMP_SYNC_LIGHT. */
          if (!direct->dirty)
              refresh_surface(*direct);
@@ -7069,7 +7689,7 @@ index f031faf..6be2cfd 100644
          return direct->view.Get();
      }
      CachedTexture *refresh = nullptr;
-@@ -2397,6 +4483,20 @@ static ID3D11ShaderResourceView *get_texture(const Nv2aGpuTexture &binding, cons
+@@ -2397,6 +4495,20 @@ static ID3D11ShaderResourceView *get_texture(const Nv2aGpuTexture &binding, cons
      description.MipLevels = levels; description.ArraySize = faces; description.Format = format;
      description.MiscFlags = binding.cube ? D3D11_RESOURCE_MISC_TEXTURECUBE : 0;
      description.SampleDesc.Count = 1; description.BindFlags = D3D11_BIND_SHADER_RESOURCE;
@@ -7090,7 +7710,7 @@ index f031faf..6be2cfd 100644
      ComPtr<ID3D11Texture2D> texture;
      CachedTexture entry = {};
      entry.source = binding.source; entry.width = binding.width; entry.height = binding.height; entry.format = binding.format;
-@@ -2515,11 +4615,96 @@ static D3D11_TEXTURE_ADDRESS_MODE texture_address(uint32_t address)
+@@ -2515,11 +4627,96 @@ static D3D11_TEXTURE_ADDRESS_MODE texture_address(uint32_t address)
      }
  }
  
@@ -7187,7 +7807,7 @@ index f031faf..6be2cfd 100644
      if (minimum > 6 || maximum > 2) return false;
      D3D11_SAMPLER_DESC description = {};
      description.AddressU = texture_address(binding.address_u);
-@@ -2535,6 +4720,10 @@ static bool make_sampler(const Nv2aGpuTexture &binding, ComPtr<ID3D11SamplerStat
+@@ -2535,6 +4732,10 @@ static bool make_sampler(const Nv2aGpuTexture &binding, ComPtr<ID3D11SamplerStat
      description.MipLODBias = (float)bias / 256.0f;
      if (description.MipLODBias > D3D11_MIP_LOD_BIAS_MAX) return false;
      description.MaxAnisotropy = binding.control0_valid ? 1u << ((binding.control0 >> 4) & 3u) : 1u;
@@ -7198,7 +7818,7 @@ index f031faf..6be2cfd 100644
      if (description.MaxAnisotropy > 1) {
          if (maximum != 2 || (minimum != 2 && minimum != 6)) return false;
          description.Filter = D3D11_FILTER_ANISOTROPIC;
-@@ -2673,10 +4862,10 @@ static bool clear_target_rectangle(const Nv2aGpuDraw &state, Surface *surface, D
+@@ -2673,10 +4874,10 @@ static bool clear_target_rectangle(const Nv2aGpuDraw &state, Surface *surface, D
              "float4 ps():SV_Target{return clearColor;}";
          ClearPipeline created;
          ComPtr<ID3DBlob> vertex, pixel, errors;
@@ -7211,7 +7831,7 @@ index f031faf..6be2cfd 100644
                                  "ps", "ps_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &pixel, &errors);
          if (FAILED(result)) {
              std::fprintf(stderr, "[GPU-D3D11] rectangle clear shader compile: 0x%08X %s\n",
-@@ -2725,7 +4914,7 @@ static bool clear_target_rectangle(const Nv2aGpuDraw &state, Surface *surface, D
+@@ -2725,7 +4926,7 @@ static bool clear_target_rectangle(const Nv2aGpuDraw &state, Surface *surface, D
      const float constants[8] = {
          (float)((color >> 16) & 255u) / 255.0f, (float)((color >> 8) & 255u) / 255.0f,
          (float)(color & 255u) / 255.0f, (float)(color >> 24) / 255.0f,
@@ -7220,7 +7840,7 @@ index f031faf..6be2cfd 100644
              (float)(depth_value >> 8) / 16777215.0f, 0, 0, 0
      };
      D3D11_MAPPED_SUBRESOURCE mapped = {};
-@@ -2735,8 +4924,10 @@ static bool clear_target_rectangle(const Nv2aGpuDraw &state, Surface *surface, D
+@@ -2735,8 +4936,10 @@ static bool clear_target_rectangle(const Nv2aGpuDraw &state, Surface *surface, D
      context->Unmap(pipeline.constants.Get(), 0);
      ID3D11ShaderResourceView *empty[12] = {};
      context->PSSetShaderResources(0, 12, empty);
@@ -7233,7 +7853,7 @@ index f031faf..6be2cfd 100644
      context->OMSetBlendState(pipeline.blend[surface ? 1 : 0].Get(), nullptr, UINT_MAX);
      context->OMSetDepthStencilState(pipeline.depth[(clear_depth ? 1 : 0) | (clear_stencil ? 2 : 0)].Get(), depth_value & 255u);
      context->IASetInputLayout(nullptr);
-@@ -2747,8 +4938,13 @@ static bool clear_target_rectangle(const Nv2aGpuDraw &state, Surface *surface, D
+@@ -2747,8 +4950,13 @@ static bool clear_target_rectangle(const Nv2aGpuDraw &state, Surface *surface, D
      ID3D11Buffer *buffer = pipeline.constants.Get();
      context->VSSetConstantBuffers(0, 1, &buffer);
      context->PSSetConstantBuffers(0, 1, &buffer);
@@ -7249,7 +7869,7 @@ index f031faf..6be2cfd 100644
      context->RSSetState(pipeline.raster.Get());
      context->RSSetViewports(1, &viewport);
      context->RSSetScissorRects(1, &clip);
-@@ -2756,17 +4952,769 @@ static bool clear_target_rectangle(const Nv2aGpuDraw &state, Surface *surface, D
+@@ -2756,17 +4964,866 @@ static bool clear_target_rectangle(const Nv2aGpuDraw &state, Surface *surface, D
      return true;
  }
  
@@ -7346,6 +7966,12 @@ index f031faf..6be2cfd 100644
 + * after that point in the frame is drawn as the title draws it. RECOMP_TAA=1 turns it on at start
 + * (the setting from then on); RECOMP_TAA_TRACE=1 reports every 5 s. */
 +static std::atomic<int> taa_setting{-1};
++static std::atomic<bool> dlaa_allowed{true};
++
++extern "C" void nv2a_gpu_allow_dlaa(int allowed)
++{
++    dlaa_allowed.store(allowed != 0, std::memory_order_relaxed);
++}
 +
 +/* 0 off, 1 the TAA here, 2 NVIDIA DLSS (DLAA) through dlss_bridge.dll,
 + * which falls back to the TAA here when it cannot run. */
@@ -7376,6 +8002,7 @@ index f031faf..6be2cfd 100644
 +    UINT history_width = 0, history_height = 0;
 +    int history_index = 0;
 +    uint64_t history_frame = 0;   /* surface_frame_serial of the last resolve */
++    uint64_t dlaa_frame = 0;      /* last successful DLAA frame, independent of TAA */
 +    ComPtr<ID3D11Texture2D> input;   /* the scene as drawn, read while the scene is written */
 +    ComPtr<ID3D11ShaderResourceView> input_view;
 +    DynamicStream previous_stream;   /* each draw's previous constants (cbuffer b2) */
@@ -7692,6 +8319,18 @@ index f031faf..6be2cfd 100644
 +        "float4 sharpen(float4 p:SV_Position):SV_Target{\n"
 +        " int2 pixel=int2(p.xy),last=int2(size.xy)-1;\n"
 +        " float4 e=history.Load(int3(pixel,0));\n"
++        /* DLAA can retain old dynamic lighting over static geometry.
++           Limit its colour to the current frame's local range, with a
++           little tolerance for subpixel detail and reconstruction. */
++        " if(moving.w!=0){\n"
++        "  float4 here=current.Load(int3(pixel,0));\n"
++        "  float3 low=ycocg(here.rgb),high=low;\n"
++        "  [unroll]for(int y=-1;y<=1;y++)[unroll]for(int x=-1;x<=1;x++){\n"
++        "   float3 color=ycocg(current.Load(int3(clamp(pixel+int2(x,y),0,last),0)).rgb);\n"
++        "   low=min(low,color);high=max(high,color);\n"
++        "  }\n"
++        "  return float4(saturate(rgb(clamp(ycocg(e.rgb),low-0.02,high+0.02))),here.a);\n"
++        " }\n"
 +        " if(params.w<=0)return e;\n"
 +        " float3 b=history.Load(int3(clamp(pixel+int2(0,-1),0,last),0)).rgb,d=history.Load(int3(clamp(pixel+int2(-1,0),0,last),0)).rgb;\n"
 +        " float3 f=history.Load(int3(clamp(pixel+int2(1,0),0,last),0)).rgb,h=history.Load(int3(clamp(pixel+int2(0,1),0,last),0)).rgb;\n"
@@ -7825,7 +8464,70 @@ index f031faf..6be2cfd 100644
 +}
 +
 +/* The scene so far, blended with the frames before, written back into it. */
++static bool dlss_inputs_match(ID3D11Resource *color, ID3D11Resource *depth, ID3D11Resource *motion,
++                              ID3D11Resource *output, UINT width, UINT height)
++{
++    ID3D11Resource *resources[] = {color, depth, motion, output};
++    const DXGI_FORMAT formats[] = {DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R32_FLOAT,
++                                   DXGI_FORMAT_R16G16_FLOAT, DXGI_FORMAT_R16G16B16A16_FLOAT};
++    for (unsigned i = 0; i < 4; i++) {
++        ComPtr<ID3D11Texture2D> texture;
++        D3D11_TEXTURE2D_DESC description = {};
++        ID3D11Resource *resource = resources[i];
++        UINT binding = i == 3 ? D3D11_BIND_UNORDERED_ACCESS : D3D11_BIND_SHADER_RESOURCE;
++        if (!resource || FAILED(resource->QueryInterface(IID_PPV_ARGS(&texture)))) return false;
++        texture->GetDesc(&description);
++        if (description.Width != width || description.Height != height || description.SampleDesc.Count != 1 ||
++            description.Format != formats[i] || description.ArraySize != 1 ||
++            !(description.BindFlags & binding) || description.Usage != D3D11_USAGE_DEFAULT)
++            return false;
++    }
++    return true;
++}
++
++static bool dlss_frame_ready()
++{
++    return taa_setting.load(std::memory_order_relaxed) == 2 && dlaa_allowed.load(std::memory_order_relaxed) &&
++           dlss.state >= 0 && taa.motion_samples == 1 && taa_frame.motion_ready && taa_frame.scene_depth;
++}
++
++/* Opt-in fault isolation: on the same immediate context, finish queued
++ * commands before the NGX call, then separately wait for NGX to finish.
++ * The normal path never waits on these queries. */
++static bool dlss_gpu_check(const char *phase)
++{
++    static const bool enabled = [] {
++        const char *value = std::getenv("RECOMP_DLSS_SYNC");
++        return value && std::atoi(value) > 0;
++    }();
++    if (!enabled) return true;
++    static ComPtr<ID3D11Query> fence;
++    HRESULT result = S_OK;
++    if (!fence) {
++        D3D11_QUERY_DESC description = {D3D11_QUERY_EVENT, 0};
++        result = device->CreateQuery(&description, &fence);
++    }
++    if (SUCCEEDED(result)) {
++        context->End(fence.Get());
++        context->Flush();
++        ULONGLONG deadline = GetTickCount64() + 3000;
++        do {
++            result = context->GetData(fence.Get(), nullptr, 0, D3D11_ASYNC_GETDATA_DONOTFLUSH);
++            if (result != S_FALSE) break;
++            Sleep(1);
++        } while (GetTickCount64() < deadline);
++    }
++    if (result == S_OK) return true;
++    std::fprintf(stderr, "[DLSS] GPU check %s, frame %llu: query 0x%08X, device 0x%08X\n",
++                 phase, (unsigned long long)surface_frame_serial, (unsigned)result,
++                 (unsigned)device->GetDeviceRemovedReason());
++    std::fflush(stderr);
++    dlss.state = -1;
++    return false;
++}
++
 +enum { TAA_AT_2D, TAA_AT_SAMPLE, TAA_AT_FLIP };
++
 +static void taa_resolve(Surface &surface, int at)
 +{
 +    taa_frame.pending = false;
@@ -7840,31 +8542,46 @@ index f031faf..6be2cfd 100644
 +    bool reset = fresh || taa.history_frame + 1 != surface_frame_serial || !taa_frame.motion_ready;
 +    int read = taa.history_index, write = read ^ 1;
 +    bool by_dlss = false;
-+    if (taa_setting.load(std::memory_order_relaxed) == 2 && taa.motion_samples <= 1 && taa_frame.motion_ready &&
-+            taa_frame.scene_depth && dlss_ready()) {
++    if (dlss_frame_ready()) {
 +        DepthSurface *scene_depth = nullptr;
 +        for (auto &candidate : depth_surfaces)
 +            if (candidate.memory == taa_frame.scene_depth && candidate.texture && candidate.sample_view &&
-+                    candidate.texture_width == width && candidate.texture_height == height) {
++                candidate.texture_width == width && candidate.texture_height == height &&
++                candidate.used_frame == surface_frame_serial &&
++                (!scene_depth || candidate.last_used > scene_depth->last_used))
 +                scene_depth = &candidate;
-+                break;
-+            }
 +        ID3D11Texture2D *depth = scene_depth ? dlss_depth(scene_depth->sample_view.Get(), width, height) : nullptr;
 +        static float jitter_sign = 0.0f;
 +        if (jitter_sign == 0.0f) {
 +            const char *text = std::getenv("RECOMP_DLSS_JITTER_SIGN");
 +            jitter_sign = text && std::atof(text) < 0 ? -1.0f : 1.0f;
 +        }
-+        ULONGLONG now = GetTickCount64();
-+        float frame_ms = dlss.last_ms ? (float)(now - dlss.last_ms) : 16.7f;
-+        dlss.last_ms = now;
 +        ComPtr<ID3D11Resource> color;
 +        input->GetResource(&color);
-+        if (depth && color &&
-+                dlss.evaluate(context.Get(), color.Get(), depth, taa.motion.Get(), taa.history[write].Get(), width, height,
-+                              jitter_sign * taa_frame.jitter[0], jitter_sign * taa_frame.jitter[1],
-+                              -(float)width, -(float)height, reset ? 1 : 0, frame_ms))
-+            by_dlss = true;
++        /* Every input the scene's size and single-sampled, or the TAA here
++         * this frame: a scene redrawn at another size mid-frame (widescreen
++         * switching on as a cutscene ends) could leave the motion target the
++         * old size, and DLSS fed mismatched inputs hung the GPU. */
++        bool matching = dlss_inputs_match(color.Get(), depth, taa.motion.Get(), taa.history[write].Get(), width, height);
++        if (!matching) {
++            static unsigned reported;
++            if (reported++ < 8)
++                std::fprintf(stderr, "[DLSS] missing or incompatible scene inputs (%ux%u): TAA this frame\n", width, height);
++        }
++        bool dlss_reset = reset || taa.dlaa_frame + 1 != surface_frame_serial;
++        if (matching && dlss_gpu_check("before evaluation") && dlss_ready()) {
++            ULONGLONG now = GetTickCount64();
++            float frame_ms = dlss_reset || !dlss.last_ms ? 16.7f :
++                             std::clamp((float)(now - dlss.last_ms), 1.0f, 250.0f);
++            dlss.last_ms = now;
++            int evaluated = dlss.evaluate(context.Get(), color.Get(), depth, taa.motion.Get(), taa.history[write].Get(),
++                                          width, height, jitter_sign * taa_frame.jitter[0], jitter_sign * taa_frame.jitter[1],
++                                          -(float)width, -(float)height, dlss_reset ? 1 : 0, frame_ms);
++            if (dlss_gpu_check("after evaluation") && evaluated) {
++                by_dlss = true;
++                taa.dlaa_frame = surface_frame_serial;
++            }
++        }
 +    }
 +    {
 +        /* RECOMP_TAA_FEEDBACK: the history's weight held still (0.98);
@@ -7891,7 +8608,7 @@ index f031faf..6be2cfd 100644
 +        if (FAILED(context->Map(taa.parameters.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) return;
 +        float values[12] = {(float)width, (float)height, 1.0f / width, 1.0f / height,
 +                            reset ? 1.0f : 0.0f, feedback, clip, by_dlss ? 0.0f : sharpness, feedback_moving, 4.0f,
-+                            still_box, 0.0f};
++                            still_box, by_dlss ? 1.0f : 0.0f};
 +        std::memcpy(mapped.pData, values, sizeof values);
 +        context->Unmap(taa.parameters.Get(), 0);
 +    }
@@ -7922,7 +8639,7 @@ index f031faf..6be2cfd 100644
 +    context->PSSetShaderResources(0, 3, none);
 +    ID3D11RenderTargetView *scene_target = surface.target.Get();
 +    context->OMSetRenderTargets(1, &scene_target, nullptr);
-+    ID3D11ShaderResourceView *resolved[2] = {nullptr, taa.history_view[write].Get()};
++    ID3D11ShaderResourceView *resolved[2] = {by_dlss ? input : nullptr, taa.history_view[write].Get()};
 +    context->PSSetShaderResources(0, 2, resolved);
 +    context->PSSetShader(taa.sharpen.Get(), nullptr, 0);
 +    context->Draw(3, 0);
@@ -8021,7 +8738,7 @@ index f031faf..6be2cfd 100644
      if (state->topology > NV2A_GPU_TOPOLOGY_POINTS) return reject("primitive topology");
      uint32_t primitive_width = state->topology == NV2A_GPU_TOPOLOGY_TRIANGLES ? 3u :
                                 state->topology == NV2A_GPU_TOPOLOGY_LINES ? 2u : 1u;
-@@ -2775,7 +5723,7 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -2775,7 +5832,7 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
          (state->indices && element_count > NV2A_GPU_MAX_INDICES)) return reject("primitive element count");
      if (state->topology == NV2A_GPU_TOPOLOGY_POINTS && state->point_size && state->point_size != 8)
          return reject("non-unit point size");
@@ -8030,7 +8747,7 @@ index f031faf..6be2cfd 100644
          for (uint32_t index = 0; index < state->index_count; index++)
              if (state->indices[index] >= count) return reject("vertex index extent");
      }
-@@ -2856,12 +5804,25 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -2856,12 +5913,25 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
      for (uint32_t vertex = 0; !state->vertex_program && !state->fixed_transform && vertex < count; vertex++)
          if (!nv_cpu_finite(vertices[vertex].position[0]) || !nv_cpu_finite(vertices[vertex].position[1]) ||
              !nv_cpu_finite(vertices[vertex].position[2]) || !nv_cpu_finite(vertices[vertex].position[3])) return 0;
@@ -8058,7 +8775,7 @@ index f031faf..6be2cfd 100644
      D3D11_DEPTH_STENCIL_DESC depth_description = {};
      depth_description.DepthEnable = state->depth_enable != 0;
      depth_description.DepthWriteMask = state->depth_mask ? D3D11_DEPTH_WRITE_MASK_ALL : D3D11_DEPTH_WRITE_MASK_ZERO;
-@@ -2903,8 +5864,24 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -2903,8 +5973,24 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
                        (LONG)std::min(state->clip_y + state->clip_height, state->height)};
      if (state->topology == NV2A_GPU_TOPOLOGY_TRIANGLES && state->cull_enable && state->cull_face == 0x408) { clip.right = clip.left; clip.bottom = clip.top; }
      configure_window_clip(*state, constants, clip);
@@ -8084,7 +8801,7 @@ index f031faf..6be2cfd 100644
      constants.misc[1] = state->control0;
      constants.misc[2] = state->fixed_transform; constants.misc[3] = state->flat_shading;
      constants.final_input[0] = state->combiners.final_input[0]; constants.final_input[1] = state->combiners.final_input[1];
-@@ -2971,14 +5948,69 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -2971,14 +6057,69 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
              }
          }
      }
@@ -8156,7 +8873,7 @@ index f031faf..6be2cfd 100644
      for (uint32_t stage = 0; stage < 8; stage++) {
          constants.stages[stage][0] = state->combiners.rgb_input[stage]; constants.stages[stage][1] = state->combiners.alpha_input[stage];
          constants.stages[stage][2] = state->combiners.rgb_output[stage]; constants.stages[stage][3] = state->combiners.alpha_output[stage];
-@@ -3052,7 +6084,8 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -3052,7 +6193,8 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
              constants.texture_info[stage][3] = 0.0f;
              continue;
          }
@@ -8166,7 +8883,7 @@ index f031faf..6be2cfd 100644
              return reject("projective volume texture dimensionality");
          uint32_t sign_mask = binding.filter >> 28;
          uint32_t key_mode = binding.control0_valid ? binding.control0 & 3u : 0;
-@@ -3090,9 +6123,50 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -3090,9 +6232,50 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
              if ((mode == 1 || mode == 2) && vertices[vertex].texture[stage][3] == 0) return reject("zero projective texture coordinate");
          }
          if (!binding.source_bytes) return reject("missing texture data");
@@ -8219,7 +8936,7 @@ index f031faf..6be2cfd 100644
          constants.texture_info[stage][0] = (float)binding.width; constants.texture_info[stage][1] = (float)binding.height; constants.texture_info[stage][2] = (float)binding.linear;
          constants.texture_key[stage][0] = binding.color_key;
          constants.texture_key[stage][1] = binding.format == 0x03 || binding.format == 0x07 ||
-@@ -3102,7 +6176,16 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -3102,7 +6285,17 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
          constants.texture_info[stage][3] = (float)((binding.format == 0x1E ? 1u : 0u) | (binding.cube ? 2u : 0u) |
              (binding.address_u == 5 ? 4u : 0u) | (binding.address_v == 5 ? 8u : 0u) |
              (binding.control0_valid && (binding.control0 & 4u) ? 16u : 0u) |
@@ -8233,11 +8950,12 @@ index f031faf..6be2cfd 100644
 +                 binding.format == 0x2F ? 128u : 0u) |
 +                 (((binding.filter >> 24) & 15u) == 2u ? 2048u : 0u) : 0u) |
 +            (mapped_haze ? 8192u : 0u) |
-+            (binding.shadow && shadow_far_lit() ? 16384u : 0u));
++            (binding.shadow && shadow_far_lit() ? 16384u : 0u) |
++            (binding.shadow && balcony_shadow_fade(shadow_view_exact, stage, binding.format) ? 32768u : 0u));
          if (sign_mask) signed_texture_stages++;
          switch (binding.format) {
          case 0x01: case 0x16: case 0x17: case 0x1A: case 0x1B: case 0x20: case 0x28: case 0x29:
-@@ -3111,32 +6194,94 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -3111,32 +6304,94 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
          }
      }
      phase_timer.next_phase(gpu_timing.draw_streams);
@@ -8350,7 +9068,7 @@ index f031faf..6be2cfd 100644
                  !std::memcmp(&uploaded_constants, &constants, sizeof constants)) {
              /* Same constants as the last upload this frame: rebind its offset. */
              gpu_timing.constant_reuses++;
-@@ -3146,6 +6291,8 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -3146,6 +6401,8 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
              if (!map_stream(constant_stream, kConstantSlot, D3D11_BIND_CONSTANT_BUFFER, "constants", constants_offset))
                  return 0;
              std::memcpy((uint8_t *)constant_stream.mapped.pData + constants_offset, &constants, sizeof constants);
@@ -8359,7 +9077,7 @@ index f031faf..6be2cfd 100644
              constant_upload_offset = constants_offset;
              uploaded_constants = constants;
              uploaded_constants_valid = true;
-@@ -3170,20 +6317,35 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -3170,20 +6427,35 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
              constants.texture_key[stage][2] == 3u) uncombined = false;
      ID3D11PixelShader *program = uncombined ? uncombined_shader.Get() : get_pixel_shader(*state, constants.window_clip_control[0]);
      if (!program) return 0;
@@ -8399,7 +9117,7 @@ index f031faf..6be2cfd 100644
      context->OMSetDepthStencilState(depth_state.Get(), state->stencil_reference & 255u); context->OMSetBlendState(blending.Get(), blend_color, ~0u);
      context->IASetInputLayout(guest_vertex ? guest_vertex->layout.Get() : input_layout.Get()); context->IASetVertexBuffers(0, 1, buffers, &stride, &offset);
      context->IASetPrimitiveTopology(state->topology == NV2A_GPU_TOPOLOGY_LINES ? D3D11_PRIMITIVE_TOPOLOGY_LINELIST :
-@@ -3192,7 +6354,7 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -3192,7 +6464,7 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
      context->VSSetShader(guest_vertex ? guest_vertex->shader.Get() : vertex_shader.Get(), nullptr, 0);
      ID3D11GeometryShader *geometry = state->topology == NV2A_GPU_TOPOLOGY_LINES ? line_geometry_shader.Get() :
          state->topology == NV2A_GPU_TOPOLOGY_POINTS ? point_geometry_shader.Get() :
@@ -8408,7 +9126,7 @@ index f031faf..6be2cfd 100644
      context->GSSetShader(geometry, nullptr, 0);
      context->PSSetShader(program, nullptr, 0);
      if (constants_ring && context1) {
-@@ -3200,25 +6362,32 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -3200,25 +6472,32 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
          context1->VSSetConstantBuffers1(0, 1, &constant_ring_buffer, &first, &num);
          context1->PSSetConstantBuffers1(0, 1, &constant_ring_buffer, &first, &num);
          context1->GSSetConstantBuffers1(0, 1, &constant_ring_buffer, &first, &num);
@@ -8446,7 +9164,7 @@ index f031faf..6be2cfd 100644
      end_gpu_sample(sample);
      phase_timer.next_phase(gpu_timing.draw_bookkeeping);
      if (state->topology == NV2A_GPU_TOPOLOGY_LINES) gpu_timing.line_primitives += element_count / 2;
-@@ -3245,8 +6414,10 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -3245,8 +6524,10 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
          if (texture_matrix_used) gpu_timing.texture_matrix_draws++;
      }
      pending_draws = true;
@@ -8458,7 +9176,7 @@ index f031faf..6be2cfd 100644
      bool stencil_writes = state->stencil_enable && (state->stencil_write_mask & 255u) &&
          (state->stencil_fail != 0x1E00 || state->stencil_depth_fail != 0x1E00 || state->stencil_pass != 0x1E00);
      if (depth && ((state->depth_enable && state->depth_mask) || stencil_writes) && writes) mark_written_region(*depth, region);
-@@ -3260,8 +6431,8 @@ extern "C" int nv2a_gpu_compile(void)
+@@ -3260,8 +6541,8 @@ extern "C" int nv2a_gpu_compile(void)
      if (vertex_shader && uncombined_shader && geometry_shader && line_geometry_shader && point_geometry_shader) return 1;
      if (!nv2a_gpu_available()) return 0;
      ComPtr<ID3DBlob> pixel_code, errors;
@@ -8469,7 +9187,7 @@ index f031faf..6be2cfd 100644
      if (FAILED(result)) {
          std::fprintf(stderr, "[GPU-D3D11] shader compile: %s\n", errors ? (const char *)errors->GetBufferPointer() : "failed");
          return 0;
-@@ -3273,8 +6444,8 @@ extern "C" int nv2a_gpu_compile(void)
+@@ -3273,8 +6554,8 @@ extern "C" int nv2a_gpu_compile(void)
          return 0;
      }
      pixel_code.Reset(); errors.Reset();
@@ -8480,7 +9198,7 @@ index f031faf..6be2cfd 100644
      if (FAILED(result)) return 0;
      if (FAILED(device->CreatePixelShader(pixel_code->GetBufferPointer(), pixel_code->GetBufferSize(), nullptr, &uncombined_shader))) return 0;
      const struct { const char *entry; ComPtr<ID3D11GeometryShader> *shader; } geometries[] = {
-@@ -3282,8 +6453,8 @@ extern "C" int nv2a_gpu_compile(void)
+@@ -3282,8 +6563,8 @@ extern "C" int nv2a_gpu_compile(void)
      };
      for (const auto &geometry : geometries) {
          pixel_code.Reset(); errors.Reset();
@@ -8491,7 +9209,7 @@ index f031faf..6be2cfd 100644
          if (SUCCEEDED(result))
              result = device->CreateGeometryShader(pixel_code->GetBufferPointer(), pixel_code->GetBufferSize(), nullptr,
                                                     geometry.shader->ReleaseAndGetAddressOf());
-@@ -3296,28 +6467,98 @@ extern "C" int nv2a_gpu_compile(void)
+@@ -3296,28 +6577,98 @@ extern "C" int nv2a_gpu_compile(void)
      return 1;
  }
  
@@ -8596,7 +9314,7 @@ index f031faf..6be2cfd 100644
 \ No newline at end of file
 +}
 diff --git a/src/kernel/nv2a_gpu_shader.h b/src/kernel/nv2a_gpu_shader.h
-index e27083f..20987ee 100644
+index e27083f..c550aaf 100644
 --- a/src/kernel/nv2a_gpu_shader.h
 +++ b/src/kernel/nv2a_gpu_shader.h
 @@ -30,7 +30,12 @@ cbuffer State : register(b0) {
@@ -8622,7 +9340,7 @@ index e27083f..20987ee 100644
  };
  float fog_factor(float distance) {
   if(textureControl.z==0)return 1;
-@@ -93,6 +101,13 @@ float4 guest_multiply(float4 left,float4 right) {
+@@ -93,6 +101,37 @@ float4 guest_multiply(float4 left,float4 right) {
   return float4(left.x==0||right.x==0?0:left.x*right.x,left.y==0||right.y==0?0:left.y*right.y,
                 left.z==0||right.z==0?0:left.z*right.z,left.w==0||right.w==0?0:left.w*right.w);
  }
@@ -8633,10 +9351,34 @@ index e27083f..20987ee 100644
 +float3 guest_project(float4 coordinate) {
 + return guest_multiply(float4(coordinate.xyz,0),(1/coordinate.w).xxxx).xyz;
 +}
++/* Enhanced+ fades shadows that travel far enough downward to reach the
++   next floor. The full-strength range includes the height of a standing
++   guard, so its torso and legs can both cast a solid floor shadow. */
++float2 balcony_shadow_gap(float3 projected) {
++ float3 s=vertexConstants[144].xyz;
++ float3 t=vertexConstants[145].xyz;
++ float4 r=vertexConstants[146];
++ float4 q=vertexConstants[147];
++ float3 txq=cross(t,q.xyz);
++ float determinant=dot(s,txq);
++ if(!(abs(determinant)>1 && projected.z>0 && projected.z<65535))return 0;
++ /* Invert S,T,Q to recover the drop in world Y per unit of light depth. */
++ float down=-dot(float3(projected.xy,1),float3(txq.y,cross(q.xyz,s).y,cross(s,t).y))/determinant;
++ if(!(down>=0.8 && down<=1.2))return 0;
++ /* r/q = A-B/q. Recover q from r/q because the guest can scale all
++    projective coordinates together when interpolating across a face. */
++ float a=dot(r.xyz,q.xyz)/dot(q.xyz,q.xyz);
++ float b=a*q.w-r.w;
++ if(!(a>65535 && a<65635 && b>5900 && b<7300))return 0;
++ float lightDepth=b/(a-projected.z);
++ float2 distance=min(float2(3.1,3.65)/down,float2(3.9,4.5));
++ if(!(lightDepth>distance.y+0.01))return 0;
++ return b*distance/(lightDepth*(lightDepth-distance));
++}
  float guest_clip_w(float value) {
   if(!isfinite(value))return value;
   float magnitude=clamp(abs(value),5.421010862427522e-20,1.8446744073709552e19);
-@@ -106,6 +121,37 @@ float4 fixed_matrix(float4 value,uint firstRow) {
+@@ -106,6 +145,37 @@ float4 fixed_matrix(float4 value,uint firstRow) {
   }
   return result;
  }
@@ -8674,7 +9416,7 @@ index e27083f..20987ee 100644
  void fixed_eye_transform(Vertex input,out float4 position,out float3 normal) {
   uint mode=lightControl.z;
   uint count=mode==0?1:(mode+3)/2;
-@@ -136,10 +182,13 @@ float4 fixed_texcoord(float4 coordinate,uint stage,float4 objectPosition,float4
+@@ -136,10 +206,13 @@ float4 fixed_texcoord(float4 coordinate,uint stage,float4 objectPosition,float4
  #ifndef NV_FIXED_TRANSFORM
  #define NV_FIXED_TRANSFORM misc.z
  #endif
@@ -8689,7 +9431,7 @@ index e27083f..20987ee 100644
    float4 eyeSpacePosition;
    float3 eyeSpaceNormal;
    fixed_eye_transform(input,eyeSpacePosition,eyeSpaceNormal);
-@@ -221,6 +270,7 @@ Pixel vs_main(Vertex input) {
+@@ -221,6 +294,7 @@ Pixel vs_main(Vertex input) {
    transformed.xyz/=transformed.w;
    transformed.xy+=vertexConstants[59].xy;
    input.position=transformed;
@@ -8697,7 +9439,7 @@ index e27083f..20987ee 100644
   }
   input.position.w=guest_clip_w(input.position.w);
   output.position=float4((2*input.position.x/viewport.x-1)*input.position.w,
-@@ -230,10 +280,17 @@ Pixel vs_main(Vertex input) {
+@@ -230,10 +304,17 @@ Pixel vs_main(Vertex input) {
   output.tex0=input.tex0; output.tex1=input.tex1; output.tex2=input.tex2; output.tex3=input.tex3;
   output.depthW=input.position.w;
   output.depthZ=input.position.z;
@@ -8715,7 +9457,7 @@ index e27083f..20987ee 100644
  )HLSL" R"HLSL(
  [maxvertexcount(3)]
  void gs_main(triangle Pixel vertices[3],inout TriangleStream<Pixel> stream) {
-@@ -254,8 +311,18 @@ void gs_main(triangle Pixel vertices[3],inout TriangleStream<Pixel> stream) {
+@@ -254,8 +335,18 @@ void gs_main(triangle Pixel vertices[3],inout TriangleStream<Pixel> stream) {
    if(plane.z!=0)slope=max(abs(plane.x),abs(plane.y))/abs(plane.z);
    if(!isfinite(slope))slope=0;
   }
@@ -8734,7 +9476,7 @@ index e27083f..20987ee 100644
    result.depthSlope=slope;
    if(misc.w!=0) {result.diffuse=vertices[2].diffuse;result.specular=vertices[2].specular;}
    stream.Append(result);
-@@ -322,7 +389,44 @@ bool compare_alpha(uint function,uint incoming,uint reference) {
+@@ -322,7 +413,47 @@ bool compare_alpha(uint function,uint incoming,uint reference) {
   case 0x206:return incoming>=reference; default:return true;
   }
  }
@@ -8745,7 +9487,10 @@ index e27083f..20987ee 100644
 +float2 pixel_motion(Pixel input) {
 + if(!(input.motionNow.w>0) || !(input.motionBefore.w>0))return 0;
 + float2 motion=(input.motionNow.xy/input.motionNow.w-input.motionBefore.xy/input.motionBefore.w)*float2(0.5,-0.5);
-+ return all(isfinite(motion))?motion:0;
++ /* A mismatched previous draw, or a vertex close to the camera plane,
++    can yield a finite displacement that overflows the FP16 motion target.
++    Displacements over two screen extents have no usable history. */
++ return all(isfinite(motion)) && all(abs(motion)<=2)?motion:0;
 +}
 +/* Alpha test on a multisampled target (MSAA on): an alpha-tested pixel is
 +   all in or all out, so grass, leaves and fences stayed as jagged as without
@@ -8780,7 +9525,7 @@ index e27083f..20987ee 100644
  void window_clip_pixel(float2 position) {
   if(NV_WINDOW_CLIP_MODE!=0) {
    float2 coordinate=position-0.5;
-@@ -336,30 +440,60 @@ void window_clip_pixel(float2 position) {
+@@ -336,30 +467,60 @@ void window_clip_pixel(float2 position) {
   }
  }
  PixelOutput finish_pixel(float4 color,Pixel input,bool frontFacing) {
@@ -8851,7 +9596,7 @@ index e27083f..20987ee 100644
  #endif
   return output;
  }
-@@ -400,13 +534,39 @@ float4 texture_color_sign(float4 color,uint mask) {
+@@ -400,13 +561,39 @@ float4 texture_color_sign(float4 color,uint mask) {
   if(mask&1)color.a=2*color.a-1;
   return color;
  }
@@ -8891,7 +9636,7 @@ index e27083f..20987ee 100644
    float4 coordinate=coordinates[stage]; float4 value=float4(0,0,0,1);
    if(mode==4)value=coordinate;
    if(mode==9 || mode==11 || mode==12 || mode==14 || mode==17 || mode==18) {
-@@ -444,14 +604,40 @@ PixelOutput ps_main(Pixel input,bool frontFacing:SV_IsFrontFace) {
+@@ -444,14 +631,40 @@ PixelOutput ps_main(Pixel input,bool frontFacing:SV_IsFrontFace) {
          uint sourceSign=TEXTURE_SIGN(sourceStage);
          if(sourceSign&8)perturbation.x=registers[8+sourceStage].b;
          if(sourceSign&4)perturbation.y=registers[8+sourceStage].g;
@@ -8934,7 +9679,7 @@ index e27083f..20987ee 100644
    float2 gradientX=ddx(uv),gradientY=ddy(uv);
    if(textureFlags&4)uv.x=saturate(uv.x);
    if(textureFlags&8)uv.y=saturate(uv.y);
-@@ -471,8 +657,50 @@ PixelOutput ps_main(Pixel input,bool frontFacing:SV_IsFrontFace) {
+@@ -471,8 +684,54 @@ PixelOutput ps_main(Pixel input,bool frontFacing:SV_IsFrontFace) {
    default:value=cube3.Sample(sampler3,direction);break;
     }
    }
@@ -8973,10 +9718,14 @@ index e27083f..20987ee 100644
 +   }
 +   stored*=maxDepth;
 +   float4 lit;
++   float2 gap=0;
++   if((textureFlags&32768) && (func==4 || func==6) && coordinate.w>0)
++    gap=balcony_shadow_gap(uvw);
 +   [unroll]for(uint tap=0;tap<4;tap++) {
 +    float depth=stored[tap];
 +    lit[tap]=(func==1?depth<reference:func==2?depth==reference:func==3?depth<=reference:
 +              func==4?depth>reference:func==5?depth!=reference:func==6?depth>=reference:func==7)?1:0;
++    if(gap.y>gap.x)lit[tap]=max(lit[tap],smoothstep(gap.x,gap.y,uvw.z-depth));
 +   }
 +   float2 blend=frac(uv*size-0.5);   /* gather order: x (0,1) y (1,1) z (1,0) w (0,0) */
 +   if(!all(isfinite(blend)))blend=0;   /* q == 0 with a nonzero s or t */
@@ -8987,7 +9736,7 @@ index e27083f..20987ee 100644
     float3 gradientX=ddx(uvw),gradientY=ddy(uvw);
     if(textureFlags&4)uvw.x=saturate(uvw.x);
     if(textureFlags&8)uvw.y=saturate(uvw.y);
-@@ -524,12 +752,16 @@ PixelOutput ps_main(Pixel input,bool frontFacing:SV_IsFrontFace) {
+@@ -524,12 +783,16 @@ PixelOutput ps_main(Pixel input,bool frontFacing:SV_IsFrontFace) {
   registers[14]=specular+temporary; if(NV_FINAL1&0x80)registers[14]=saturate(registers[14]);
   registers[15]=mapped(registers,NV_FINAL1>>24,false)*mapped(registers,NV_FINAL1>>16,false);
   registers[14].a=0;registers[15].a=0;

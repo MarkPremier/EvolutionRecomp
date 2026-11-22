@@ -49,6 +49,9 @@ int video_settings_modern_aim(void);
 int video_settings_ladder_freelook(void);
 float video_settings_look_limit(void);
 int video_settings_club_charge(void);
+/* Audio output (0 auto, 1 stereo, 2 5.1, 3 7.1, 4 mono: the toolkit's XA2_OUTPUT_*),
+ * read at start-up. */
+int video_settings_audio_output(void);
 /* Owned weapons carry over between levels (off: as on the Xbox). */
 int video_settings_keep_weapons(void);
 

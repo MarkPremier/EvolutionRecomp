@@ -71,7 +71,7 @@ extern void nv2a_gpu_allow_dlaa(int allowed);
  * text). */
 enum { SET_RESOLUTION, SET_ASPECT, SET_DISPLAY, SET_VSYNC, SET_FRAMES, SET_ANISOTROPY, SET_MSAA, SET_FOLIAGE_AA,
        SET_TAA, SET_DRAW_DISTANCE,
-       SET_HEAT_HAZE, SET_SHADOWS, SET_ICONS,
+       SET_HEAT_HAZE, SET_SHADOWS, SET_ICONS, SET_AUDIO_OUTPUT,
        SET_MOUSE_LOOK, SET_MOUSE_SPEED, SET_FLIGHT_MOUSE, SET_FLIGHT_SPEED, SET_FLIGHT_INVERT,
        SET_CONTROLLER_AIM, SET_LADDER_FREELOOK, SET_LOOK_LIMIT, SET_CLUB_HOLD, SET_KEEP_WEAPONS, SETTING_COUNT };
 
@@ -109,6 +109,12 @@ static const char *const k_taa_modes[] = {"off", "on", "dlaa"};
  * charged strike follows the swing) or "charge" (a tap swings when released,
  * a hold goes straight to the charged strike; video_settings_club_charge). */
 static const char *const k_club_holds[] = {"original", "charge"};
+/* Audio output, read at start-up (main.c): its index is the toolkit's
+ * XA2_OUTPUT_* -- auto (7.1 or 5.1 when the Windows device has the
+ * speakers), stereo, 5.1 (the console set to Dolby Digital, its six channels
+ * as PCM), 7.1 (those six, the surrounds on the side and back pairs) or mono
+ * (the console's mono). */
+static const char *const k_audio_outputs[] = {"auto", "stereo", "5.1", "7.1", "mono"};
 static const char *const k_speeds[] = {"1", "2", "3", "4", "5", "6", "7", "8", "9", "10"};
 #define COUNT(array) ((int)(sizeof array / sizeof *array))
 
@@ -131,6 +137,8 @@ static const VideoSetting k_settings[SETTING_COUNT] = {
     {"heat_haze", "heat haze", k_hazes, COUNT(k_hazes), 2},
     {"shadows", "shadows", k_shadow_modes, COUNT(k_shadow_modes), 1},
     {"button_icons", "button icons", k_icons, COUNT(k_icons), 0},
+    /* Stereo by default, as the console's own default. */
+    {"audio_output", "audio out", k_audio_outputs, COUNT(k_audio_outputs), 1},
     {"mouse_look", "mouse look", k_mouse_looks, COUNT(k_mouse_looks), 1},
     {"mouse_speed", "mouse speed", k_speeds, COUNT(k_speeds), 4},
     {"flight_mouse", "flight mouse", k_switches, COUNT(k_switches), 1},
@@ -777,12 +785,13 @@ static int values_of(int setting)
 #define GAME_TEXT_TAA 30
 #define GAME_TEXT_LOOK_LIMIT 34   /* after Temporal AA's three values */
 #define GAME_TEXT_CLUB_HOLD 37
+#define GAME_TEXT_AUDIO_OUTPUT 40
 
 static int in_game_text(int setting)
 {
     return setting == SET_SHADOWS || setting == SET_CONTROLLER_AIM || setting == SET_LADDER_FREELOOK ||
            setting == SET_KEEP_WEAPONS || setting == SET_FOLIAGE_AA || setting == SET_TAA ||
-           setting == SET_LOOK_LIMIT || setting == SET_CLUB_HOLD;
+           setting == SET_LOOK_LIMIT || setting == SET_CLUB_HOLD || setting == SET_AUDIO_OUTPUT;
 }
 
 static int text_label(int setting)
@@ -796,6 +805,7 @@ static int text_label(int setting)
     if (setting == SET_TAA) return GAME_TEXT_TAA;
     if (setting == SET_LOOK_LIMIT) return GAME_TEXT_LOOK_LIMIT;
     if (setting == SET_CLUB_HOLD) return GAME_TEXT_CLUB_HOLD;
+    if (setting == SET_AUDIO_OUTPUT) return GAME_TEXT_AUDIO_OUTPUT;
     for (s = 0; s < setting; s++)
         if (!in_game_text(s)) key += 1 + (values_of(s) == s ? k_settings[s].count : 0);
     return key;
@@ -992,7 +1002,7 @@ typedef struct PageRow {
 } PageRow;
 /* Video Options: rows this far apart, VIDEO_SHOWN of them at a time (the
  * page scrolls: video_scroll). Its rows are the settings up to Button
- * icons; the mouse's, from Mouse look on, are on PC Settings (still
+ * icons and Audio out; the mouse's, from Mouse look on, are on PC Settings (still
  * Video.hst's items). */
 #define VIDEO_STEP  2.8f
 #define VIDEO_SHOWN 10
@@ -2090,6 +2100,7 @@ static void apply_setting(int setting)
     case SET_LADDER_FREELOOK:
     case SET_LOOK_LIMIT:             /* read each frame */
     case SET_CLUB_HOLD:
+    case SET_AUDIO_OUTPUT:           /* read at start-up: the next start's */
     case SET_KEEP_WEAPONS: break;    /* read at each level's start */
     }
 }
@@ -2204,6 +2215,12 @@ int video_settings_ladder_freelook(void)
 float video_settings_look_limit(void)
 {
     return s_values[SET_LOOK_LIMIT] ? 85.0f : 70.0f;
+}
+
+/* Audio output: XA2_OUTPUT_AUTO, _STEREO, _SURROUND, _7_1 or _MONO. */
+int video_settings_audio_output(void)
+{
+    return s_values[SET_AUDIO_OUTPUT];
 }
 
 /* Club hold: 1 when a hold goes straight to the charged strike. */

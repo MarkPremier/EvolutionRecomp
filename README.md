@@ -153,7 +153,9 @@ keeps about 43 ms of sound queued for XAudio2 (`RECOMP_APU_QUEUE`, in 5.3 ms
 packets, default 8) and runs above the game's threads. With only the lead
 the start happened to leave (about 21 ms) and the system timer at its default
 15.6 ms, a game running uncapped at 600+ fps could drain the queue, and the
-sound popped and crackled. `RECOMP_APU_DIAG=1` logs the queue once a second.
+sound popped and crackled. `RECOMP_APU_DIAG=1` logs the queue once a second,
+and `RECOMP_XA2_TEST_LOSS=<seconds>` drops the device that often, to test
+reopening it.
 The audio DSPs find their scratch and FIFO memory through page tables that
 DirectSound keeps in contiguous memory. They are read the way the voice
 processor reads its own tables: a live contiguous block owning the page wins
@@ -415,6 +417,7 @@ effect at once and are kept in `turok_settings.ini` beside the exe:
 | Foliage AA | off, on (on by default; with MSAA, the edges of grass, leaves and other cut-out textures are smoothed too; about 5% of the frame rate when the GPU is the limit) | |
 | Temporal AA | off, on, dlaa (off by default; experimental. "on" steadies the shimmer inside grass, leaves and fine textures that MSAA does not reach by blending each frame with the ones before, then sharpens lightly: a little softer while turning, about 10% of the frame rate. "dlaa" is NVIDIA DLSS as DLAA, on NVIDIA RTX graphics cards: anti-aliasing at native resolution, not an upscaler, so it costs frame rate rather than saving it (more at very high resolutions); MSAA is off while it is chosen, and without an RTX card or its files it falls back to "on". The HUD is drawn after either and stays sharp) | `RECOMP_TAA` (1, 2 for DLAA, or 0, at start); `RECOMP_DLSS_PRESET=<letter>` (NVIDIA's model), `RECOMP_DLSS_JITTER_SIGN=-1` |
 | Button icons | xbox, pc | |
+| Audio out | auto, stereo, 5.1, 7.1, mono (stereo by default; applies at the next start; see below) | `RECOMP_AUDIO_OUTPUT` |
 | Mouse look | raw, stick (raw falls back to stick in vehicles and turrets; on the PC Settings page, kept with these settings) | |
 | Mouse speed | 1 to 10 (5 by default; each step 1.4x; on the PC Settings page, kept with these settings) | |
 | Flight mouse | on, off (the mouse steers the pteranodon; on the PC Settings page, kept with these settings) | |
@@ -511,6 +514,29 @@ saves the kept weapons with your progress as it saves any weapon. Saved as
   bobbed under and sank again (Chapter 1's third lake). Above 60 fps the
   water's drag now acts per second as at 60, and surfacing leaves the head
   as far above the water as at 60.
+- **Audio out**: the console's own audio setting.
+  - **5.1** sets the console to Dolby Digital. The game then mixes six
+    channels for the console's AC-3 encoder, and they go to Windows as 5.1
+    sound instead. Each channel plays on its own speaker, with the rears on
+    side speakers when there are no rear ones. On stereo speakers or
+    headphones the six are folded to two as the console does for its stereo
+    outputs (centre and rears at -3 dB, no subwoofer).
+  - **7.1** is the same 5.1 mix with each surround channel played on both
+    the side and the rear speaker of its side, at -3 dB each. The game mixes
+    no more than 5.1, so the two pairs play the same sound; this fills a 7.1
+    setup's speakers instead of leaving the side pair silent. Without side
+    and rear pairs it plays as 5.1.
+  - **Auto** picks 7.1 when the Windows output device has eight speakers,
+    5.1 when it has front, centre, subwoofer and a rear or side pair, and
+    stereo otherwise.
+  - **Mono** sets the console to mono and plays the average of left and
+    right on both sides.
+  - The game reads the setting as it starts, so a change applies at the
+    next start.
+  - Whatever the setting, if the audio device goes (unplugged, or an HDMI
+    display changing mode), or Windows switches to another default device,
+    the sound follows: the device is reopened at once and then once a second
+    until one is there.
 - **Button icons, pc**: the menus' A and B prompts become Enter and Esc
   keycaps. Built-in prompts work with an Xbox-only installation. The PC
   release's icons can optionally be read from a PC install, which you name in

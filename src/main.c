@@ -558,8 +558,22 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
      * stereo. */
     {
         extern void xbox_SetAudioFlags(uint32_t flags);
+        extern int xa2_set_output(int mode);
+        static const char *const outputs[] = {"auto", "stereo", "5.1", "7.1", "mono"};
         const char *flags = getenv("RECOMP_AUDIO_FLAGS");
+        const char *output = getenv("RECOMP_AUDIO_OUTPUT");
+        int mode = video_settings_audio_output(), i;
+        /* Audio output (Video Options, or RECOMP_AUDIO_OUTPUT=auto, stereo,
+         * 5.1, 7.1 or mono), auto resolved by the device's speakers. The
+         * console is set to match, as the title mixes by it: Dolby Digital
+         * for 5.1 and 7.1 (its six channels then go on as PCM, apu_core.c),
+         * mono for mono. */
+        for (i = 0; output && i < 5; i++)
+            if (!_stricmp(output, outputs[i])) mode = i;
+        mode = xa2_set_output(mode);
         if (flags && *flags) xbox_SetAudioFlags((uint32_t)strtoul(flags, NULL, 0));
+        else if (mode == 2 || mode == 3) xbox_SetAudioFlags(0x10000u);   /* XC_AUDIO_FLAGS_ENABLE_AC3 */
+        else if (mode == 4) xbox_SetAudioFlags(0x1u);                    /* XC_AUDIO_FLAGS_MONO */
     }
     /* The window that shows the guest framebuffer; without it the title runs
      * and renders with nothing on screen. */
