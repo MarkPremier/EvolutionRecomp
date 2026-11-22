@@ -63,6 +63,7 @@ extern void nv2a_gpu_set_shadow_scale(int factor);
 extern void nv2a_gpu_set_shadow_mode(int mode);
 extern void nv2a_gpu_set_shadow_indoor(int indoor);
 extern void nv2a_gpu_allow_dlaa(int allowed);
+extern void nv2a_gpu_set_dlaa_half_width(int on);
 
 /* ── Settings ─────────────────────────────────────────────────── */
 
@@ -70,10 +71,13 @@ extern void nv2a_gpu_allow_dlaa(int allowed);
  * through its values (shown, and written in turok_settings.ini, as their
  * text). */
 enum { SET_RESOLUTION, SET_ASPECT, SET_DISPLAY, SET_VSYNC, SET_FRAMES, SET_ANISOTROPY, SET_MSAA, SET_FOLIAGE_AA,
-       SET_TAA, SET_DRAW_DISTANCE,
-       SET_HEAT_HAZE, SET_SHADOWS, SET_ICONS, SET_AUDIO_OUTPUT,
+       SET_TAA, SET_DLAA_WIDTH, SET_DRAW_DISTANCE,
+       SET_HEAT_HAZE, SET_SHADOWS, SET_ICONS,
        SET_MOUSE_LOOK, SET_MOUSE_SPEED, SET_FLIGHT_MOUSE, SET_FLIGHT_SPEED, SET_FLIGHT_INVERT,
-       SET_CONTROLLER_AIM, SET_LADDER_FREELOOK, SET_LOOK_LIMIT, SET_CLUB_HOLD, SET_KEEP_WEAPONS, SETTING_COUNT };
+       SET_CONTROLLER_AIM, SET_LADDER_FREELOOK, SET_LOOK_LIMIT, SET_CLUB_HOLD, SET_KEEP_WEAPONS,
+       SET_AUDIO_OUTPUT, SETTING_COUNT };
+/* PC Settings' rows end here; Audio out is on Sound Options (add_audio_row). */
+#define SETTINGS_ROWS_END SET_AUDIO_OUTPUT
 
 typedef struct VideoSetting {
     const char *key, *label;
@@ -91,9 +95,10 @@ static const char *const k_frames[] = {"30", "60", "120", "144", "240", "display
 static const char *const k_anisotropy[] = {"off", "2x", "4x", "8x", "16x"};
 static const char *const k_msaa[] = {"off", "2x", "4x", "8x"};
 static const char *const k_distances[] = {"normal", "2x", "4x", "8x"};
-static const char *const k_hazes[] = {"off", "xbox", "enhanced"};
+/* "gamecube": as the GameCube release draws it (nv2a_gpu_set_heat_haze 4). */
+static const char *const k_hazes[] = {"off", "xbox", "enhanced", "gamecube"};
 /* The renderer's API retains its older mode numbers. */
-static const int k_haze_modes[] = {3, 0, 2};
+static const int k_haze_modes[] = {3, 0, 2, 4};
 static const char *const k_shadow_modes[] = {"xbox", "enhanced", "enhanced+"};
 static const char *const k_icons[] = {"xbox", "pc"};
 static const char *const k_mouse_looks[] = {"stick", "raw"};
@@ -105,6 +110,12 @@ static const char *const k_look_limits[] = {"original", "extended"};
  * switch), or "dlaa": NVIDIA DLSS as DLAA, anti-aliasing at native resolution,
  * not an upscaler -- named so (dlss_bridge.dll; nv2a_gpu_set_taa). */
 static const char *const k_taa_modes[] = {"off", "on", "dlaa"};
+/* DLAA width: the 3D view at the game's double width (as the console draws
+ * it: two samples per pixel across, squeezed to the screen) or at the
+ * screen's width, for about half the cost -- DLAA's samples over frames
+ * take the place of the game's two; a little softer across
+ * (nv2a_gpu_set_dlaa_half_width). Only with Temporal AA on dlaa. */
+static const char *const k_dlaa_widths[] = {"double", "screen"};
 /* Club hold (the war club): the game's (a press swings at once; held a second, the
  * charged strike follows the swing) or "charge" (a tap swings when released,
  * a hold goes straight to the charged strike; video_settings_club_charge). */
@@ -133,12 +144,11 @@ static const VideoSetting k_settings[SETTING_COUNT] = {
      * that MSAA does not reach, steadied over frames. Off by default: it
      * costs frame rate and softens a little in motion. */
     {"temporal_aa", "temporal aa", k_taa_modes, COUNT(k_taa_modes), 0},
+    {"dlaa_width", "dlaa width", k_dlaa_widths, COUNT(k_dlaa_widths), 0},
     {"draw_distance", "draw distance", k_distances, COUNT(k_distances), 1},
     {"heat_haze", "heat haze", k_hazes, COUNT(k_hazes), 2},
     {"shadows", "shadows", k_shadow_modes, COUNT(k_shadow_modes), 1},
     {"button_icons", "button icons", k_icons, COUNT(k_icons), 0},
-    /* Stereo by default, as the console's own default. */
-    {"audio_output", "audio out", k_audio_outputs, COUNT(k_audio_outputs), 1},
     {"mouse_look", "mouse look", k_mouse_looks, COUNT(k_mouse_looks), 1},
     {"mouse_speed", "mouse speed", k_speeds, COUNT(k_speeds), 4},
     {"flight_mouse", "flight mouse", k_switches, COUNT(k_switches), 1},
@@ -149,6 +159,8 @@ static const VideoSetting k_settings[SETTING_COUNT] = {
     {"look_limit", "look limit", k_look_limits, COUNT(k_look_limits), 0},
     {"club_hold", "club hold", k_club_holds, COUNT(k_club_holds), 0},
     {"keep_weapons", "keep weapons", k_switches, COUNT(k_switches), 0},
+    /* On Sound Options. Stereo by default, as the console's own default. */
+    {"audio_output", "audio out", k_audio_outputs, COUNT(k_audio_outputs), 1},
 };
 
 static int s_values[SETTING_COUNT];
@@ -786,12 +798,15 @@ static int values_of(int setting)
 #define GAME_TEXT_LOOK_LIMIT 34   /* after Temporal AA's three values */
 #define GAME_TEXT_CLUB_HOLD 37
 #define GAME_TEXT_AUDIO_OUTPUT 40
+#define GAME_TEXT_HEAT_HAZE 46   /* after Audio out's five values */
+#define GAME_TEXT_DLAA_WIDTH 51  /* after Heat haze's four */
 
 static int in_game_text(int setting)
 {
     return setting == SET_SHADOWS || setting == SET_CONTROLLER_AIM || setting == SET_LADDER_FREELOOK ||
            setting == SET_KEEP_WEAPONS || setting == SET_FOLIAGE_AA || setting == SET_TAA ||
-           setting == SET_LOOK_LIMIT || setting == SET_CLUB_HOLD || setting == SET_AUDIO_OUTPUT;
+           setting == SET_LOOK_LIMIT || setting == SET_CLUB_HOLD || setting == SET_AUDIO_OUTPUT ||
+           setting == SET_HEAT_HAZE || setting == SET_DLAA_WIDTH;
 }
 
 static int text_label(int setting)
@@ -806,6 +821,8 @@ static int text_label(int setting)
     if (setting == SET_LOOK_LIMIT) return GAME_TEXT_LOOK_LIMIT;
     if (setting == SET_CLUB_HOLD) return GAME_TEXT_CLUB_HOLD;
     if (setting == SET_AUDIO_OUTPUT) return GAME_TEXT_AUDIO_OUTPUT;
+    if (setting == SET_HEAT_HAZE) return GAME_TEXT_HEAT_HAZE;
+    if (setting == SET_DLAA_WIDTH) return GAME_TEXT_DLAA_WIDTH;
     for (s = 0; s < setting; s++)
         if (!in_game_text(s)) key += 1 + (values_of(s) == s ? k_settings[s].count : 0);
     return key;
@@ -890,6 +907,7 @@ static const char *const k_option_entries[] = {"options", "control", "pccontrols
  * first. */
 static Node *s_save_options;
 static int is_event(const Node *event, const char *type);
+static int byte_of(const Node *node);
 static int actor_id(const Node *actor);
 static void retarget(Node *event, const char *name, int id);
 
@@ -1298,6 +1316,117 @@ static int any_button_starts(Node *screen, const char *unused)
     return 1;
 }
 
+/* Sound Options (the front end's and the pause menu's): Audio out as a
+ * third row under sfx and music volume, where the GameCube release put its
+ * sound mode. The row is the page's hidden aspect ratio row (the console's
+ * own, kept off the screen): its label at the volume rows' place and size,
+ * one row below music, and its value box, a text one, beside it -- both
+ * renamed, showing GameOptions.txm's Audio out text and the setting's
+ * Video.hst item. The page's controller keeps the value in range, as it does
+ * the others ("audio out > 4"), and names the row at setup and fade as it
+ * names sfx volume. */
+static int add_audio_row(Node *screen, const char *unused)
+{
+    uint32_t at = 0, i, j;
+    Node *row = actor_named(screen, "SelectionMenuWidgetaspect", NULL);
+    Node *box = actor_named(screen, "aspectratiovalueWidget", NULL);
+    Node *music = actor_named(screen, "SelectionMenuWidgetmusic", NULL);
+    Node *music_box = actor_named(screen, "musicvolumevalueWidget", &at);
+    Node *sfx = actor_named(screen, "SelectionMenuWidgetsfx", NULL);
+    Node *deity = actor_named(screen, "DeityNoFade", NULL), *limit = NULL, *label, *value, *vars;
+    float music_at[3], sfx_at[3], music_size[3], box_at[3], position[3];
+    int id = 0, label_id, value_id, item = SET_AUDIO_OUTPUT + 1, last = k_settings[SET_AUDIO_OUTPUT].count - 1;
+    char name[48];
+    (void)unused;
+    if (!row || !box || !music || !music_box || !sfx || !deity || !get_vector(child(music, "POS"), music_at) ||
+            !get_vector(child(sfx, "POS"), sfx_at) || !get_vector(child(music, "SCALE"), music_size) ||
+            !get_vector(child(music_box, "POS"), box_at) || !child(box, "ACTOR_VARIABLES") ||
+            !child(row, "ACTOR_VARIABLES")) {
+        fprintf(stderr, "[VIDEO] sound options: not as expected; Audio out left off it\n");
+        return 1;
+    }
+    for (i = 0; i < deity->count && !limit; i++) {
+        Node *cause = child(deity->children[i], "CAUSE");
+        if (!strcmp(deity->children[i]->name, "LINK") && cause && is_text(child(cause, "HSTF"), OPTIONS_HST) &&
+                byte_of(child(cause, "ITM")) == 0x0A)
+            limit = deity->children[i];
+    }
+    if (!limit) {
+        fprintf(stderr, "[VIDEO] sound options: no range rule to copy; Audio out left off it\n");
+        return 1;
+    }
+    for (i = 0; i < screen->count; i++)
+        if (actor_id(screen->children[i]) > id) id = actor_id(screen->children[i]);
+    label_id = ++id;
+    value_id = ++id;
+
+    label = node_clone(row);
+    set_byte(child(label, "ID"), label_id);
+    set_text(child(label, "NAME"), "SelectionMenuWidgetaudio");
+    memcpy(position, music_at, sizeof position);
+    position[1] = music_at[1] - (sfx_at[1] - music_at[1]);
+    set_vector(child(label, "POS"), position);
+    set_vector(child(label, "SCALE"), music_size);
+    vars = child(label, "ACTOR_VARIABLES");
+    set_text(child(vars, "W_TMF"), GAME_TXM);
+    set_byte(child(vars, "W_TMN"), GAME_TEXT_AUDIO_OUTPUT);
+    for (i = 0; i < label->count; i++) {
+        Node *events = child(label->children[i], "EVENTS");
+        for (j = 0; events && j < events->count; j++) retarget(events->children[j], "audiooutputvalueWidget", value_id);
+    }
+
+    value = node_clone(box);
+    set_byte(child(value, "ID"), value_id);
+    set_text(child(value, "NAME"), "audiooutputvalueWidget");
+    box_at[1] = position[1];
+    set_vector(child(value, "POS"), box_at);
+    vars = child(value, "ACTOR_VARIABLES");
+    set_text(child(vars, "W_TMF"), GAME_TXM);
+    set_byte(child(vars, "W_TMN"), GAME_TEXT_AUDIO_OUTPUT + 1);
+    set_text(child(vars, "W_THF"), VIDEO_HST);
+    set_byte(child(vars, "W_THI"), item);
+    set_text(child(vars, "A_HIF"), VIDEO_HST);
+    set_byte(child(vars, "A_HII"), item);
+    for (i = 0; i < vars->count; i++)      /* as the Video Options rows' boxes: no W_SUHI */
+        if (!strcmp(vars->children[i]->name, "W_SUHI")) { node_remove(vars, i); break; }
+
+    node_insert(screen, at + 1, label);
+    node_insert(screen, at + 2, value);
+
+    limit = node_clone(limit);
+    snprintf(name, sizeof name, "audio out > %d", last);
+    set_text(limit, name);
+    set_text(child(child(limit, "CAUSE"), "HSTF"), VIDEO_HST);
+    set_byte(child(child(limit, "CAUSE"), "ITM"), item);
+    set_byte(child(child(limit, "CAUSE"), "VAL"), last);
+    {
+        Node *events = child(limit, "EVENTS");
+        for (j = 0; events && j < events->count; j++)
+            if (is_event(events->children[j], "Hist")) {
+                set_text(child(events->children[j], "HSTF"), VIDEO_HST);
+                set_byte(child(events->children[j], "ITM"), item);
+                set_byte(child(events->children[j], "VAL"), last);
+            }
+    }
+    node_insert(deity, deity->count, limit);
+
+    /* Named with sfx volume at setup ("init") and fade ("fade"). */
+    for (i = 0; i < deity->count; i++) {
+        Node *events = child(deity->children[i], "EVENTS");
+        for (j = 0; events && j < events->count; j++) {
+            Node *event = events->children[j];
+            const char *target = target_of(event, name, sizeof name);
+            if (is_event(event, "Name.") && target && !strcmp(target, "SelectionMenuWidgetsfx")) {
+                Node *copy = node_clone(event);
+                retarget(copy, "SelectionMenuWidgetaudio", label_id);
+                node_insert(events, ++j, copy);
+            }
+        }
+    }
+    fprintf(stderr, "[VIDEO] sound options: Audio out added\n");
+    return 1;
+}
+
 /* The PC release's main menu ends in QUIT, which asks "are you sure?" and
  * leaves the game (XBOX:DASH, the console's return to the dashboard, ends the
  * process here). The pieces are the pause menu's own: its QUIT entry, the
@@ -1595,11 +1724,11 @@ static int edit_controls_screen(Node *screen, const char *unused)
  * as Video Options' rows are, in its style. */
 static int edit_settings_screen(Node *screen, const char *unused)
 {
-    PageSpec page = {VIDEO_HST, GAME_TEXT_SETTINGS_TITLE, SETTING_COUNT - VIDEO_ROWS, VIDEO_STEP, TEXT_SCALE, NULL,
+    PageSpec page = {VIDEO_HST, GAME_TEXT_SETTINGS_TITLE, SETTINGS_ROWS_END - VIDEO_ROWS, VIDEO_STEP, TEXT_SCALE, NULL,
                      GAME_TXM};
     int r, s;
     (void)unused;
-    for (r = 0, s = VIDEO_ROWS; s < SETTING_COUNT; r++, s++) {
+    for (r = 0, s = VIDEO_ROWS; s < SETTINGS_ROWS_END; r++, s++) {
         snprintf(page.rows[r].key, sizeof page.rows[r].key, "%s", k_settings[s].key);
         page.rows[r].label = text_label(s);
         page.rows[r].value_text = text_values(s);
@@ -1632,6 +1761,7 @@ static int write_patch(const char *game_dir)
      * controls page and its .atr, the settings page and its .atr; then the
      * strings, the history files, history.txt and the marker. */
     enum { OPTIONS_TEXT = 7 * MENU_COUNT, VIDEO_HISTORY, HISTORY_LIST, MARKER, PRESS_START, MAIN_MENU,
+           SOUND_OPTIONS, PAUSE_SOUND_OPTIONS,
            CONTROL_HISTORY, PC_CONTROLS_HISTORY, GAME_TEXT, FILE_COUNT };
     PatchFile files[FILE_COUNT];
     Trees trees;
@@ -1691,6 +1821,10 @@ static int write_patch(const char *game_dir)
     s_pause_screen = pause_screen;
     snprintf(from, sizeof from, SCREENS "mainmenu\\mainmenu.ati");
     if (!patch_screen(&trees, from, from, &files[MAIN_MENU], add_quit_entry, NULL)) goto done;
+    snprintf(from, sizeof from, SCREENS "soundvideo\\soundvideo.ati");
+    if (!patch_screen(&trees, from, from, &files[SOUND_OPTIONS], add_audio_row, NULL)) goto done;
+    snprintf(from, sizeof from, SCREENS "ingamesoundvideo\\ingamesoundvideo.ati");
+    if (!patch_screen(&trees, from, from, &files[PAUSE_SOUND_OPTIONS], add_audio_row, NULL)) goto done;
     files[CONTROL_HISTORY].key = tree_key("data\\history\\controlsetup.hst");
     if (!trees_read(&trees, "data\\history\\controlsetup.hst", &files[CONTROL_HISTORY].data)) goto done;
     look_not_inverted(&files[CONTROL_HISTORY].data);
@@ -2084,6 +2218,7 @@ static void apply_setting(int setting)
         break;
     case SET_FOLIAGE_AA: nv2a_gpu_set_alpha_coverage(s_values[SET_FOLIAGE_AA]); break;
     case SET_TAA: nv2a_gpu_set_taa(s_values[SET_TAA]); apply_setting(SET_MSAA); break;
+    case SET_DLAA_WIDTH: nv2a_gpu_set_dlaa_half_width(s_values[SET_DLAA_WIDTH]); break;
     case SET_HEAT_HAZE: nv2a_gpu_set_heat_haze(k_haze_modes[s_values[SET_HEAT_HAZE]]); break;
     case SET_SHADOWS:   /* the rest is read as the game runs (recomp_manual.c) */
         nv2a_gpu_set_shadow_scale(s_values[SET_SHADOWS] ? 4 : 1);
@@ -2564,13 +2699,21 @@ static int is_option_row(uint32_t actor)
     return option_row(actor) != NULL;
 }
 
-/* A click on an option row at the end of its values goes round to the other
- * end (the game's own left and right stop there); 0 if it is not at an end. */
+/* A click on one of our own option rows (Video.hst's: Video Options, PC
+ * Settings, Sound Options' Audio out) at the end of its values goes round to
+ * the other end (the game's own left and right stop there); 0 if it is not at
+ * an end, or a row of the game's own. Those keep the console's stop: the
+ * value written here, past the game's own setter, fires none of the rules
+ * that watch it -- multiplayer's game type went from deathmatch round to
+ * Flight without "game = (13) flight" swapping the map name boxes or noting
+ * "was flight", and the map then showed Flight's names (blank past its two
+ * maps) in deathmatch. */
 static int wrap_option(uint32_t actor, int forward)
 {
     const OptionRow *row = option_row(actor);
     uint32_t items, value;
-    if (!row || row->max <= 0 || !(items = history_items(row->file, (uint32_t)row->item)) ||
+    if (!row || _stricmp(row->file, "Video.hst") || row->max <= 0 ||
+            !(items = history_items(row->file, (uint32_t)row->item)) ||
             !guest_read(items + 8u * (uint32_t)(row->item - 1), &value))
         return 0;
     if (forward && (int)value >= row->max) item_write(items, row->item, 0);
@@ -3181,6 +3324,7 @@ void video_settings_start(const char *game_dir)
     apply_setting(SET_MSAA);
     apply_setting(SET_FOLIAGE_AA);
     if (!getenv("RECOMP_TAA")) apply_setting(SET_TAA);   /* RECOMP_TAA set by hand wins at start */
+    if (!getenv("RECOMP_DLAA_HALF_WIDTH")) apply_setting(SET_DLAA_WIDTH);   /* likewise */
     apply_setting(SET_SHADOWS);   /* its map scale and exact depth (else only when changed) */
     apply_setting(SET_HEAT_HAZE); /* apply the saved haze mode before the first frame */
     apply_setting(SET_ICONS);

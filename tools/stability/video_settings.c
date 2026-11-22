@@ -11,16 +11,21 @@ static void apply_frames(void) {}
 
 int main(void)
 {
-    assert(k_settings[SET_HEAT_HAZE].count == 3);
+    assert(k_settings[SET_HEAT_HAZE].count == 4);
     assert(k_settings[SET_HEAT_HAZE].fallback == 2);
     assert(value_index(SET_HEAT_HAZE, "off") == 0 && k_haze_modes[0] == 3);
     assert(value_index(SET_HEAT_HAZE, "Xbox") == 1 && k_haze_modes[1] == 0);
     assert(value_index(SET_HEAT_HAZE, "Enhanced") == 2 && k_haze_modes[2] == 2);
+    assert(value_index(SET_HEAT_HAZE, "GameCube") == 3 && k_haze_modes[3] == 4);
+    assert(in_game_text(SET_HEAT_HAZE));
+    assert(k_settings[SET_DLAA_WIDTH].count == 2 && k_settings[SET_DLAA_WIDTH].fallback == 0);
+    assert(value_index(SET_DLAA_WIDTH, "double") == 0 && value_index(SET_DLAA_WIDTH, "Screen") == 1);
+    assert(in_game_text(SET_DLAA_WIDTH));
     assert(value_index(SET_HEAT_HAZE, "original") == 1);
     assert(value_index(SET_HEAT_HAZE, "smooth") == 2);
     assert(value_index(SET_HEAT_HAZE, "sharp") == 2);
     assert(value_index(SET_HEAT_HAZE, "invalid") == -1);
-    puts("PASS: Off/Xbox/Enhanced modes retain the correct rendering paths and migrate saved legacy names");
+    puts("PASS: Off/Xbox/Enhanced/GameCube modes retain the correct rendering paths and migrate saved legacy names");
     assert(k_settings[SET_SHADOWS].count == 3 && k_settings[SET_SHADOWS].fallback == 1);
     assert(value_index(SET_SHADOWS, "Xbox") == 0);
     assert(value_index(SET_SHADOWS, "Enhanced") == 1);

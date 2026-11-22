@@ -4634,3 +4634,63 @@ void sub_00139210(void)
     }
     sub_00139210_gen();
 }
+
+/* ── Spider mine (guided device) jump: diagnostic ───────────────
+ *
+ * Jump while steering the spider (the player's state 0x19,
+ * UsingGuidedDevice) goes to the player's jump binding sub_0014E800
+ * (this-call, ret 8): with the spider (player +0x1938) not already in its
+ * "Jump" state, it sets the spider's vertical speed (physics +0x1C, physics
+ * = actor +0xFC) to its jump speed (+0x3B0) and the state to "Jump". There
+ * is no test for the ground, on the Xbox or the GameCube (0x801B5340), so
+ * presses after the jump animation ends keep it aloft. RECOMP_SPIDER_TRACE=1
+ * logs the spider's physics at each press and every 50 ms while it is
+ * steered (sub_00145BD0, this-call, ret 4), to find what marks it grounded. */
+extern void sub_0014E800_gen(void);
+extern void sub_00145BD0_gen(void);
+static int spider_trace(void)
+{
+    static int on = -1;
+    if (on < 0) on = getenv("RECOMP_SPIDER_TRACE") != NULL;
+    return on;
+}
+
+static void spider_dump(const char *what, uint32_t device)
+{
+    uint32_t physics = TUROK_MEM32(device + 0xFCu), i;
+    char line[1024];
+    uint32_t state = TUROK_MEM32(device + 0x12Cu);
+    int n = snprintf(line, sizeof line, "[SPIDER] %s t=%lu dev=%08X state %u anim %08X h %.3f jumpv %.3f phys", what,
+                     (unsigned long)clock(), device, state ? TUROK_MEM32(state) : 0u, TUROK_MEM32(device + 0x128u),
+                     guest_float(device + 0x3Cu), guest_float(device + 0x3B0u));
+    for (i = 0; physics && i < 0x80u && n < (int)sizeof line - 12; i += 4)
+        n += snprintf(line + n, sizeof line - n, " %08X", TUROK_MEM32(physics + i));
+    n += snprintf(line + n, sizeof line - n, " | act");
+    for (i = 0; i < 0x30u && n < (int)sizeof line - 12; i += 4)
+        n += snprintf(line + n, sizeof line - n, " %08X", TUROK_MEM32(device + 0x10u + i));
+    fprintf(stderr, "%s\n", line);
+}
+
+void sub_0014E800(void)
+{
+    uint32_t player = g_ecx, state = TUROK_MEM32(player + 0x12Cu);
+    uint32_t device = state && TUROK_MEM32(state) == 0x19u ? TUROK_MEM32(player + 0x1938u) : 0;
+    if (device && spider_trace()) spider_dump("press", device);
+    sub_0014E800_gen();
+    if (device && spider_trace()) {
+        uint32_t physics = TUROK_MEM32(device + 0xFCu);
+        fprintf(stderr, "[SPIDER] after press: vy %.3f (%s)\n", physics ? guest_float(physics + 0x1Cu) : 0.0f,
+                physics && guest_float(physics + 0x1Cu) == guest_float(device + 0x3B0u) ? "jumped" : "refused");
+    }
+}
+
+void sub_00145BD0(void)
+{
+    static long last;
+    uint32_t device = TUROK_MEM32(g_ecx + 0x1938u);
+    if (device && spider_trace() && (long)clock() - last >= 50) {
+        last = (long)clock();
+        spider_dump("steer", device);
+    }
+    sub_00145BD0_gen();
+}
