@@ -4692,3 +4692,549 @@ void sub_00145BD0(void)
     }
     sub_00145BD0_gen();
 }
+
+/* ── Three hot leaf functions, natively ─────────────────────────
+ *
+ * The game thread is the limit at high frame rates (a 2026-11-23 profile at
+ * 480p and 1440p: ~97% busy, its time spread over many functions). These
+ * three are leaves -- floating point only, no calls -- and among the
+ * busiest: a 4x4 matrix product (sub_00015DE0, 3.6%), a bounding box moved
+ * by a matrix (sub_0017F940, 3.1%) and a clamped running total with its
+ * extremes (sub_0001A980, 2.3%). As the earlier rewrites: the same
+ * operations in the same order with the generated code's rounding of each
+ * (mx_round), guest memory read and written in the original order (so an
+ * output that is also an input behaves the same), the registers, the x87
+ * compare state and any stack slot the original writes left as it leaves
+ * them. RECOMP_MATRIX_VERIFY=1 runs the original after each and reports any
+ * difference ([LEAF] lines); RECOMP_NATIVE_LEAF=0 (or RECOMP_NATIVE=0) runs
+ * the originals. */
+extern void sub_00015DE0_gen(void);
+extern void sub_0017F940_gen(void);
+extern void sub_0001A980_gen(void);
+extern __declspec(thread) int g_fp_top;
+extern __declspec(thread) int g_fp_cmp;
+extern __declspec(thread) uint16_t g_fp_cc;
+#define MXV(va) ((double)guest_float(va))
+/* The generated code's compare and its status word (recomp_types.h). */
+#ifndef RECOMP_FCMP
+#define RECOMP_FCMP(a, b)     (((a) != (a) || (b) != (b)) ? 2 : (a) < (b) ? -1 : (a) > (b) ? 1 : 0)
+#define RECOMP_FCMP_CC(c) ((uint16_t)((c)==2 ? 0x4500u : (c)<0 ? 0x0100u : (c)>0 ? 0u : 0x4000u))
+#endif
+
+static int leaf_native(void)
+{
+    static int on = -1;
+    if (on < 0) on = native_enabled("RECOMP_NATIVE_LEAF");
+    return on;
+}
+
+static int leaf_verify(void)
+{
+    static int on = -1;
+    if (on < 0) on = getenv("RECOMP_MATRIX_VERIFY") != NULL;
+    return on;
+}
+
+/* An x87 compare as the generated code does it: g_fp_cmp, g_fp_cc. */
+static uint16_t leaf_compare(double a, double b)
+{
+    g_fp_cmp = RECOMP_FCMP(a, b);
+    g_fp_cc = RECOMP_FCMP_CC(g_fp_cmp);
+    return g_fp_cc;
+}
+
+/* jp after "test ah, mask": taken when the masked bits are even. */
+static int leaf_jp(uint16_t cc, unsigned mask)
+{
+    unsigned bits = (cc >> 8) & mask, n = 0;
+    while (bits) { n += bits & 1u; bits >>= 1; }
+    return (n & 1u) == 0;
+}
+
+/* sub_00015DE0, cdecl (out, a, b): out = a x b, 4x4, rows of four floats. */
+static void matrix44_native(uint32_t out, uint32_t a, uint32_t b)
+{
+    double t0 = MXV(a + 0x20u);
+    double t1 = MXMUL(t0, MXV(b + 0x8u));
+    double t2 = MXV(b + 0x4u);
+    double t3 = MXMUL(t2, MXV(a + 0x10u));
+    double t4 = MXADD(t1, t3);
+    double t5 = MXV(a);
+    double t6 = MXMUL(t5, MXV(b));
+    double t7 = MXADD(t4, t6);
+    double t8 = MXV(a + 0x30u);
+    double t9 = MXMUL(t8, MXV(b + 0xCu));
+    double t10 = MXADD(t7, t9);
+    mx_store(out, t10);
+    double t11 = MXV(a + 0x34u);
+    double t12 = MXMUL(t11, MXV(b + 0xCu));
+    double t13 = MXV(a + 0x14u);
+    double t14 = MXMUL(t13, MXV(b + 0x4u));
+    double t15 = MXADD(t12, t14);
+    double t16 = MXV(a + 0x4u);
+    double t17 = MXMUL(t16, MXV(b));
+    double t18 = MXADD(t15, t17);
+    double t19 = MXV(a + 0x24u);
+    double t20 = MXMUL(t19, MXV(b + 0x8u));
+    double t21 = MXADD(t18, t20);
+    mx_store(out + 0x4u, t21);
+    double t22 = MXV(a + 0x28u);
+    double t23 = MXMUL(t22, MXV(b + 0x8u));
+    double t24 = MXV(a + 0x38u);
+    double t25 = MXMUL(t24, MXV(b + 0xCu));
+    double t26 = MXADD(t23, t25);
+    double t27 = MXV(a + 0x18u);
+    double t28 = MXMUL(t27, MXV(b + 0x4u));
+    double t29 = MXADD(t26, t28);
+    double t30 = MXV(a + 0x8u);
+    double t31 = MXMUL(t30, MXV(b));
+    double t32 = MXADD(t29, t31);
+    mx_store(out + 0x8u, t32);
+    double t33 = MXV(a + 0x2Cu);
+    double t34 = MXMUL(t33, MXV(b + 0x8u));
+    double t35 = MXV(a + 0x3Cu);
+    double t36 = MXMUL(t35, MXV(b + 0xCu));
+    double t37 = MXADD(t34, t36);
+    double t38 = MXV(b);
+    double t39 = MXMUL(t38, MXV(a + 0xCu));
+    double t40 = MXADD(t37, t39);
+    double t41 = MXV(b + 0x4u);
+    double t42 = MXMUL(t41, MXV(a + 0x1Cu));
+    double t43 = MXADD(t40, t42);
+    mx_store(out + 0xCu, t43);
+    double t44 = MXV(b + 0x1Cu);
+    double t45 = MXMUL(t44, MXV(a + 0x30u));
+    double t46 = MXV(b + 0x18u);
+    double t47 = MXMUL(t46, MXV(a + 0x20u));
+    double t48 = MXADD(t45, t47);
+    double t49 = MXV(b + 0x10u);
+    double t50 = MXMUL(t49, MXV(a));
+    double t51 = MXADD(t48, t50);
+    double t52 = MXV(a + 0x10u);
+    double t53 = MXMUL(t52, MXV(b + 0x14u));
+    double t54 = MXADD(t51, t53);
+    mx_store(out + 0x10u, t54);
+    double t55 = MXV(a + 0x34u);
+    double t56 = MXMUL(t55, MXV(b + 0x1Cu));
+    double t57 = MXV(b + 0x18u);
+    double t58 = MXMUL(t57, MXV(a + 0x24u));
+    double t59 = MXADD(t56, t58);
+    double t60 = MXV(b + 0x10u);
+    double t61 = MXMUL(t60, MXV(a + 0x4u));
+    double t62 = MXADD(t59, t61);
+    double t63 = MXV(a + 0x14u);
+    double t64 = MXMUL(t63, MXV(b + 0x14u));
+    double t65 = MXADD(t62, t64);
+    mx_store(out + 0x14u, t65);
+    double t66 = MXV(a + 0x38u);
+    double t67 = MXMUL(t66, MXV(b + 0x1Cu));
+    double t68 = MXV(a + 0x28u);
+    double t69 = MXMUL(t68, MXV(b + 0x18u));
+    double t70 = MXADD(t67, t69);
+    double t71 = MXV(b + 0x10u);
+    double t72 = MXMUL(t71, MXV(a + 0x8u));
+    double t73 = MXADD(t70, t72);
+    double t74 = MXV(a + 0x18u);
+    double t75 = MXMUL(t74, MXV(b + 0x14u));
+    double t76 = MXADD(t73, t75);
+    mx_store(out + 0x18u, t76);
+    double t77 = MXV(b + 0x18u);
+    double t78 = MXMUL(t77, MXV(a + 0x2Cu));
+    double t79 = MXV(b + 0x14u);
+    double t80 = MXMUL(t79, MXV(a + 0x1Cu));
+    double t81 = MXADD(t78, t80);
+    double t82 = MXV(b + 0x10u);
+    double t83 = MXMUL(t82, MXV(a + 0xCu));
+    double t84 = MXADD(t81, t83);
+    double t85 = MXV(b + 0x1Cu);
+    double t86 = MXMUL(t85, MXV(a + 0x3Cu));
+    double t87 = MXADD(t84, t86);
+    mx_store(out + 0x1Cu, t87);
+    double t88 = MXV(b + 0x2Cu);
+    double t89 = MXMUL(t88, MXV(a + 0x30u));
+    double t90 = MXV(b + 0x28u);
+    double t91 = MXMUL(t90, MXV(a + 0x20u));
+    double t92 = MXADD(t89, t91);
+    double t93 = MXV(b + 0x20u);
+    double t94 = MXMUL(t93, MXV(a));
+    double t95 = MXADD(t92, t94);
+    double t96 = MXV(a + 0x10u);
+    double t97 = MXMUL(t96, MXV(b + 0x24u));
+    double t98 = MXADD(t95, t97);
+    mx_store(out + 0x20u, t98);
+    double t99 = MXV(a + 0x34u);
+    double t100 = MXMUL(t99, MXV(b + 0x2Cu));
+    double t101 = MXV(b + 0x28u);
+    double t102 = MXMUL(t101, MXV(a + 0x24u));
+    double t103 = MXADD(t100, t102);
+    double t104 = MXV(b + 0x20u);
+    double t105 = MXMUL(t104, MXV(a + 0x4u));
+    double t106 = MXADD(t103, t105);
+    double t107 = MXV(a + 0x14u);
+    double t108 = MXMUL(t107, MXV(b + 0x24u));
+    double t109 = MXADD(t106, t108);
+    mx_store(out + 0x24u, t109);
+    double t110 = MXV(b + 0x2Cu);
+    double t111 = MXMUL(t110, MXV(a + 0x38u));
+    double t112 = MXV(b + 0x28u);
+    double t113 = MXMUL(t112, MXV(a + 0x28u));
+    double t114 = MXADD(t111, t113);
+    double t115 = MXV(b + 0x20u);
+    double t116 = MXMUL(t115, MXV(a + 0x8u));
+    double t117 = MXADD(t114, t116);
+    double t118 = MXV(a + 0x18u);
+    double t119 = MXMUL(t118, MXV(b + 0x24u));
+    double t120 = MXADD(t117, t119);
+    mx_store(out + 0x28u, t120);
+    double t121 = MXV(b + 0x28u);
+    double t122 = MXMUL(t121, MXV(a + 0x2Cu));
+    double t123 = MXV(b + 0x24u);
+    double t124 = MXMUL(t123, MXV(a + 0x1Cu));
+    double t125 = MXADD(t122, t124);
+    double t126 = MXV(b + 0x20u);
+    double t127 = MXMUL(t126, MXV(a + 0xCu));
+    double t128 = MXADD(t125, t127);
+    double t129 = MXV(b + 0x2Cu);
+    double t130 = MXMUL(t129, MXV(a + 0x3Cu));
+    double t131 = MXADD(t128, t130);
+    mx_store(out + 0x2Cu, t131);
+    double t132 = MXV(b + 0x3Cu);
+    double t133 = MXMUL(t132, MXV(a + 0x30u));
+    double t134 = MXV(b + 0x38u);
+    double t135 = MXMUL(t134, MXV(a + 0x20u));
+    double t136 = MXADD(t133, t135);
+    double t137 = MXV(b + 0x30u);
+    double t138 = MXMUL(t137, MXV(a));
+    double t139 = MXADD(t136, t138);
+    double t140 = MXV(a + 0x10u);
+    double t141 = MXMUL(t140, MXV(b + 0x34u));
+    double t142 = MXADD(t139, t141);
+    mx_store(out + 0x30u, t142);
+    double t143 = MXV(a + 0x34u);
+    double t144 = MXMUL(t143, MXV(b + 0x3Cu));
+    double t145 = MXV(b + 0x38u);
+    double t146 = MXMUL(t145, MXV(a + 0x24u));
+    double t147 = MXADD(t144, t146);
+    double t148 = MXV(b + 0x30u);
+    double t149 = MXMUL(t148, MXV(a + 0x4u));
+    double t150 = MXADD(t147, t149);
+    double t151 = MXV(a + 0x14u);
+    double t152 = MXMUL(t151, MXV(b + 0x34u));
+    double t153 = MXADD(t150, t152);
+    mx_store(out + 0x34u, t153);
+    double t154 = MXV(b + 0x3Cu);
+    double t155 = MXMUL(t154, MXV(a + 0x38u));
+    double t156 = MXV(b + 0x38u);
+    double t157 = MXMUL(t156, MXV(a + 0x28u));
+    double t158 = MXADD(t155, t157);
+    double t159 = MXV(b + 0x30u);
+    double t160 = MXMUL(t159, MXV(a + 0x8u));
+    double t161 = MXADD(t158, t160);
+    double t162 = MXV(a + 0x18u);
+    double t163 = MXMUL(t162, MXV(b + 0x34u));
+    double t164 = MXADD(t161, t163);
+    mx_store(out + 0x38u, t164);
+    double t165 = MXV(b + 0x38u);
+    double t166 = MXMUL(t165, MXV(a + 0x2Cu));
+    double t167 = MXV(b + 0x34u);
+    double t168 = MXMUL(t167, MXV(a + 0x1Cu));
+    double t169 = MXADD(t166, t168);
+    double t170 = MXV(b + 0x30u);
+    double t171 = MXMUL(t170, MXV(a + 0xCu));
+    double t172 = MXADD(t169, t171);
+    double t173 = MXV(b + 0x3Cu);
+    double t174 = MXMUL(t173, MXV(a + 0x3Cu));
+    double t175 = MXADD(t172, t174);
+    mx_store(out + 0x3Cu, t175);
+
+}
+
+/* sub_0017F940, cdecl (matrix, low, high): the box low..high (three floats
+ * each) moved by the matrix (4x4 rows, translation in the fourth): each
+ * axis starts at the translation and gains, per row, the smaller and the
+ * larger of the row's term times the old low and high. Its second argument
+ * slot holds each low product as a float, as the original's does. */
+static void box_transform_native(uint32_t matrix, uint32_t low, uint32_t high, uint32_t slot)
+{
+    uint32_t old_low[3], old_high[3], shift[3], i, j;
+    uint16_t cc = 0;
+    for (i = 0; i < 3; i++) old_low[i] = TUROK_MEM32(low + i * 4u);
+    for (i = 0; i < 3; i++) old_high[i] = TUROK_MEM32(high + i * 4u);
+    for (i = 0; i < 3; i++) shift[i] = TUROK_MEM32(matrix + 0x30u + i * 4u);
+    for (i = 0; i < 3; i++) TUROK_MEM32(low + i * 4u) = shift[i];
+    for (i = 0; i < 3; i++) shift[i] = TUROK_MEM32(matrix + 0x30u + i * 4u);
+    for (i = 0; i < 3; i++) TUROK_MEM32(high + i * 4u) = shift[i];
+    for (i = 0; i < 3; i++)
+        for (j = 0; j < 3; j++) {
+            float lo_f, hi_f;
+            double term, product_low, product_high;
+            memcpy(&lo_f, &old_low[j], 4);
+            memcpy(&hi_f, &old_high[j], 4);
+            term = MXV(matrix + j * 16u + i * 4u);
+            product_low = MXMUL((double)lo_f, term);
+            mx_store(slot, product_low);
+            product_high = MXMUL(term, (double)hi_f);
+            cc = leaf_compare(MXV(slot), product_high);
+            if (!leaf_jp(cc, 5)) {                 /* low product the smaller */
+                mx_store(low + i * 4u, MXADD(MXV(slot), MXV(low + i * 4u)));
+                mx_store(high + i * 4u, MXADD(product_high, MXV(high + i * 4u)));
+            } else {
+                mx_store(low + i * 4u, MXADD(product_high, MXV(low + i * 4u)));
+                mx_store(high + i * 4u, MXADD(MXV(slot), MXV(high + i * 4u)));
+            }
+        }
+    /* As it leaves them: fnstsw's word in ax (one value on the stack then). */
+    g_eax = (matrix & 0xFFFF0000u) | ((uint32_t)((g_fp_top + 7) & 7) << 11) | cc;
+    g_ecx = high + 12u;
+    g_edx = low - high;
+}
+
+/* sub_0001A980, cdecl (values, amount): values[0] += amount, held within
+ * the two limits at 0x1FAAF8 and 0x1FAAF4 (set to -1e8 or 1e8 past them);
+ * values[1] keeps the least and values[2] the greatest. */
+static void running_total_native(uint32_t values, uint32_t amount_slot)
+{
+    double total = MXADD(MXV(amount_slot), MXV(values));
+    uint16_t cc = leaf_compare(total, MXV(0x1FAAF8u));
+    uint32_t eax = g_eax, edx = g_edx;
+    mx_store(values, total);
+    if (!leaf_jp(cc, 5)) {
+        TUROK_MEM32(values) = 0xCCBEBC20u;
+    } else {
+        cc = leaf_compare(total, MXV(0x1FAAF4u));
+        if (!((cc >> 8) & 0x41u)) TUROK_MEM32(values) = 0x4CBEBC20u;
+    }
+    cc = leaf_compare(MXV(values), MXV(values + 4u));
+    if (!leaf_jp(cc, 5)) {
+        eax = TUROK_MEM32(values);
+        TUROK_MEM32(values + 4u) = eax;
+    }
+    cc = leaf_compare(MXV(values), MXV(values + 8u));
+    if (!((cc >> 8) & 0x41u)) {
+        edx = TUROK_MEM32(values);
+        TUROK_MEM32(values + 8u) = edx;
+    }
+    g_eax = (eax & 0xFFFF0000u) | ((uint32_t)(g_fp_top & 7) << 11) | cc;
+    g_ecx = values;
+    g_edx = edx;
+}
+
+/* Runs `native`, then the original on the same memory, and reports any
+ * difference in the given ranges or in eax/ecx/edx. */
+typedef struct LeafRange { uint32_t va, words; } LeafRange;
+static void leaf_check(const char *name, void (*native)(void *), void *context, void (*original)(void),
+                       const LeafRange *ranges, int count)
+{
+    static unsigned checks, mismatches;
+    uint32_t saved[64], after_native[64], after_original[64], regs_native[3], regs_original[3];
+    uint32_t entry[3] = {g_eax, g_ecx, g_edx}, n = 0, i;
+    int r, top = g_fp_top;
+    for (r = 0; r < count; r++)
+        for (i = 0; i < ranges[r].words && n < 64; i++) saved[n++] = TUROK_MEM32(ranges[r].va + i * 4u);
+    native(context);
+    regs_native[0] = g_eax; regs_native[1] = g_ecx; regs_native[2] = g_edx;
+    for (n = 0, r = 0; r < count; r++)
+        for (i = 0; i < ranges[r].words && n < 64; i++) after_native[n++] = TUROK_MEM32(ranges[r].va + i * 4u);
+    for (n = 0, r = 0; r < count; r++)
+        for (i = 0; i < ranges[r].words && n < 64; i++) TUROK_MEM32(ranges[r].va + i * 4u) = saved[n++];
+    g_eax = entry[0]; g_ecx = entry[1]; g_edx = entry[2]; g_fp_top = top;
+    original();   /* pops its return address */
+    regs_original[0] = g_eax; regs_original[1] = g_ecx; regs_original[2] = g_edx;
+    for (n = 0, r = 0; r < count; r++)
+        for (i = 0; i < ranges[r].words && n < 64; i++) after_original[n++] = TUROK_MEM32(ranges[r].va + i * 4u);
+    checks++;
+    if ((memcmp(after_native, after_original, n * 4u) || memcmp(regs_native, regs_original, sizeof regs_native)) &&
+            mismatches++ < 24) {
+        for (i = 0; i < n && after_native[i] == after_original[i]; i++) {}
+        fprintf(stderr, "[LEAF] %s differs (check %u, cw %04X): word %u %08X vs %08X; eax %08X/%08X ecx %08X/%08X "
+                "edx %08X/%08X\n", name, checks, (unsigned)g_fp_control_word, i, i < n ? after_native[i] : 0,
+                i < n ? after_original[i] : 0, regs_native[0], regs_original[0], regs_native[1], regs_original[1],
+                regs_native[2], regs_original[2]);
+    }
+    if ((checks & 0x3FFFFu) == 0) fprintf(stderr, "[LEAF] %u checks, %u differ\n", checks, mismatches);
+}
+
+static void matrix44_context(void *c) { uint32_t *a = c; matrix44_native(a[0], a[1], a[2]); g_eax = a[1]; g_ecx = a[2]; g_edx = a[0]; }
+static void box_context(void *c) { uint32_t *a = c; box_transform_native(a[0], a[1], a[2], a[3]); }
+static void total_context(void *c) { uint32_t *a = c; running_total_native(a[0], a[1]); }
+
+void sub_00015DE0(void)
+{
+    uint32_t args[3] = {TUROK_MEM32(g_esp + 4u), TUROK_MEM32(g_esp + 8u), TUROK_MEM32(g_esp + 12u)};
+    if (!leaf_native()) { sub_00015DE0_gen(); return; }
+    if (leaf_verify()) {
+        LeafRange ranges[3] = {{args[0], 16}, {args[1], 16}, {args[2], 16}};
+        leaf_check("matrix44", matrix44_context, args, sub_00015DE0_gen, ranges, 3);
+        return;
+    }
+    matrix44_context(args);
+    g_esp += 4u;   /* ret */
+}
+
+void sub_0017F940(void)
+{
+    uint32_t args[4] = {TUROK_MEM32(g_esp + 4u), TUROK_MEM32(g_esp + 8u), TUROK_MEM32(g_esp + 12u), g_esp + 8u};
+    if (!leaf_native()) { sub_0017F940_gen(); return; }
+    if (leaf_verify()) {
+        LeafRange ranges[4] = {{args[1], 3}, {args[2], 3}, {args[3], 1}, {args[0], 16}};
+        leaf_check("box", box_context, args, sub_0017F940_gen, ranges, 4);
+        return;
+    }
+    box_context(args);
+    g_esp += 4u;   /* ret */
+}
+
+void sub_0001A980(void)
+{
+    uint32_t args[2] = {TUROK_MEM32(g_esp + 4u), g_esp + 8u};
+    if (!leaf_native()) { sub_0001A980_gen(); return; }
+    if (leaf_verify()) {
+        LeafRange ranges[1] = {{args[0], 3}};
+        leaf_check("total", total_context, args, sub_0001A980_gen, ranges, 1);
+        return;
+    }
+    total_context(args);
+    g_esp += 4u;   /* ret */
+}
+
+/* ── Lifted leaves ───────────────────────────────────────────────
+ *
+ * Four more of the game thread's busiest functions, leaves with branches
+ * and loops: sub_00070930 (1.6%), sub_00022ED0 (1.6%), sub_0002FD10 (1.5%)
+ * and sub_00070DF0 (0.9%). Each is lifted again from the game's own
+ * instructions by tools/x86_lift.py into src/native/sub_XXXXXXXX.c, with
+ * registers and x87 slots in locals (as object lighting, sub_00036D00):
+ *
+ *   py -3 tools/x86_lift.py <default.xbe> 0x00070930 0x00070AAD sub_00070930_native src/native/sub_00070930.c
+ *   py -3 tools/x86_lift.py <default.xbe> 0x00022ED0 0x000230D3 sub_00022ED0_native src/native/sub_00022ED0.c
+ *   py -3 tools/x86_lift.py <default.xbe> 0x0002FD10 0x0002FDF4 sub_0002FD10_native src/native/sub_0002FD10.c
+ *   py -3 tools/x86_lift.py <default.xbe> 0x00070DF0 0x000712A7 sub_00070DF0_native src/native/sub_00070DF0.c
+ *
+ * Like src/recomp/gen those files are made from the XBE and not kept in the
+ * repository; without one, that function's generated code runs.
+ * RECOMP_NATIVE_LIFTED=0 (or RECOMP_NATIVE=0) runs the generated code for
+ * all four. RECOMP_LIFT_VERIFY=<n>: every nth call of each runs both from
+ * the same guest RAM and registers and reports any word or register that
+ * differs ([LIFTED] lines; another thread writing RAM in that moment shows
+ * up too). */
+extern __declspec(thread) uint32_t g_ebx, g_esi, g_edi;
+extern __declspec(thread) double g_fp_stack[8];
+#define LIFTED_RAM (64u << 20)
+
+typedef struct LiftedRegs {
+    uint32_t r[8];
+    int top;
+    double stack[8];
+    uint16_t cc;
+} LiftedRegs;
+
+static void lifted_save(LiftedRegs *s)
+{
+    s->r[0] = g_eax; s->r[1] = g_ecx; s->r[2] = g_edx; s->r[3] = g_ebx;
+    s->r[4] = g_esi; s->r[5] = g_edi; s->r[6] = g_esp; s->r[7] = 0;
+    s->top = g_fp_top & 7; memcpy(s->stack, g_fp_stack, sizeof s->stack); s->cc = g_fp_cc;
+}
+
+static void lifted_load(const LiftedRegs *s)
+{
+    g_eax = s->r[0]; g_ecx = s->r[1]; g_edx = s->r[2]; g_ebx = s->r[3];
+    g_esi = s->r[4]; g_edi = s->r[5]; g_esp = s->r[6];
+    g_fp_top = s->top; memcpy(g_fp_stack, s->stack, sizeof s->stack); g_fp_cc = s->cc;
+}
+
+static void lifted_run(const char *name, void (*native)(void), void (*original)(void), unsigned *calls)
+{
+    static int on = -1, every = -1;
+    static uint8_t *before, *after;
+    uint8_t *ram = (uint8_t *)(uintptr_t)g_xbox_mem_offset;
+    LiftedRegs entry, native_regs, original_regs;
+    uint32_t page, differ = 0;
+    if (on < 0) on = native_enabled("RECOMP_NATIVE_LIFTED");
+    if (!on || !native) { original(); return; }
+    if (every < 0) { const char *v = getenv("RECOMP_LIFT_VERIFY"); every = v ? atoi(v) : 0; }
+    if (every <= 0 || ++*calls % (unsigned)every) { native(); return; }
+    if (!before) {
+        before = (uint8_t *)malloc(LIFTED_RAM);
+        after = (uint8_t *)malloc(LIFTED_RAM);
+        if (!before || !after) { every = 0; native(); return; }
+    }
+    lifted_save(&entry);
+    memcpy(before, ram, LIFTED_RAM);
+    native();
+    lifted_save(&native_regs);
+    memcpy(after, ram, LIFTED_RAM);
+    for (page = 0; page < LIFTED_RAM; page += 4096u)   /* back as it was */
+        if (memcmp(ram + page, before + page, 4096u)) memcpy(ram + page, before + page, 4096u);
+    lifted_load(&entry);
+    original();
+    lifted_save(&original_regs);
+    for (page = 0; page < LIFTED_RAM; page += 4096u) {
+        uint32_t i;
+        if (!memcmp(ram + page, after + page, 4096u)) continue;
+        for (i = 0; i < 4096u; i += 4) {
+            uint32_t a, b;
+            memcpy(&a, after + page + i, 4); memcpy(&b, ram + page + i, 4);
+            if (a == b) continue;
+            /* other threads' stacks, the D3D device's counters, the frame clocks (as lighting_verify) */
+            if ((page + i >= 0x007B0000u && page + i < 0x00800000u) ||
+                (page + i >= 0x001A4400u && page + i < 0x001A4C00u) || page + i == 0x00257DF0u || page + i == 0x00740020u ||
+                (page + i >= 0x01081E00u && page + i < 0x01082900u) || page + i < 0x4000u) continue;
+            if (differ++ < 4)
+                fprintf(stderr, "[LIFTED] %s: %08X lifted %08X, generated %08X\n", name, page + i, a, b);
+        }
+    }
+    native_regs.top &= 7; original_regs.top &= 7;
+    if (memcmp(native_regs.r, original_regs.r, sizeof native_regs.r) || native_regs.top != original_regs.top ||
+            native_regs.cc != original_regs.cc ||
+            (native_regs.top != entry.top && memcmp(&native_regs.stack[native_regs.top],
+                                                    &original_regs.stack[original_regs.top], sizeof(double)))) {
+        differ++;
+        fprintf(stderr, "[LIFTED] %s registers: eax %08X/%08X ecx %08X/%08X edx %08X/%08X esp %08X/%08X top %d/%d\n",
+                name, native_regs.r[0], original_regs.r[0], native_regs.r[1], original_regs.r[1], native_regs.r[2],
+                original_regs.r[2], native_regs.r[6], original_regs.r[6], native_regs.top, original_regs.top);
+    }
+    {
+        static unsigned checks, mismatches;
+        checks++;
+        if (differ) mismatches++;
+        if ((checks & 0xFFu) == 0)
+            fprintf(stderr, "[LIFTED] %u checks, %u with a difference\n", checks, mismatches);
+    }
+}
+
+#define LIFTED_LEAF(addr)                                                                    \
+    extern void sub_##addr##_gen(void);                                                      \
+    void sub_##addr(void)                                                                    \
+    {                                                                                        \
+        static unsigned calls;                                                               \
+        lifted_run("sub_" #addr, LIFTED_NATIVE_##addr, sub_##addr##_gen, &calls);            \
+    }
+
+#ifdef RECOMP_HAVE_LIFTED_00070930
+extern void sub_00070930_native(void);
+#define LIFTED_NATIVE_00070930 sub_00070930_native
+#else
+#define LIFTED_NATIVE_00070930 NULL
+#endif
+#ifdef RECOMP_HAVE_LIFTED_00022ED0
+extern void sub_00022ED0_native(void);
+#define LIFTED_NATIVE_00022ED0 sub_00022ED0_native
+#else
+#define LIFTED_NATIVE_00022ED0 NULL
+#endif
+#ifdef RECOMP_HAVE_LIFTED_0002FD10
+extern void sub_0002FD10_native(void);
+#define LIFTED_NATIVE_0002FD10 sub_0002FD10_native
+#else
+#define LIFTED_NATIVE_0002FD10 NULL
+#endif
+#ifdef RECOMP_HAVE_LIFTED_00070DF0
+extern void sub_00070DF0_native(void);
+#define LIFTED_NATIVE_00070DF0 sub_00070DF0_native
+#else
+#define LIFTED_NATIVE_00070DF0 NULL
+#endif
+LIFTED_LEAF(00070930)
+LIFTED_LEAF(00022ED0)
+LIFTED_LEAF(0002FD10)
+LIFTED_LEAF(00070DF0)

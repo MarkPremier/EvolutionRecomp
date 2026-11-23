@@ -94,6 +94,15 @@ if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/src/native/sub_00036D00.c)
     endif()
 endif()
 
+# Hot leaf functions lifted the same way (recomp_manual.c, "Lifted leaves"):
+# each is used when its file is there.
+foreach(LIFTED_LEAF 00070930 00022ED0 0002FD10 00070DF0)
+    if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/src/native/sub_${LIFTED_LEAF}.c)
+        list(APPEND GAME_SOURCES src/native/sub_${LIFTED_LEAF}.c)
+        list(APPEND RECOMP_LIFTED_DEFINITIONS RECOMP_HAVE_LIFTED_${LIFTED_LEAF})
+    endif()
+endforeach()
+
 add_executable(${PROJECT_NAME} WIN32
     ${GAME_SOURCES}
     ${RECOMP_GEN_SOURCES}

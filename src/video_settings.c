@@ -63,7 +63,7 @@ extern void nv2a_gpu_set_shadow_scale(int factor);
 extern void nv2a_gpu_set_shadow_mode(int mode);
 extern void nv2a_gpu_set_shadow_indoor(int indoor);
 extern void nv2a_gpu_allow_dlaa(int allowed);
-extern void nv2a_gpu_set_dlaa_half_width(int on);
+extern void nv2a_gpu_set_scene_width(int screen);
 
 /* ── Settings ─────────────────────────────────────────────────── */
 
@@ -71,7 +71,7 @@ extern void nv2a_gpu_set_dlaa_half_width(int on);
  * through its values (shown, and written in turok_settings.ini, as their
  * text). */
 enum { SET_RESOLUTION, SET_ASPECT, SET_DISPLAY, SET_VSYNC, SET_FRAMES, SET_ANISOTROPY, SET_MSAA, SET_FOLIAGE_AA,
-       SET_TAA, SET_DLAA_WIDTH, SET_DRAW_DISTANCE,
+       SET_TAA, SET_SCENE_WIDTH, SET_DRAW_DISTANCE,
        SET_HEAT_HAZE, SET_SHADOWS, SET_ICONS,
        SET_MOUSE_LOOK, SET_MOUSE_SPEED, SET_FLIGHT_MOUSE, SET_FLIGHT_SPEED, SET_FLIGHT_INVERT,
        SET_CONTROLLER_AIM, SET_LADDER_FREELOOK, SET_LOOK_LIMIT, SET_CLUB_HOLD, SET_KEEP_WEAPONS,
@@ -110,12 +110,13 @@ static const char *const k_look_limits[] = {"original", "extended"};
  * switch), or "dlaa": NVIDIA DLSS as DLAA, anti-aliasing at native resolution,
  * not an upscaler -- named so (dlss_bridge.dll; nv2a_gpu_set_taa). */
 static const char *const k_taa_modes[] = {"off", "on", "dlaa"};
-/* DLAA width: the 3D view at the game's double width (as the console draws
+/* 3D width: the 3D view at the game's double width (as the console draws
  * it: two samples per pixel across, squeezed to the screen) or at the
- * screen's width, for about half the cost -- DLAA's samples over frames
- * take the place of the game's two; a little softer across
- * (nv2a_gpu_set_dlaa_half_width). Only with Temporal AA on dlaa. */
-static const char *const k_dlaa_widths[] = {"double", "screen"};
+ * screen's width, for about half the GPU's work -- the render scale, MSAA
+ * or temporal AA take the place of the game's two samples; a little softer
+ * across (nv2a_gpu_set_scene_width). With any anti-aliasing; it began as
+ * DLAA's alone ("dlaa_width", still read). */
+static const char *const k_scene_widths[] = {"double", "screen"};
 /* Club hold (the war club): the game's (a press swings at once; held a second, the
  * charged strike follows the swing) or "charge" (a tap swings when released,
  * a hold goes straight to the charged strike; video_settings_club_charge). */
@@ -144,7 +145,7 @@ static const VideoSetting k_settings[SETTING_COUNT] = {
      * that MSAA does not reach, steadied over frames. Off by default: it
      * costs frame rate and softens a little in motion. */
     {"temporal_aa", "temporal aa", k_taa_modes, COUNT(k_taa_modes), 0},
-    {"dlaa_width", "dlaa width", k_dlaa_widths, COUNT(k_dlaa_widths), 0},
+    {"scene_width", "3d width", k_scene_widths, COUNT(k_scene_widths), 0},
     {"draw_distance", "draw distance", k_distances, COUNT(k_distances), 1},
     {"heat_haze", "heat haze", k_hazes, COUNT(k_hazes), 2},
     {"shadows", "shadows", k_shadow_modes, COUNT(k_shadow_modes), 1},
@@ -350,6 +351,9 @@ void video_settings_load(void)
 
     for (s = 0; s < SETTING_COUNT; s++) {
         GetPrivateProfileStringA("video", k_settings[s].key, "", text, sizeof text, s_ini_path);
+        /* 3D width was DLAA width ("dlaa_width") at first. */
+        if (!*text && s == SET_SCENE_WIDTH)
+            GetPrivateProfileStringA("video", "dlaa_width", "", text, sizeof text, s_ini_path);
         s_values[s] = value_index(s, text);
         /* Files from before the values were words. */
         if (s_values[s] < 0 && *text && s == SET_RESOLUTION) s_values[s] = resolution_from_scale(text);
@@ -829,7 +833,7 @@ static int values_of(int setting)
 #define GAME_TEXT_CLUB_HOLD 37
 #define GAME_TEXT_AUDIO_OUTPUT 40
 #define GAME_TEXT_HEAT_HAZE 46   /* after Audio out's five values */
-#define GAME_TEXT_DLAA_WIDTH 51  /* after Heat haze's four */
+#define GAME_TEXT_SCENE_WIDTH 51  /* after Heat haze's four */
 #define GAME_TEXT_WEAPONS 54
 
 static int in_game_text(int setting)
@@ -837,7 +841,7 @@ static int in_game_text(int setting)
     return setting == SET_SHADOWS || setting == SET_CONTROLLER_AIM || setting == SET_LADDER_FREELOOK ||
            setting == SET_KEEP_WEAPONS || setting == SET_FOLIAGE_AA || setting == SET_TAA ||
            setting == SET_LOOK_LIMIT || setting == SET_CLUB_HOLD || setting == SET_AUDIO_OUTPUT ||
-           setting == SET_HEAT_HAZE || setting == SET_DLAA_WIDTH;
+           setting == SET_HEAT_HAZE || setting == SET_SCENE_WIDTH;
 }
 
 static int text_label(int setting)
@@ -853,7 +857,7 @@ static int text_label(int setting)
     if (setting == SET_CLUB_HOLD) return GAME_TEXT_CLUB_HOLD;
     if (setting == SET_AUDIO_OUTPUT) return GAME_TEXT_AUDIO_OUTPUT;
     if (setting == SET_HEAT_HAZE) return GAME_TEXT_HEAT_HAZE;
-    if (setting == SET_DLAA_WIDTH) return GAME_TEXT_DLAA_WIDTH;
+    if (setting == SET_SCENE_WIDTH) return GAME_TEXT_SCENE_WIDTH;
     for (s = 0; s < setting; s++)
         if (!in_game_text(s)) key += 1 + (values_of(s) == s ? k_settings[s].count : 0);
     return key;
@@ -2263,7 +2267,7 @@ static void apply_setting(int setting)
         break;
     case SET_FOLIAGE_AA: nv2a_gpu_set_alpha_coverage(s_values[SET_FOLIAGE_AA]); break;
     case SET_TAA: nv2a_gpu_set_taa(s_values[SET_TAA]); apply_setting(SET_MSAA); break;
-    case SET_DLAA_WIDTH: nv2a_gpu_set_dlaa_half_width(s_values[SET_DLAA_WIDTH]); break;
+    case SET_SCENE_WIDTH: nv2a_gpu_set_scene_width(s_values[SET_SCENE_WIDTH]); break;
     case SET_HEAT_HAZE: nv2a_gpu_set_heat_haze(k_haze_modes[s_values[SET_HEAT_HAZE]]); break;
     case SET_SHADOWS:   /* the rest is read as the game runs (recomp_manual.c) */
         nv2a_gpu_set_shadow_scale(s_values[SET_SHADOWS] ? 4 : 1);
@@ -3461,7 +3465,8 @@ void video_settings_start(const char *game_dir)
     apply_setting(SET_MSAA);
     apply_setting(SET_FOLIAGE_AA);
     if (!getenv("RECOMP_TAA")) apply_setting(SET_TAA);   /* RECOMP_TAA set by hand wins at start */
-    if (!getenv("RECOMP_DLAA_HALF_WIDTH")) apply_setting(SET_DLAA_WIDTH);   /* likewise */
+    if (!getenv("RECOMP_SCENE_HALF_WIDTH") && !getenv("RECOMP_DLAA_HALF_WIDTH"))
+        apply_setting(SET_SCENE_WIDTH);   /* likewise */
     apply_setting(SET_SHADOWS);   /* its map scale and exact depth (else only when changed) */
     apply_setting(SET_HEAT_HAZE); /* apply the saved haze mode before the first frame */
     apply_setting(SET_ICONS);

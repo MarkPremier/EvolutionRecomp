@@ -19,9 +19,9 @@ int main(void)
     assert(value_index(SET_HEAT_HAZE, "Enhanced") == 2 && k_haze_modes[2] == 2);
     assert(value_index(SET_HEAT_HAZE, "GameCube") == 3 && k_haze_modes[3] == 4);
     assert(in_game_text(SET_HEAT_HAZE));
-    assert(k_settings[SET_DLAA_WIDTH].count == 2 && k_settings[SET_DLAA_WIDTH].fallback == 0);
-    assert(value_index(SET_DLAA_WIDTH, "double") == 0 && value_index(SET_DLAA_WIDTH, "Screen") == 1);
-    assert(in_game_text(SET_DLAA_WIDTH));
+    assert(k_settings[SET_SCENE_WIDTH].count == 2 && k_settings[SET_SCENE_WIDTH].fallback == 0);
+    assert(value_index(SET_SCENE_WIDTH, "double") == 0 && value_index(SET_SCENE_WIDTH, "Screen") == 1);
+    assert(in_game_text(SET_SCENE_WIDTH));
     assert(value_index(SET_HEAT_HAZE, "original") == 1);
     assert(value_index(SET_HEAT_HAZE, "smooth") == 2);
     assert(value_index(SET_HEAT_HAZE, "sharp") == 2);

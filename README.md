@@ -424,7 +424,7 @@ effect at once and are kept in `turok_settings.ini` beside the exe:
 | MSAA | off, 2x, 4x, 8x | |
 | Foliage AA | off, on (on by default; with MSAA, the edges of grass, leaves and other cut-out textures are smoothed too; about 5% of the frame rate when the GPU is the limit) | |
 | Temporal AA | off, on, dlaa (off by default; experimental. "on" steadies the shimmer inside grass, leaves and fine textures that MSAA does not reach by blending each frame with the ones before, then sharpens lightly: a little softer while turning, about 10% of the frame rate. "dlaa" is NVIDIA DLSS as DLAA, on NVIDIA RTX graphics cards: anti-aliasing at native resolution, not an upscaler, so it costs frame rate rather than saving it (more at very high resolutions); MSAA is off while it is chosen, and without an RTX card or its files it falls back to "on". The HUD is drawn after either and stays sharp) | `RECOMP_TAA` (1, 2 for DLAA, or 0, at start); `RECOMP_DLSS_PRESET=<letter>` (NVIDIA's model), `RECOMP_DLSS_JITTER_SIGN=-1` |
-| DLAA width | double, screen (double by default; with Temporal AA on dlaa only. The game draws its 3D view twice the screen's width and squeezes it, as on the console: two samples per pixel across. "screen" draws it at the screen's width, so DLAA and the 3D drawing cover half the pixels: at 1440p widescreen about 185 fps instead of 110, or a much lighter load at a capped rate. DLAA's samples over frames take the place of the game's two; it is a little softer across, mostly in foliage) | `RECOMP_DLAA_HALF_WIDTH=1` (at start) |
+| 3D width | double, screen (double by default. The game draws its 3D view twice the screen's width and squeezes it, as on the console: two samples per pixel across, its own anti-aliasing, at twice the GPU work for every 3D draw. "screen" draws it at the screen's width, with any anti-aliasing: the render scale, MSAA or temporal AA take the place of the game's two samples, and it is a little softer across, mostly in foliage. Where the GPU is the limit it is much faster: 2160p with 4x MSAA went from 92 to 167 fps, and 1440p with DLAA from 110 to 185. It began as DLAA width, and a saved `dlaa_width` is still read) | `RECOMP_SCENE_HALF_WIDTH=1` (at start) |
 | Button icons | xbox, pc | |
 | Audio out | auto, stereo, 5.1, 7.1, mono (stereo by default; on the game's Sound Options page, under music volume; applies at the next start; see below) | `RECOMP_AUDIO_OUTPUT` |
 | Mouse look | raw, stick (raw falls back to stick in vehicles and turrets; on the PC Settings page, kept with these settings) | |
@@ -740,11 +740,23 @@ values in locals; the lifted file, like `src/recomp/gen`, is made from the
 XBE and not kept here, and without it the generated code runs). Together a
 sixth more frame rate where the game thread is the limit.
 
+A second round (2026-11-23), from a profile of the game thread standing in
+the Chapter 1 jungle: three leaf functions written natively the same way --
+a 4x4 matrix product (`sub_00015DE0`), a bounding box moved by a matrix
+(`sub_0017F940`) and a clamped running total (`sub_0001A980`) -- about 7%
+more frame rate; and four more lifted by `tools/x86_lift.py` into
+`src/native/` (`sub_00070930`, `sub_00022ED0`, `sub_0002FD10`,
+`sub_00070DF0`; the commands are in `src/recomp_manual.c`, "Lifted
+leaves"), about 4% more. At 480p the test scene went from about 177 to 199
+fps. The three native ones were checked over 30 million calls with no
+difference; the lifted ones from RAM snapshots, the only differences being
+counters other threads advance meanwhile.
+
 | Variable | What it does |
 |----------|--------------|
 | `RECOMP_NATIVE=0` | Runs the generated code for all of them (`run_original_code.bat`), to tell whether one is behind a problem |
-| `RECOMP_NATIVE_ANIM=0`, `RECOMP_NATIVE_MATRIX4=0`, `RECOMP_NATIVE_LIGHTING=0` | The same for one |
-| `RECOMP_ANIM_VERIFY=1`, `RECOMP_MATRIX_VERIFY=1`, `RECOMP_LIGHTING_VERIFY=<n>` | Run both and report any difference (lighting: every nth call, from guest RAM snapshots; `RECOMP_LIGHTING_VERIFY_AFTER=<s>` starts it later, `RECOMP_LIGHTING_TRACE=1` with the traced copies from `tools/lift_trace.py` names the first differing block and store) |
+| `RECOMP_NATIVE_ANIM=0`, `RECOMP_NATIVE_MATRIX4=0`, `RECOMP_NATIVE_LIGHTING=0`, `RECOMP_NATIVE_LEAF=0` (the three native leaves), `RECOMP_NATIVE_LIFTED=0` (the four lifted ones) | The same for one |
+| `RECOMP_ANIM_VERIFY=1`, `RECOMP_MATRIX_VERIFY=1` (also the native leaves), `RECOMP_LIGHTING_VERIFY=<n>`, `RECOMP_LIFT_VERIFY=<n>` (the lifted leaves) | Run both and report any difference (lighting and lifted leaves: every nth call, from guest RAM snapshots; `RECOMP_LIGHTING_VERIFY_AFTER=<s>` starts it later, `RECOMP_LIGHTING_TRACE=1` with the traced copies from `tools/lift_trace.py` names the first differing block and store) |
 
 Useful while debugging:
 

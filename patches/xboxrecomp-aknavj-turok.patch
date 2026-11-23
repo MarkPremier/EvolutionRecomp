@@ -4905,7 +4905,7 @@ index b8d804a..610c082 100644
  						  const float attributes[16][4], float constants[192][4]);
  
 diff --git a/src/kernel/nv2a_gpu_d3d11.cpp b/src/kernel/nv2a_gpu_d3d11.cpp
-index f031faf..5602043 100644
+index f031faf..ae191a5 100644
 --- a/src/kernel/nv2a_gpu_d3d11.cpp
 +++ b/src/kernel/nv2a_gpu_d3d11.cpp
 @@ -1,6 +1,7 @@
@@ -5387,12 +5387,12 @@ index f031faf..5602043 100644
 +    return std::min<UINT>((UINT)((float)size * factor + 0.5f), D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION);
 +}
 +
-+/* Half-width DLAA (dlaa_half_width): a title that draws its 3D view twice
++/* Screen-width 3D (scene_half_width): a title that draws its 3D view twice
 + * the screen's width (Turok Evolution: 1280x480, squeezed to 640 for the
 + * screen -- two samples per pixel across, its own anti-aliasing) has those
-+ * targets drawn at half that density across while DLAA is the chosen mode:
-+ * the screen's own width, so DLAA (and every 3D draw) covers half the
-+ * pixels; DLAA's samples over frames take the place of the title's two.
++ * targets drawn at half that density across: the screen's own width, so
++ * every 3D draw (and DLAA or TAA) covers half the pixels, and the render
++ * scale, MSAA or temporal AA take the place of the title's two samples.
 + * 1, or 0.5 while it applies (apply_target_sizes). */
 +static float double_width_density = 1.0f;
 +
@@ -6516,14 +6516,7 @@ index f031faf..5602043 100644
 +
 +/* `texture` up to date with what was drawn into the twin. */
 +static void resolve_color(Surface &surface)
- {
--    if (!extent.width) extent = {state.width, state.height};
--    for (auto &surface : surfaces)
--        if (surface.memory == state.color && surface.width == extent.width && surface.height == extent.height && surface.pitch == state.pitch) {
--            surface.last_used = ++surface_use_serial;
--            if (preserve) refresh_surface(surface);
--            else surface.needs_refresh = false;
--            return &surface;
++{
 +    if (!surface.ms_texture || !surface.ms_newer) return;
 +    context->ResolveSubresource(surface.texture.Get(), 0, surface.ms_texture.Get(), 0, DXGI_FORMAT_B8G8R8A8_UNORM);
 +    surface.ms_newer = false;
@@ -6532,7 +6525,14 @@ index f031faf..5602043 100644
 +/* Depth has no ResolveSubresource: the first sample of each pixel, drawn as
 + * SV_Depth into the single-sampled view. Stencil is not carried. */
 +static void resolve_depth(DepthSurface &surface)
-+{
+ {
+-    if (!extent.width) extent = {state.width, state.height};
+-    for (auto &surface : surfaces)
+-        if (surface.memory == state.color && surface.width == extent.width && surface.height == extent.height && surface.pitch == state.pitch) {
+-            surface.last_used = ++surface_use_serial;
+-            if (preserve) refresh_surface(surface);
+-            else surface.needs_refresh = false;
+-            return &surface;
 +    static ComPtr<ID3D11VertexShader> vertex;
 +    static ComPtr<ID3D11PixelShader> pixel;
 +    static ComPtr<ID3D11DepthStencilState> write;
@@ -6745,15 +6745,15 @@ index f031faf..5602043 100644
 +    std::fprintf(stderr, "[GPU-D3D11] %s: %u colour and %u depth targets redrawn\n", why, colors, depths);
 +}
 +
-+static bool dlaa_half_width();
++static bool scene_half_width();
 +
 +/* Between frames: a scale or widescreen asked for, and the 2D-frame test. */
 +static void apply_target_sizes()
 +{
 +    char why[96] = "";
-+    float density = dlaa_half_width() ? 0.5f : 1.0f;
++    float density = scene_half_width() ? 0.5f : 1.0f;
 +    if (density != double_width_density) {
-+        std::snprintf(why, sizeof why, "DLAA %s width", density < 1.0f ? "screen" : "double");
++        std::snprintf(why, sizeof why, "3D view at %s width", density < 1.0f ? "the screen's" : "double");
 +        double_width_density = density;
 +    }
 +    float requested = pending_render_scale.exchange(-1.0f);
@@ -7991,7 +7991,7 @@ index f031faf..5602043 100644
      context->RSSetState(pipeline.raster.Get());
      context->RSSetViewports(1, &viewport);
      context->RSSetScissorRects(1, &clip);
-@@ -2756,17 +5052,897 @@ static bool clear_target_rectangle(const Nv2aGpuDraw &state, Surface *surface, D
+@@ -2756,17 +5052,903 @@ static bool clear_target_rectangle(const Nv2aGpuDraw &state, Surface *surface, D
      return true;
  }
  
@@ -8607,27 +8607,33 @@ index f031faf..5602043 100644
 +    return true;
 +}
 +
-+/* Half-width DLAA (double_width_density): while the chosen anti-aliasing is
-+ * DLAA, NVIDIA DLSS has not been found missing, and it is asked for
-+ * (nv2a_gpu_set_dlaa_half_width, or RECOMP_DLAA_HALF_WIDTH=1). Kept while
-+ * DLAA pauses for menus and cutscenes (TAA then), so targets are not
-+ * remade at every pause. */
-+static std::atomic<int> dlaa_half_width_setting{-1};
-+extern "C" void nv2a_gpu_set_dlaa_half_width(int on)
++/* Screen-width 3D (double_width_density): asked for by the title
++ * (nv2a_gpu_set_scene_width), or RECOMP_SCENE_HALF_WIDTH=1 (the older
++ * RECOMP_DLAA_HALF_WIDTH too). Any anti-aliasing: it was DLAA's alone at
++ * first. Changing it remakes the targets once, between frames. */
++static std::atomic<int> scene_half_width_setting{-1};
++extern "C" void nv2a_gpu_set_scene_width(int screen)
 +{
-+    dlaa_half_width_setting.store(on ? 1 : 0, std::memory_order_relaxed);
++    scene_half_width_setting.store(screen ? 1 : 0, std::memory_order_relaxed);
 +}
 +
-+static bool dlaa_half_width()
++/* The earlier name, for titles built against it. */
++extern "C" void nv2a_gpu_set_dlaa_half_width(int on)
 +{
-+    int setting = dlaa_half_width_setting.load(std::memory_order_relaxed);
++    nv2a_gpu_set_scene_width(on);
++}
++
++static bool scene_half_width()
++{
++    int setting = scene_half_width_setting.load(std::memory_order_relaxed);
 +    if (setting < 0) {
-+        const char *value = std::getenv("RECOMP_DLAA_HALF_WIDTH");
++        const char *value = std::getenv("RECOMP_SCENE_HALF_WIDTH");
++        if (!value || !*value) value = std::getenv("RECOMP_DLAA_HALF_WIDTH");
 +        setting = value && *value && *value != '0' ? 1 : 0;
 +        int expected = -1;
-+        dlaa_half_width_setting.compare_exchange_strong(expected, setting);
++        scene_half_width_setting.compare_exchange_strong(expected, setting);
 +    }
-+    return setting == 1 && taa_setting.load(std::memory_order_relaxed) == 2 && dlss.state >= 0;
++    return setting == 1;
 +}
 +
 +static bool dlss_frame_ready()
@@ -8891,7 +8897,7 @@ index f031faf..5602043 100644
      if (state->topology > NV2A_GPU_TOPOLOGY_POINTS) return reject("primitive topology");
      uint32_t primitive_width = state->topology == NV2A_GPU_TOPOLOGY_TRIANGLES ? 3u :
                                 state->topology == NV2A_GPU_TOPOLOGY_LINES ? 2u : 1u;
-@@ -2775,7 +5951,7 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -2775,7 +5957,7 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
          (state->indices && element_count > NV2A_GPU_MAX_INDICES)) return reject("primitive element count");
      if (state->topology == NV2A_GPU_TOPOLOGY_POINTS && state->point_size && state->point_size != 8)
          return reject("non-unit point size");
@@ -8900,7 +8906,7 @@ index f031faf..5602043 100644
          for (uint32_t index = 0; index < state->index_count; index++)
              if (state->indices[index] >= count) return reject("vertex index extent");
      }
-@@ -2856,12 +6032,25 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -2856,12 +6038,25 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
      for (uint32_t vertex = 0; !state->vertex_program && !state->fixed_transform && vertex < count; vertex++)
          if (!nv_cpu_finite(vertices[vertex].position[0]) || !nv_cpu_finite(vertices[vertex].position[1]) ||
              !nv_cpu_finite(vertices[vertex].position[2]) || !nv_cpu_finite(vertices[vertex].position[3])) return 0;
@@ -8928,7 +8934,7 @@ index f031faf..5602043 100644
      D3D11_DEPTH_STENCIL_DESC depth_description = {};
      depth_description.DepthEnable = state->depth_enable != 0;
      depth_description.DepthWriteMask = state->depth_mask ? D3D11_DEPTH_WRITE_MASK_ALL : D3D11_DEPTH_WRITE_MASK_ZERO;
-@@ -2903,8 +6092,24 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -2903,8 +6098,24 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
                        (LONG)std::min(state->clip_y + state->clip_height, state->height)};
      if (state->topology == NV2A_GPU_TOPOLOGY_TRIANGLES && state->cull_enable && state->cull_face == 0x408) { clip.right = clip.left; clip.bottom = clip.top; }
      configure_window_clip(*state, constants, clip);
@@ -8954,7 +8960,7 @@ index f031faf..5602043 100644
      constants.misc[1] = state->control0;
      constants.misc[2] = state->fixed_transform; constants.misc[3] = state->flat_shading;
      constants.final_input[0] = state->combiners.final_input[0]; constants.final_input[1] = state->combiners.final_input[1];
-@@ -2971,14 +6176,78 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -2971,14 +6182,78 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
              }
          }
      }
@@ -8969,7 +8975,7 @@ index f031faf..5602043 100644
 +    int projection = projection_register(*state);
 +    if (projection >= 0 && surface && screen_shaped(surface->width, surface->height)) screen_3d_draws++;
 +    float widened = ((float)target_width / (float)guest_width) / ((float)target_height / (float)guest_height);
-+    /* Half-width DLAA draws a double-width target at half density across
++    /* Screen-width 3D draws a double-width target at half density across
 +     * (double_width_density): that is not a wider view, so it is taken out
 +     * here, or the 3D view lost its widescreen and stretched to the screen. */
 +    if (double_width_density != 1.0f && surface && screen_shaped(surface->width, surface->height) &&
@@ -9035,7 +9041,7 @@ index f031faf..5602043 100644
      for (uint32_t stage = 0; stage < 8; stage++) {
          constants.stages[stage][0] = state->combiners.rgb_input[stage]; constants.stages[stage][1] = state->combiners.alpha_input[stage];
          constants.stages[stage][2] = state->combiners.rgb_output[stage]; constants.stages[stage][3] = state->combiners.alpha_output[stage];
-@@ -3052,7 +6321,8 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -3052,7 +6327,8 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
              constants.texture_info[stage][3] = 0.0f;
              continue;
          }
@@ -9045,7 +9051,7 @@ index f031faf..5602043 100644
              return reject("projective volume texture dimensionality");
          uint32_t sign_mask = binding.filter >> 28;
          uint32_t key_mode = binding.control0_valid ? binding.control0 & 3u : 0;
-@@ -3090,9 +6360,50 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -3090,9 +6366,50 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
              if ((mode == 1 || mode == 2) && vertices[vertex].texture[stage][3] == 0) return reject("zero projective texture coordinate");
          }
          if (!binding.source_bytes) return reject("missing texture data");
@@ -9098,7 +9104,7 @@ index f031faf..5602043 100644
          constants.texture_info[stage][0] = (float)binding.width; constants.texture_info[stage][1] = (float)binding.height; constants.texture_info[stage][2] = (float)binding.linear;
          constants.texture_key[stage][0] = binding.color_key;
          constants.texture_key[stage][1] = binding.format == 0x03 || binding.format == 0x07 ||
-@@ -3102,7 +6413,18 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -3102,7 +6419,18 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
          constants.texture_info[stage][3] = (float)((binding.format == 0x1E ? 1u : 0u) | (binding.cube ? 2u : 0u) |
              (binding.address_u == 5 ? 4u : 0u) | (binding.address_v == 5 ? 8u : 0u) |
              (binding.control0_valid && (binding.control0 & 4u) ? 16u : 0u) |
@@ -9118,7 +9124,7 @@ index f031faf..5602043 100644
          if (sign_mask) signed_texture_stages++;
          switch (binding.format) {
          case 0x01: case 0x16: case 0x17: case 0x1A: case 0x1B: case 0x20: case 0x28: case 0x29:
-@@ -3111,32 +6433,94 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -3111,32 +6439,94 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
          }
      }
      phase_timer.next_phase(gpu_timing.draw_streams);
@@ -9231,7 +9237,7 @@ index f031faf..5602043 100644
                  !std::memcmp(&uploaded_constants, &constants, sizeof constants)) {
              /* Same constants as the last upload this frame: rebind its offset. */
              gpu_timing.constant_reuses++;
-@@ -3146,6 +6530,8 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -3146,6 +6536,8 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
              if (!map_stream(constant_stream, kConstantSlot, D3D11_BIND_CONSTANT_BUFFER, "constants", constants_offset))
                  return 0;
              std::memcpy((uint8_t *)constant_stream.mapped.pData + constants_offset, &constants, sizeof constants);
@@ -9240,7 +9246,7 @@ index f031faf..5602043 100644
              constant_upload_offset = constants_offset;
              uploaded_constants = constants;
              uploaded_constants_valid = true;
-@@ -3170,20 +6556,35 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -3170,20 +6562,35 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
              constants.texture_key[stage][2] == 3u) uncombined = false;
      ID3D11PixelShader *program = uncombined ? uncombined_shader.Get() : get_pixel_shader(*state, constants.window_clip_control[0]);
      if (!program) return 0;
@@ -9280,7 +9286,7 @@ index f031faf..5602043 100644
      context->OMSetDepthStencilState(depth_state.Get(), state->stencil_reference & 255u); context->OMSetBlendState(blending.Get(), blend_color, ~0u);
      context->IASetInputLayout(guest_vertex ? guest_vertex->layout.Get() : input_layout.Get()); context->IASetVertexBuffers(0, 1, buffers, &stride, &offset);
      context->IASetPrimitiveTopology(state->topology == NV2A_GPU_TOPOLOGY_LINES ? D3D11_PRIMITIVE_TOPOLOGY_LINELIST :
-@@ -3192,7 +6593,7 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -3192,7 +6599,7 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
      context->VSSetShader(guest_vertex ? guest_vertex->shader.Get() : vertex_shader.Get(), nullptr, 0);
      ID3D11GeometryShader *geometry = state->topology == NV2A_GPU_TOPOLOGY_LINES ? line_geometry_shader.Get() :
          state->topology == NV2A_GPU_TOPOLOGY_POINTS ? point_geometry_shader.Get() :
@@ -9289,7 +9295,7 @@ index f031faf..5602043 100644
      context->GSSetShader(geometry, nullptr, 0);
      context->PSSetShader(program, nullptr, 0);
      if (constants_ring && context1) {
-@@ -3200,25 +6601,32 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -3200,25 +6607,32 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
          context1->VSSetConstantBuffers1(0, 1, &constant_ring_buffer, &first, &num);
          context1->PSSetConstantBuffers1(0, 1, &constant_ring_buffer, &first, &num);
          context1->GSSetConstantBuffers1(0, 1, &constant_ring_buffer, &first, &num);
@@ -9327,7 +9333,7 @@ index f031faf..5602043 100644
      end_gpu_sample(sample);
      phase_timer.next_phase(gpu_timing.draw_bookkeeping);
      if (state->topology == NV2A_GPU_TOPOLOGY_LINES) gpu_timing.line_primitives += element_count / 2;
-@@ -3245,8 +6653,10 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -3245,8 +6659,10 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
          if (texture_matrix_used) gpu_timing.texture_matrix_draws++;
      }
      pending_draws = true;
@@ -9339,7 +9345,7 @@ index f031faf..5602043 100644
      bool stencil_writes = state->stencil_enable && (state->stencil_write_mask & 255u) &&
          (state->stencil_fail != 0x1E00 || state->stencil_depth_fail != 0x1E00 || state->stencil_pass != 0x1E00);
      if (depth && ((state->depth_enable && state->depth_mask) || stencil_writes) && writes) mark_written_region(*depth, region);
-@@ -3260,8 +6670,8 @@ extern "C" int nv2a_gpu_compile(void)
+@@ -3260,8 +6676,8 @@ extern "C" int nv2a_gpu_compile(void)
      if (vertex_shader && uncombined_shader && geometry_shader && line_geometry_shader && point_geometry_shader) return 1;
      if (!nv2a_gpu_available()) return 0;
      ComPtr<ID3DBlob> pixel_code, errors;
@@ -9350,7 +9356,7 @@ index f031faf..5602043 100644
      if (FAILED(result)) {
          std::fprintf(stderr, "[GPU-D3D11] shader compile: %s\n", errors ? (const char *)errors->GetBufferPointer() : "failed");
          return 0;
-@@ -3273,8 +6683,8 @@ extern "C" int nv2a_gpu_compile(void)
+@@ -3273,8 +6689,8 @@ extern "C" int nv2a_gpu_compile(void)
          return 0;
      }
      pixel_code.Reset(); errors.Reset();
@@ -9361,7 +9367,7 @@ index f031faf..5602043 100644
      if (FAILED(result)) return 0;
      if (FAILED(device->CreatePixelShader(pixel_code->GetBufferPointer(), pixel_code->GetBufferSize(), nullptr, &uncombined_shader))) return 0;
      const struct { const char *entry; ComPtr<ID3D11GeometryShader> *shader; } geometries[] = {
-@@ -3282,8 +6692,8 @@ extern "C" int nv2a_gpu_compile(void)
+@@ -3282,8 +6698,8 @@ extern "C" int nv2a_gpu_compile(void)
      };
      for (const auto &geometry : geometries) {
          pixel_code.Reset(); errors.Reset();
@@ -9372,7 +9378,7 @@ index f031faf..5602043 100644
          if (SUCCEEDED(result))
              result = device->CreateGeometryShader(pixel_code->GetBufferPointer(), pixel_code->GetBufferSize(), nullptr,
                                                     geometry.shader->ReleaseAndGetAddressOf());
-@@ -3296,28 +6706,98 @@ extern "C" int nv2a_gpu_compile(void)
+@@ -3296,28 +6712,98 @@ extern "C" int nv2a_gpu_compile(void)
      return 1;
  }
  
