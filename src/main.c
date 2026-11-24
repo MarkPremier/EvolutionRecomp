@@ -499,9 +499,71 @@ static LONG WINAPI on_unhandled(EXCEPTION_POINTERS *ep)
     return EXCEPTION_CONTINUE_SEARCH;
 }
 
+/* ── Input, as the log sees it ─────────────────────────────────
+ *
+ * For controls that do nothing on a Steam Deck (issue #1): whether Steam ran
+ * the game on a Deck and in Game Mode (Steam puts SteamDeck=1 and
+ * SteamGamepadUI=1 in a game's environment; Proton passes them on), each
+ * XInput slot as it comes and goes and the first input it gives, and whether
+ * a window of the game has the focus -- Steam feeds the Deck's controls only
+ * to the game it takes to be in front. Checked twice a second. */
+#include <xinput.h>
+
+static DWORD WINAPI input_watch(void *unused)
+{
+    int connected[XUSER_MAX_COUNT], moved[XUSER_MAX_COUNT], focused = -1;
+    DWORD slot;
+    (void)unused;
+    for (slot = 0; slot < XUSER_MAX_COUNT; slot++) connected[slot] = -1, moved[slot] = 0;
+    for (;;) {
+        HWND front = GetForegroundWindow();
+        DWORD owner = 0;
+        int ours;
+        for (slot = 0; slot < XUSER_MAX_COUNT; slot++) {
+            XINPUT_STATE state;
+            const XINPUT_GAMEPAD *pad = &state.Gamepad;
+            int now = XInputGetState(slot, &state) == ERROR_SUCCESS;
+            if (now != connected[slot]) {
+                if (now || connected[slot] >= 0)
+                    fprintf(stderr, "[INPUT] XInput slot %lu %s\n", slot, now ? "connected" : "disconnected");
+                connected[slot] = now;
+                moved[slot] = 0;
+            }
+            if (now && !moved[slot] &&
+                    (pad->wButtons || pad->bLeftTrigger > 30 || pad->bRightTrigger > 30 ||
+                     abs(pad->sThumbLX) > 8000 || abs(pad->sThumbLY) > 8000 ||
+                     abs(pad->sThumbRX) > 8000 || abs(pad->sThumbRY) > 8000)) {
+                fprintf(stderr, "[INPUT] XInput slot %lu: first input (buttons %04X)\n", slot, pad->wButtons);
+                moved[slot] = 1;
+            }
+        }
+        if (front) GetWindowThreadProcessId(front, &owner);
+        ours = front && owner == GetCurrentProcessId();
+        if (ours != focused) {
+            fprintf(stderr, "[INPUT] the game's window %s the focus\n", ours ? "has" : "does not have");
+            focused = ours;
+        }
+        fflush(stderr);
+        Sleep(500);
+    }
+    return 0;
+}
+
+static void input_watch_start(void)
+{
+    const char *deck = getenv("SteamDeck"), *game_mode = getenv("SteamGamepadUI");
+    HANDLE thread;
+    fprintf(stderr, "[INPUT] %s%s (SteamDeck=%s SteamGamepadUI=%s)\n",
+            deck && atoi(deck) ? "Steam Deck" : "not a Steam Deck",
+            game_mode && atoi(game_mode) ? ", Game Mode" : "", deck ? deck : "-", game_mode ? game_mode : "-");
+    thread = CreateThread(NULL, 0, input_watch, NULL, 0, NULL);
+    if (thread) CloseHandle(thread);
+}
+
 static void install_crash_log(void)
 {
     open_log();
+    input_watch_start();
     signal(SIGABRT, on_abort);
     _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
     _set_invalid_parameter_handler(on_invalid_parameter);
@@ -681,6 +743,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     /* Step 1: Load XBE, from the player's copy of the disc (game_files.c:
      * found, extracted from an image, or asked for). */
     if (!game_files_locate(YOUR_GAME_DIR, s_game_dir, sizeof s_game_dir)) return 0;
+    game_files_movies(s_game_dir);
     snprintf(s_xbe_path, sizeof s_xbe_path, "%s\\default.xbe", s_game_dir);
     printf("Game files: %s\n", s_game_dir);
     if (!load_xbe(s_xbe_path, &xbe_data, &xbe_size)) {

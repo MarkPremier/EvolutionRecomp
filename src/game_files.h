@@ -10,4 +10,8 @@
  * cancelled). */
 int game_files_locate(const char *build_dir, char *dir, size_t size);
 
+/* Another release's disc image beside the program (the European one): its
+ * Data\Video language folders that `dir` lacks are copied in, once. */
+void game_files_movies(const char *dir);
+
 #endif

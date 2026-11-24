@@ -361,8 +361,19 @@ void video_settings_load(void)
     snprintf(slash ? slash + 1 : s_ini_path, sizeof s_ini_path - (slash ? (size_t)(slash + 1 - s_ini_path) : 0),
              "turok_settings.ini");
 
+    /* A Steam Deck (Steam sets SteamDeck=1 in a game's environment): settings
+     * not yet saved start lighter there -- Xbox shadows, the normal draw
+     * distance and 4x anisotropy -- for its smaller GPU. Resolution stays
+     * auto, the Deck's own 800 lines. */
+    env = getenv("SteamDeck");
+    int deck = env && atoi(env) != 0, deck_defaults = 0;
     for (s = 0; s < SETTING_COUNT; s++) {
         GetPrivateProfileStringA("video", k_settings[s].key, "", text, sizeof text, s_ini_path);
+        if (deck && !*text && (s == SET_SHADOWS || s == SET_DRAW_DISTANCE || s == SET_ANISOTROPY)) {
+            s_values[s] = s == SET_ANISOTROPY ? 2 : 0;
+            deck_defaults++;
+            continue;
+        }
         /* 3D width was DLAA width ("dlaa_width") at first. */
         if (!*text && s == SET_SCENE_WIDTH)
             GetPrivateProfileStringA("video", "dlaa_width", "", text, sizeof text, s_ini_path);
@@ -390,6 +401,7 @@ void video_settings_load(void)
     for (s = 0; s < SETTING_COUNT; s++)
         fprintf(stderr, " %s %s", k_settings[s].key, k_settings[s].values[s_values[s]]);
     fprintf(stderr, "\n");
+    if (deck_defaults) fprintf(stderr, "[VIDEO] Steam Deck: %d settings at the Deck's defaults\n", deck_defaults);
 
     unsigned default_slots = 0;
     for (s = 0; s < BIND_COUNT; s++) {
@@ -1818,15 +1830,272 @@ static void make_controls_history(Buffer *out)
     }
 }
 
+/* ── Language ─────────────────────────────────────────────────────
+ *
+ * The USA disc has the PAL release's French, German, Spanish and Italian
+ * text (data\text\<language>\, American in data\text\ itself), and Game
+ * Options has its Language row (Options.hst item 6), which the screen's
+ * "version" links hide. The row is shown again here, and the game's own
+ * language switch is made at each screen load (video_settings_language). */
+
+/* An event aimed at the Language row, its label or its value. */
+static int is_language_row(const Node *event)
+{
+    char name[32];
+    return target_of(event, name, sizeof name) && (!strcmp(name, "language") || !strcmp(name, "languageValueWidget"));
+}
+
+/* Game Options (the front end's and the pause menu's): the "version" links,
+ * German and not (Options.hst item 6 = 2 or not), keep their other events
+ * (German still hides the violence row) but no longer take the Language row
+ * off the screen and out of focus; each names it "init", as the screen does
+ * the rows it shows. */
+static int show_language_row(Node *screen, const char *unused)
+{
+    Node *deity = actor_named(screen, "DeityNoFade", NULL), *language = actor_named(screen, "language", NULL);
+    Node *init = NULL;
+    uint32_t i, j;
+    int shown = 0;
+    (void)unused;
+    if (!deity || !language) return 0;
+    for (i = 0; !init && i < deity->count; i++) {
+        Node *events = child(deity->children[i], "EVENTS");
+        char name[32];
+        if (strcmp(deity->children[i]->name, "LINK")) continue;
+        for (j = 0; events && j < events->count; j++)
+            if (is_event(events->children[j], "Name.") && is_text(child(events->children[j], "NAME"), "init") &&
+                    target_of(events->children[j], name, sizeof name) && !strcmp(name, "violence")) {
+                init = events->children[j];
+                break;
+            }
+    }
+    if (!init) return 0;
+    for (i = 0; i < deity->count; i++) {
+        Node *link = deity->children[i], *cause = child(link, "CAUSE"), *events = child(link, "EVENTS"), *test, *copy;
+        if (strcmp(link->name, "LINK") || !events || !is_text(child(cause, "NAME"), "version") ||
+                byte_of(child(cause, "CP")) != 0) continue;
+        test = event_of(link, "lc_hist");
+        if (!test || !is_text(child(test, "H"), OPTIONS_HST) || byte_of(child(test, "N")) != 6) continue;
+        for (j = events->count; j-- > 0;)
+            if ((is_event(events->children[j], "Focus.") || is_event(events->children[j], "Turn invisible")) &&
+                    is_language_row(events->children[j]))
+                node_remove(events, j);
+        copy = node_clone(init);
+        retarget(copy, "language", actor_id(language));
+        node_insert(events, events->count, copy);
+        shown++;
+    }
+    return shown == 2;
+}
+
+/* The four movie screens (the opening, Tarkeen, Tyrannus and the ending)
+ * play the chosen language's movie, data\Video\<Language>\<name>.xmv: the
+ * PAL release's dubbed ones, of which the USA disc has only English. A
+ * language's movie that is not in the game folder is the English one (a PAL
+ * disc's, copied in, plays). */
+static const char *const k_movie_screens[] = {"gamestart", "tarkeen", "tyrannus2", "ending"};
+#define MOVIE_PREFIX "$/Data\\Video\\"
+
+static int english_movies_in(Node *node, const char *game_dir)
+{
+    int changed = 0;
+    uint32_t i;
+    if (!strcmp(node->name, "VN") && node->value_size > sizeof MOVIE_PREFIX &&
+            !_strnicmp((const char *)node->value, MOVIE_PREFIX, sizeof MOVIE_PREFIX - 1)) {
+        char movie[MAX_PATH], path[MAX_PATH], *language, *name, *dot;
+        snprintf(movie, sizeof movie, "%.*s", (int)node->value_size - 1, (const char *)node->value);
+        language = movie + sizeof MOVIE_PREFIX - 1;
+        name = strchr(language, '\\');
+        if (name && _strnicmp(language, "English\\", 8)) {
+            *name++ = 0;
+            dot = strrchr(name, '.');
+            snprintf(path, sizeof path, "%s\\data\\video\\%s\\%.*s.xmv", game_dir, language,
+                     (int)(dot ? dot - name : (ptrdiff_t)strlen(name)), name);
+            if (GetFileAttributesA(path) == INVALID_FILE_ATTRIBUTES) {
+                snprintf(path, sizeof path, MOVIE_PREFIX "English\\%s", name);
+                set_text(node, path);
+                changed++;
+            }
+        }
+    }
+    for (i = 0; i < node->count; i++) changed += english_movies_in(node->children[i], game_dir);
+    return changed;
+}
+
+static int english_movies(Node *screen, const char *game_dir)
+{
+    english_movies_in(screen, game_dir);
+    return 1;
+}
+
+/* The GameCube release's layout fixes to the translated text: where a line's
+ * words are the Xbox's, the gaps between them that became line breaks (or
+ * spaces), so a line fits its box; and Spanish's opening and closing
+ * exclamation marks. Each names the Xbox line by its CRC-32 and is made only
+ * to that line. (Left out: the GameCube's own wording, such as its memory
+ * card text, and its few rewordings.) Gap n is before word n, gap 0 a
+ * leading one. */
+enum { TEXT_EDIT_GAP, TEXT_EDIT_PREFIX, TEXT_EDIT_SUFFIX };
+static const struct TextEdit {
+    const char *file;
+    int key;
+    uint32_t crc;
+    int kind, at;
+    const char *text;
+} k_text_edits[] = {
+    {"german\\ingamepause.txm", 5, 0xCA9E5F89u, TEXT_EDIT_GAP, 1, " "},
+    {"german\\ingamepause.txm", 5, 0xCA9E5F89u, TEXT_EDIT_GAP, 2, "\\n"},
+    {"german\\ingamepause.txm", 5, 0xCA9E5F89u, TEXT_EDIT_GAP, 4, "\\n"},
+    {"german\\ingamepause.txm", 5, 0xCA9E5F89u, TEXT_EDIT_GAP, 5, " "},
+    {"german\\multiplayermap.txm", 31, 0xD1C1ED0Du, TEXT_EDIT_GAP, 7, "\\n"},
+    {"german\\multiplayermap.txm", 31, 0xD1C1ED0Du, TEXT_EDIT_GAP, 8, " "},
+    {"german\\multiplayermap.txm", 31, 0xD1C1ED0Du, TEXT_EDIT_GAP, 13, "\\n"},
+    {"german\\multiplayermap.txm", 31, 0xD1C1ED0Du, TEXT_EDIT_GAP, 14, " "},
+    {"german\\pod05-rescuewarplans.txm", 2, 0x83C1C924u, TEXT_EDIT_GAP, 8, "\\n"},
+    {"german\\pod05-rescuewarplans.txm", 2, 0x83C1C924u, TEXT_EDIT_GAP, 10, "\\n"},
+    {"italian\\failedpickup.txm", 5, 0x3E921F01u, TEXT_EDIT_GAP, 2, "\\n"},
+    {"italian\\failedpickup.txm", 9, 0xCD1AE273u, TEXT_EDIT_GAP, 2, "\\n"},
+    {"italian\\multiplayermap.txm", 29, 0xBE0CD94Fu, TEXT_EDIT_GAP, 4, "\\n"},
+    {"italian\\pod04-stealthentrance.txm", 6, 0xABDFC696u, TEXT_EDIT_GAP, 4, "\\n"},
+    {"italian\\pod04-stealthentrance.txm", 6, 0xABDFC696u, TEXT_EDIT_GAP, 7, " "},
+    {"italian\\pod04-stealthentrance.txm", 6, 0xABDFC696u, TEXT_EDIT_GAP, 8, "\\n"},
+    {"italian\\pod04-stealthentrance.txm", 7, 0xB88C9BFCu, TEXT_EDIT_GAP, 3, "\\n"},
+    {"spanish\\pod02-flighttraining.txm", 14, 0xDFB851C2u, TEXT_EDIT_PREFIX, 0, "&iexcl;"},
+    {"spanish\\pod02-flighttraining.txm", 15, 0xDF68EC69u, TEXT_EDIT_SUFFIX, 1, "!"},
+    {"spanish\\pod04-stealthentrance.txm", 6, 0xEFD8C5F1u, TEXT_EDIT_GAP, 5, "\\n"},
+    {"spanish\\pod04-stealthentrance.txm", 6, 0xEFD8C5F1u, TEXT_EDIT_GAP, 7, " "},
+    {"spanish\\pod04-stealthentrance.txm", 6, 0xEFD8C5F1u, TEXT_EDIT_GAP, 10, "\\n"},
+    {"spanish\\pod04-stealthentrance.txm", 7, 0x51DE32B6u, TEXT_EDIT_GAP, 3, "\\n"},
+    {"spanish\\pod10-scitydefendandescape.txm", 3, 0x203BE0DBu, TEXT_EDIT_GAP, 2, "\\n"},
+    {"spanish\\pod10-scitydefendandescape.txm", 11, 0x4372B103u, TEXT_EDIT_GAP, 4, "\\n"},
+    {"spanish\\pod10-scitydefendandescape.txm", 12, 0xADAC4B64u, TEXT_EDIT_GAP, 3, "\\n"},
+    {"spanish\\pod11-escapeflight.txm", 8, 0x2EF39601u, TEXT_EDIT_GAP, 3, "\\n"},
+    {"spanish\\pod13-battlefieldflight.txm", 7, 0x6A012EA6u, TEXT_EDIT_GAP, 3, "\\n"},
+    {"spanish\\pod13-battlefieldflight.txm", 17, 0x92CF0AE3u, TEXT_EDIT_GAP, 3, "\\n"},
+    {"spanish\\pod13-battlefieldflight.txm", 18, 0x6995A169u, TEXT_EDIT_GAP, 3, "\\n"},
+    {"spanish\\pod13-battlefieldflight.txm", 19, 0x9AC4E5E7u, TEXT_EDIT_GAP, 2, "\\n"},
+};
+#define TEXT_EDIT_FILES 11   /* the distinct files above */
+static const char *const k_text_languages[] = {"french", "german", "italian", "spanish"};
+
+static int starts(const uint8_t *data, size_t size, size_t at, const char *text)
+{
+    size_t n = strlen(text);
+    return at + n <= size && !memcmp(data + at, text, n);
+}
+
+/* Entry `key`'s value in a .txm ("*key = n", then "*value = "...""): the
+ * offsets of its first byte and of its closing quote. */
+static int txm_value(const Buffer *file, int key, size_t *begin, size_t *end)
+{
+    const uint8_t *data = file->data;
+    size_t size = file->size, at = 0;
+    while (at < size) {
+        int found = 0, digits = 0;
+        if (!starts(data, size, at, "*key")) { at++; continue; }
+        for (at += 4; at < size && (data[at] == ' ' || data[at] == '\t' || data[at] == '='); at++) {}
+        for (; at < size && data[at] >= '0' && data[at] <= '9'; at++, digits++) found = found * 10 + data[at] - '0';
+        if (!digits) continue;
+        while (at < size && !starts(data, size, at, "*value") && !starts(data, size, at, "*key")) at++;
+        if (!starts(data, size, at, "*value")) continue;
+        while (at < size && data[at] != '"' && data[at] != '\n') at++;
+        if (at >= size || data[at] != '"') continue;
+        *begin = ++at;
+        for (; at < size; at++) {
+            size_t after = at + 1;
+            if (data[at] != '"') continue;
+            while (after < size && (data[after] == ' ' || data[after] == '\t')) after++;
+            if (after >= size || data[after] == '\r' || data[after] == '\n') break;
+        }
+        if (at >= size) return 0;
+        *end = at;
+        if (found == key) return 1;
+    }
+    return 0;
+}
+
+/* At `at` in a line: a gap's part (a space or a "\n"), its length; else 0. */
+static size_t gap_at(const uint8_t *data, size_t end, size_t at)
+{
+    if (data[at] == ' ') return 1;
+    return at + 1 < end && data[at] == '\\' && data[at + 1] == 'n' ? 2 : 0;
+}
+
+/* The edits[0..count) to one entry of `file`, all or none. */
+static int edit_text_entry(Buffer *file, const struct TextEdit *edits, int count)
+{
+    Buffer line = {0}, out = {0};
+    size_t begin, end, at;
+    int gap = 0, word = 0, e;
+    if (!txm_value(file, edits[0].key, &begin, &end) ||
+            crc32_of(file->data + begin, end - begin) != edits[0].crc) {
+        fprintf(stderr, "[VIDEO] %s line %d is not the one expected; left as it is\n", edits[0].file, edits[0].key);
+        return 0;
+    }
+    for (at = begin;; gap++) {
+        size_t from = at;
+        const char *with = NULL;
+        while (at < end && gap_at(file->data, end, at)) at += gap_at(file->data, end, at);
+        for (e = 0; e < count; e++)
+            if (edits[e].kind == TEXT_EDIT_GAP && edits[e].at == gap) with = edits[e].text;
+        if (with) buffer_text(&line, with);
+        else buffer_put(&line, file->data + from, at - from);
+        if (at >= end) break;
+        from = at;
+        while (at < end && !gap_at(file->data, end, at)) at++;
+        for (e = 0; e < count; e++)
+            if (edits[e].kind == TEXT_EDIT_PREFIX && edits[e].at == word) buffer_text(&line, edits[e].text);
+        buffer_put(&line, file->data + from, at - from);
+        for (e = 0; e < count; e++)
+            if (edits[e].kind == TEXT_EDIT_SUFFIX && edits[e].at == word) buffer_text(&line, edits[e].text);
+        word++;
+    }
+    buffer_put(&out, file->data, begin);
+    buffer_put(&out, line.data, line.size);
+    buffer_put(&out, file->data + end, file->size - end);
+    free(file->data);
+    *file = out;
+    free(line.data);
+    return 1;
+}
+
+/* Each file of k_text_edits, edited, into out[0..]: how many. */
+static int edit_texts(Trees *trees, PatchFile *out, int room)
+{
+    int first = 0, used = 0;
+    while (first < COUNT(k_text_edits) && used < room) {
+        char path[MAX_PATH];
+        int last = first, edited = 0;
+        while (last < COUNT(k_text_edits) && !strcmp(k_text_edits[last].file, k_text_edits[first].file)) last++;
+        snprintf(path, sizeof path, "data\\text\\%s", k_text_edits[first].file);
+        if (trees_read(trees, path, &out[used].data)) {
+            int entry = first;
+            while (entry < last) {
+                int next = entry;
+                while (next < last && k_text_edits[next].key == k_text_edits[entry].key) next++;
+                edited += edit_text_entry(&out[used].data, &k_text_edits[entry], next - entry);
+                entry = next;
+            }
+        }
+        if (edited) out[used++].key = tree_key(path);
+        else out[used].data.size = 0;
+        first = last;
+    }
+    return used;
+}
+
 static int write_patch(const char *game_dir)
 {
     /* Per menu: its Options screen, the video page and its .atr, the
      * controls page and its .atr, the settings page and its .atr; then the
      * strings, the history files, history.txt and the marker. */
     enum { OPTIONS_TEXT = 7 * MENU_COUNT, VIDEO_HISTORY, HISTORY_LIST, MARKER, PRESS_START, MAIN_MENU,
-           SOUND_OPTIONS, PAUSE_SOUND_OPTIONS,
-           CONTROL_HISTORY, PC_CONTROLS_HISTORY, GAME_TEXT, FILE_COUNT };
+           SOUND_OPTIONS, PAUSE_SOUND_OPTIONS, GAME_OPTIONS, PAUSE_GAME_OPTIONS,
+           CONTROL_HISTORY, PC_CONTROLS_HISTORY, GAME_TEXT,
+           MOVIE_SCREENS, LANGUAGE_TEXT = MOVIE_SCREENS + COUNT(k_movie_screens), EDITED_TEXT = LANGUAGE_TEXT + 2 * COUNT(k_text_languages),
+           FILE_COUNT = EDITED_TEXT + TEXT_EDIT_FILES };
     PatchFile files[FILE_COUNT];
+    size_t options_text_size, game_text_size, used = EDITED_TEXT;
     Trees trees;
     Buffer tree = {0}, existing = {0}, pause = {0};
     Node *pause_screen = NULL;
@@ -1888,6 +2157,14 @@ static int write_patch(const char *game_dir)
     if (!patch_screen(&trees, from, from, &files[SOUND_OPTIONS], add_audio_row, NULL)) goto done;
     snprintf(from, sizeof from, SCREENS "ingamesoundvideo\\ingamesoundvideo.ati");
     if (!patch_screen(&trees, from, from, &files[PAUSE_SOUND_OPTIONS], add_audio_row, NULL)) goto done;
+    snprintf(from, sizeof from, SCREENS "gameoptions\\gameoptions.ati");
+    if (!patch_screen(&trees, from, from, &files[GAME_OPTIONS], show_language_row, NULL)) goto done;
+    snprintf(from, sizeof from, SCREENS "ingameoptions\\ingameoptions.ati");
+    if (!patch_screen(&trees, from, from, &files[PAUSE_GAME_OPTIONS], show_language_row, NULL)) goto done;
+    for (i = 0; i < COUNT(k_movie_screens); i++) {
+        snprintf(from, sizeof from, SCREENS "%s\\%s.ati", k_movie_screens[i], k_movie_screens[i]);
+        if (!patch_screen(&trees, from, from, &files[MOVIE_SCREENS + i], english_movies, game_dir)) goto done;
+    }
     files[CONTROL_HISTORY].key = tree_key("data\\history\\controlsetup.hst");
     if (!trees_read(&trees, "data\\history\\controlsetup.hst", &files[CONTROL_HISTORY].data)) goto done;
     look_not_inverted(&files[CONTROL_HISTORY].data);
@@ -1898,6 +2175,7 @@ static int write_patch(const char *game_dir)
     files[HISTORY_LIST].key = tree_key("data\\history\\history.txt");
     files[MARKER].key = tree_key(PATCH_MARKER);
     if (!trees_read(&trees, "data\\text\\options.txm", &files[OPTIONS_TEXT].data)) goto done;
+    options_text_size = files[OPTIONS_TEXT].data.size;
     add_text(&files[OPTIONS_TEXT].data, TEXT_ENTRY, "VIDEO OPTIONS");
     add_text(&files[OPTIONS_TEXT].data, TEXT_TITLE, "Video Options");
     for (s = 0; s < SETTING_COUNT; s++) {
@@ -1913,6 +2191,7 @@ static int write_patch(const char *game_dir)
     add_text(&files[OPTIONS_TEXT].data, TEXT_SETTINGS, "PC SETTINGS");
     files[GAME_TEXT].key = tree_key("data\\text\\gameoptions.txm");
     if (!trees_read(&trees, "data\\text\\gameoptions.txm", &files[GAME_TEXT].data)) goto done;
+    game_text_size = files[GAME_TEXT].data.size;
     add_text(&files[GAME_TEXT].data, GAME_TEXT_SETTINGS_TITLE, "PC Settings");
     /* In key order, not row order: the game reads a .txm's entries as they
      * come, and a row whose keys came after higher ones (Foliage AA's 26
@@ -1937,6 +2216,20 @@ static int write_patch(const char *game_dir)
         }
     }
     for (i = 0; i < KEY_COUNT; i++) add_title_text(&files[OPTIONS_TEXT].data, TEXT_KEYS + i, k_keys[i].name);
+    /* Each language's Options.txm and GameOptions.txm (their keys are
+     * American's): the same entries added, in English. */
+    for (i = 0; i < COUNT(k_text_languages); i++)
+        for (s = 0; s < 2; s++) {
+            PatchFile *out = &files[LANGUAGE_TEXT + 2 * i + s], *from_text = &files[s ? GAME_TEXT : OPTIONS_TEXT];
+            size_t base = s ? game_text_size : options_text_size;
+            snprintf(path, sizeof path, "data\\text\\%s\\%s", k_text_languages[i], s ? "gameoptions.txm" : "options.txm");
+            out->key = tree_key(path);
+            if (!trees_read(&trees, path, &out->data)) goto done;
+            if (out->data.size && out->data.data[out->data.size - 1] != '\n') buffer_text(&out->data, "\r\n");
+            buffer_put(&out->data, from_text->data.data + base, from_text->data.size - base);
+        }
+    used += edit_texts(&trees, &files[EDITED_TEXT], TEXT_EDIT_FILES);
+    snprintf(path, sizeof path, "%s\\patch0.tre", game_dir);
 
     if (!trees_read(&trees, "data\\history\\history.txt", &files[HISTORY_LIST].data)) goto done;
     while (files[HISTORY_LIST].data.size &&
@@ -1949,7 +2242,7 @@ static int write_patch(const char *game_dir)
     make_controls_history(&files[PC_CONTROLS_HISTORY].data);
     buffer_text(&files[MARKER].data, "Video Options for the Turok: Evolution recompilation\r\n");
 
-    tree_build(files, FILE_COUNT, &tree);
+    tree_build(files, used, &tree);
     /* Rewritten only when it changed (a setting, or this code). */
     file = fopen(path, "rb");
     if (file) {
@@ -2037,6 +2330,17 @@ static void follow_menus(void)
     if (!items || !guest_read(items + 5u * 8u, &flag)) return;
     s_in_menu = flag != 0;
     xbox_KbmSetMenuMode(flag != 0 && !s_pause_menu);
+}
+
+/* The game's language for Options.hst's item 6 (english, french, german,
+ * spanish, italian): its table's (0x2054D0) American, French, German,
+ * Spanish, Italian; 0 before the history is read. */
+int video_settings_language(void)
+{
+    static const int k_languages[] = {1, 3, 4, 6, 7};
+    uint32_t items = history_items("options.hst", 6), value;
+    if (!items || !guest_read(items + 5u * 8u, &value) || value >= (uint32_t)COUNT(k_languages)) return 0;
+    return k_languages[value];
 }
 
 /* ── PC button icons ──────────────────────────────────────────────

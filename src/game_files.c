@@ -327,23 +327,198 @@ static int extract_image(const char *image_path, const char *dir)
     return ok;
 }
 
-/* A disc image beside the program, if there is one. */
-static int image_beside(char *path, size_t size)
+/* One entry of a directory's tree, by name (any case): its sector, size and
+ * attributes. */
+static int find_entry(const uint8_t *table, uint32_t size, uint32_t offset, int depth, const char *name,
+                      uint32_t *sector, uint32_t *bytes, uint8_t *attributes)
+{
+    uint16_t left, right;
+    uint8_t length;
+    if (depth > 64 || offset + 14 > size) return 0;
+    memcpy(&left, table + offset, 2);
+    memcpy(&right, table + offset + 2, 2);
+    if (left == 0xFFFF) return 0;
+    length = table[offset + 13];
+    if (offset + 14 + length > size) return 0;
+    if (length == strlen(name) && !_strnicmp((const char *)table + offset + 14, name, length)) {
+        memcpy(sector, table + offset + 4, 4);
+        memcpy(bytes, table + offset + 8, 4);
+        *attributes = table[offset + 12];
+        return 1;
+    }
+    return (left && find_entry(table, size, left * 4u, depth + 1, name, sector, bytes, attributes)) ||
+           (right && find_entry(table, size, right * 4u, depth + 1, name, sector, bytes, attributes));
+}
+
+/* The table of the directory at `path` ("Data\\Video"), from the root. */
+static uint8_t *image_directory(Image *image, const char *path, uint32_t *size)
+{
+    uint32_t root[2], sector, bytes;
+    uint8_t *table, attributes;
+    char part[64];
+    if (!image_read(image, 32ull * SECTOR + 20, root, sizeof root) || !(table = read_table(image, root[0], root[1])))
+        return NULL;
+    *size = root[1];
+    while (*path) {
+        size_t n = strcspn(path, "\\");
+        snprintf(part, sizeof part, "%.*s", (int)n, path);
+        path += n + (path[n] == '\\');
+        if (!find_entry(table, *size, 0, 0, part, &sector, &bytes, &attributes) || !(attributes & 0x10)) {
+            free(table);
+            return NULL;
+        }
+        free(table);
+        if (!(table = read_table(image, sector, bytes))) return NULL;
+        *size = bytes;
+    }
+    return table;
+}
+
+/* Whether an image is the USA release's: its default.xbe, read from it and
+ * hashed. */
+static int image_is_usa(const char *path)
+{
+    Image image;
+    uint32_t size, sector, bytes;
+    uint8_t *root, attributes, *xbe;
+    int usa = 0;
+    if (!image_open(&image, path)) return 0;
+    if ((root = image_directory(&image, "", &size)) != NULL &&
+            find_entry(root, size, 0, 0, "default.xbe", &sector, &bytes, &attributes) && bytes < (64u << 20) &&
+            (xbe = (uint8_t *)malloc(bytes ? bytes : 1)) != NULL) {
+        BCRYPT_ALG_HANDLE algorithm = NULL;
+        BCRYPT_HASH_HANDLE hash = NULL;
+        unsigned char digest[20];
+        char hex[41];
+        int i;
+        if (image_read(&image, (uint64_t)sector * SECTOR, xbe, bytes) &&
+                BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA1_ALGORITHM, NULL, 0) == 0 &&
+                BCryptCreateHash(algorithm, &hash, NULL, 0, NULL, 0, 0) == 0 &&
+                BCryptHashData(hash, xbe, bytes, 0) == 0 && BCryptFinishHash(hash, digest, sizeof digest, 0) == 0) {
+            for (i = 0; i < 20; i++) snprintf(hex + 2 * i, 3, "%02x", digest[i]);
+            usa = !strcmp(hex, USA_XBE_SHA1);
+        }
+        if (hash) BCryptDestroyHash(hash);
+        if (algorithm) BCryptCloseAlgorithmProvider(algorithm, 0);
+        free(xbe);
+    }
+    free(root);
+    CloseHandle(image.file);
+    return usa;
+}
+
+/* Each disc image beside the program, in turn (`*search` starts as
+ * INVALID_HANDLE_VALUE, `*pattern` at 0); 0 when there are no more. */
+static int next_image(HANDLE *search, int *pattern, char *path, size_t size)
 {
     static const char *const patterns[] = {"*.iso", "*.xiso"};
     WIN32_FIND_DATAA found;
-    char pattern[MAX_PATH];
-    size_t p;
-    for (p = 0; p < 2; p++) {
-        HANDLE search;
-        snprintf(pattern, sizeof pattern, "%s\\%s", s_exe_dir, patterns[p]);
-        search = FindFirstFileA(pattern, &found);
-        if (search == INVALID_HANDLE_VALUE) continue;
-        FindClose(search);
+    char wanted[MAX_PATH];
+    for (;;) {
+        if (*search == INVALID_HANDLE_VALUE) {
+            if (*pattern >= 2) return 0;
+            snprintf(wanted, sizeof wanted, "%s\\%s", s_exe_dir, patterns[(*pattern)++]);
+            if ((*search = FindFirstFileA(wanted, &found)) == INVALID_HANDLE_VALUE) continue;
+        } else if (!FindNextFileA(*search, &found)) {
+            FindClose(*search);
+            *search = INVALID_HANDLE_VALUE;
+            continue;
+        }
+        if (found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
         snprintf(path, size, "%s\\%s", s_exe_dir, found.cFileName);
         return 1;
     }
+}
+
+/* The USA release's disc image beside the program, if there is one. Another
+ * release's there is for its movies (game_files_movies), not the game. */
+static int image_beside(char *path, size_t size)
+{
+    HANDLE search = INVALID_HANDLE_VALUE;
+    char candidate[MAX_PATH];
+    int pattern = 0;
+    while (next_image(&search, &pattern, candidate, sizeof candidate)) {
+        if (image_is_usa(candidate)) {
+            snprintf(path, size, "%s", candidate);
+            if (search != INVALID_HANDLE_VALUE) FindClose(search);
+            return 1;
+        }
+        fprintf(stderr, "[GAME] %s is not the USA release's disc; only its movies are used\n", candidate);
+    }
     return 0;
+}
+
+/* ── Other releases' movies ──────────────────────────────────────────
+ *
+ * The four story movies come in the chosen language, Data\Video\<language>\
+ * (video_settings.c plays the English one for a language that has none);
+ * the USA disc has only English. Another release's disc image beside the
+ * program (the European one) gives its other languages: each of its
+ * Data\Video folders the game folder lacks is copied in, once, through
+ * "<folder>.partial". */
+static int copy_movies(const char *image_path, const char *game_dir)
+{
+    Image image;
+    uint32_t size, at, sector, bytes;
+    uint8_t *video, attributes;
+    int copied = 0;
+    if (!image_open(&image, image_path)) return 0;
+    if (!(video = image_directory(&image, "Data\\Video", &size))) {
+        CloseHandle(image.file);
+        return 0;
+    }
+    /* The entries in table order: each 4-byte aligned, padding 0xFF. */
+    for (at = 0; at + 14 <= size;) {
+        uint8_t length = video[at + 13];
+        char name[256], folder[MAX_PATH], partial[MAX_PATH], text[400];
+        uint8_t *table;
+        size_t i;
+        int ok, bad = 0;
+        if (video[at] == 0xFF && video[at + 1] == 0xFF) { at = (at / SECTOR + 1) * SECTOR; continue; }
+        if (at + 14 + length > size || !length) break;
+        memcpy(name, video + at + 14, length);
+        name[length] = 0;
+        memcpy(&sector, video + at + 4, 4);
+        memcpy(&bytes, video + at + 8, 4);
+        attributes = video[at + 12];
+        at = (at + 14 + length + 3) & ~3u;
+        for (i = 0; i < length; i++)
+            if (name[i] == '\\' || name[i] == '/' || name[i] == ':' || name[i] == '.' || (unsigned char)name[i] < 32)
+                bad = 1;
+        if (bad || !(attributes & 0x10) || !bytes) continue;
+        snprintf(folder, sizeof folder, "%s\\Data\\Video\\%s", game_dir, name);
+        if (GetFileAttributesA(folder) != INVALID_FILE_ATTRIBUTES) continue;
+        if (!(table = read_table(&image, sector, bytes))) continue;
+        image.total = image.done = 0;
+        ok = walk(&image, table, bytes, 0, 0, NULL);
+        snprintf(partial, sizeof partial, "%s.partial", folder);
+        delete_tree(partial);
+        if (ok) ok = CreateDirectoryA(partial, NULL) != 0;
+        if (ok) {
+            if (!image.progress) progress_open(&image);
+            snprintf(text, sizeof text, "Copying the %s movies from\n%s (%.0f MB, once)...", name, image_path,
+                     image.total / 1e6);
+            progress_show(&image, text);
+            ok = walk(&image, table, bytes, 0, 0, partial) && MoveFileA(partial, folder);
+        }
+        if (!ok) delete_tree(partial);
+        fprintf(stderr, "[GAME] %s movies: %s from %s\n", name, ok ? "copied" : "could not copy", image_path);
+        copied += ok;
+        free(table);
+    }
+    if (image.progress) DestroyWindow(image.progress);
+    free(video);
+    CloseHandle(image.file);
+    return copied;
+}
+
+void game_files_movies(const char *game_dir)
+{
+    HANDLE search = INVALID_HANDLE_VALUE;
+    char path[MAX_PATH];
+    int pattern = 0;
+    if (!s_exe_dir[0]) return;
+    while (next_image(&search, &pattern, path, sizeof path)) copy_movies(path, game_dir);
 }
 
 /* The player's choice: a disc image or an extracted default.xbe. */

@@ -55,6 +55,10 @@ int video_settings_club_charge(void);
 int video_settings_audio_output(void);
 /* LOD range: 1, 2 or 4 times the game's level-of-detail distances, or 1e6 (max). */
 float video_settings_lod_factor(void);
+/* The game language Game Options' Language row asks for (the table at
+ * 0x2054D0: 1 American, 3 French, 4 German, 6 Spanish, 7 Italian), or 0
+ * before Options.hst is read. */
+int video_settings_language(void);
 /* Owned weapons carry over between levels (off: as on the Xbox). */
 int video_settings_keep_weapons(void);
 #define VIDEO_WEAPON_SLOTS 10

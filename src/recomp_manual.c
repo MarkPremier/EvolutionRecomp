@@ -2003,10 +2003,35 @@ static int is_front_end_screen(const char *name)
 
 static int s_level_loading;   /* a level, not a front end screen, is loading */
 
+/* The language Game Options' Language row asks for, made the game's with its
+ * own switch, sub_00027EF0 (game object this-call, the language as its
+ * argument: it unloads the text, sets [game+0xA8] and loads the text again;
+ * the PAL release's language event, sub_000A5820, calls it). The USA game
+ * sets American at start-up and never calls it. Made as a screen loads, so
+ * leaving Game Options brings the next screen up in the new language. */
+extern void sub_00027EF0(void);
+
+static void follow_language(void)
+{
+    uint32_t game = TUROK_MEM32(0x250A84u), eax = g_eax, ecx = g_ecx, edx = g_edx, esp = g_esp;
+    int language = video_settings_language();
+    if (!language || !game || !TUROK_MEM32(game + 0x94u) || TUROK_MEM32(game + 0xA8u) == (uint32_t)language) return;
+    fprintf(stderr, "[TUROK] language %u -> %d\n", TUROK_MEM32(game + 0xA8u), language);
+    g_esp -= 4;
+    TUROK_MEM32(g_esp) = (uint32_t)language;
+    g_esp -= 4;
+    TUROK_MEM32(g_esp) = 0;   /* return address */
+    g_ecx = game;
+    sub_00027EF0();
+    g_eax = eax; g_ecx = ecx; g_edx = edx; g_esp = esp;
+}
+
 void sub_00054A60(void)
 {
     uint32_t self = g_ecx;
     uint32_t name = self ? TUROK_MEM32(self + 0x20u) : 0;
+    follow_language();
+    g_ecx = self;
     if (name) {
         const char *text = (const char *)((uintptr_t)name + g_xbox_mem_offset);
         int kind = is_front_end_screen(text);

@@ -331,6 +331,22 @@ The Crossbow also shares the bows slot if available. The slots are rebindable
 in PC Controls and work in single-player with `RECOMP_KBM` enabled. In
 split-screen, change weapon with next and previous weapon.
 
+### Steam Deck
+
+Run it through Proton as a non-Steam game. In Game Mode, the Deck's controls
+reach the game only through Steam Input, so leave Steam Input on and choose a
+Gamepad layout in the game's controller settings (for example "Gamepad" or
+"Gamepad with Mouse Trackpad"). The game can't choose that layout itself.
+
+On a Deck, settings you haven't saved yet start lighter: Xbox shadows, normal
+draw distance and 4x anisotropy, with resolution on auto (the Deck's 800
+lines). Higher resolutions such as 2160p cost a lot of frame rate there.
+
+`turok_log.txt` records whether it ran on a Deck and in Game Mode, each
+controller as it connects and its first input, and whether the game's window
+has the focus. Steam sends the Deck's controls only to the game it thinks is
+in front.
+
 ### Options are saved when you leave the menu
 
 The game's own options (Control Setup's Invert Look, sound volumes, Game
@@ -338,6 +354,27 @@ Options) are written to its Options save whenever you back out of the
 Options menu, from the front end or the pause menu. On the console they
 were kept only if you chose SAVE OPTIONS, and anything left unsaved came
 back as it was at the next start.
+
+### Language
+
+**Options > Game Options > Language** chooses English, French, German,
+Spanish or Italian. The USA disc already has the PAL release's text for all
+five, but the game hid the row and always used English. The new language
+takes effect when you leave Game Options. With German, the Violence row is
+hidden, as it was in the German release. The PC-only menu entries (Video
+Options, PC Controls, PC Settings and their rows) stay in English. The
+translated text also gets the GameCube release's layout fixes: line
+breaks moved so the lines fit their boxes, and Spanish's opening `¡` and
+closing `!`. Each fix applies only if the line on your disc matches the
+expected one. The four story movies (the opening, Tarkeen, Tyrannus and the
+ending) play in English unless that language's movie is in the game folder.
+The European release had dubbed copies; the USA Xbox disc and the GameCube
+disc don't. To use the dubbed movies, put the European Xbox disc image
+(`.iso` or `.xiso`) beside the program, next to the USA one. At start-up,
+the game copies each `Data\Video\<language>\` folder that the game folder
+lacks, once, and those movies then play. Only an Xbox image works; the PS2
+disc's movies are in another format. With two images beside the program,
+the USA one is the one used for the game itself.
 
 ### PC Controls
 
@@ -690,7 +727,8 @@ The page is game data, built at start-up from your own disc: the game reads
 files replace the supertrees' copies. `src/video_settings.c` writes that file
 into the game folder, with the Options screens gaining the entry and a
 Video Options page derived from Game Options, the main menu its Quit entry
-(from the pause menu's pieces); nothing from the disc is in
+(from the pause menu's pieces), Game Options its Language row and the
+translated text its layout fixes; nothing from the disc is in
 this repository. `RECOMP_VIDEO_OPTIONS=0` removes it and leaves the menus as
 the disc has them. A `patch0.tre` that something else wrote is left alone.
 
