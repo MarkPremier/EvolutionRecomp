@@ -70,8 +70,8 @@ extern void nv2a_gpu_set_scene_width(int screen);
 /* The page's rows, in order; row n is Video.hst item n + 1. Each steps
  * through its values (shown, and written in turok_settings.ini, as their
  * text). */
-enum { SET_RESOLUTION, SET_ASPECT, SET_DISPLAY, SET_VSYNC, SET_FRAMES, SET_ANISOTROPY, SET_MSAA, SET_FOLIAGE_AA,
-       SET_TAA, SET_SCENE_WIDTH, SET_DRAW_DISTANCE,
+enum { SET_RESOLUTION, SET_ASPECT, SET_CUTSCENES, SET_DISPLAY, SET_VSYNC, SET_FRAMES, SET_ANISOTROPY, SET_MSAA, SET_FOLIAGE_AA,
+       SET_TAA, SET_SCENE_WIDTH, SET_DRAW_DISTANCE, SET_LOD_RANGE,
        SET_HEAT_HAZE, SET_SHADOWS, SET_ICONS,
        SET_MOUSE_LOOK, SET_MOUSE_SPEED, SET_FLIGHT_MOUSE, SET_FLIGHT_SPEED, SET_FLIGHT_INVERT,
        SET_CONTROLLER_AIM, SET_LADDER_FREELOOK, SET_LOOK_LIMIT, SET_CLUB_HOLD, SET_KEEP_WEAPONS,
@@ -89,6 +89,16 @@ static const char *const k_resolutions[] = {"auto", "480p", "960p", "1440p", "19
 /* Each as the render scale: lines over the console's 480 (0 automatic). */
 static const float k_resolution_scales[] = {0, 1, 2, 3, 4, 4.5f};
 static const char *const k_aspects[] = {"4:3", "16:10", "16:9", "21:9", "auto"};
+/* Cutscenes (the in-engine ones, StartCinema to EndCinema): "original" shows
+ * them in 4:3, as they were framed, with the game's own bars above and below
+ * and the screen's sides black; "wide" gives them the aspect ratio's wider
+ * view, as play has (apply_aspect). The wider view can show what the camera
+ * was meant to leave out of shot. */
+static const char *const k_cutscenes[] = {"original", "wide"};
+/* LOD range: how much further than the game's own distances characters and
+ * meshes keep their detailed models (video_settings_lod_factor; the level of
+ * detail is chosen in recomp_manual.c's sub_0001FE00). */
+static const char *const k_lod_ranges[] = {"original", "2x", "4x", "max"};
 static const char *const k_displays[] = {"windowed", "fullscreen"};
 static const char *const k_switches[] = {"off", "on"};
 static const char *const k_frames[] = {"30", "60", "120", "144", "240", "display", "off"};
@@ -133,6 +143,7 @@ static const char *const k_speeds[] = {"1", "2", "3", "4", "5", "6", "7", "8", "
 static const VideoSetting k_settings[SETTING_COUNT] = {
     {"resolution", "resolution", k_resolutions, COUNT(k_resolutions), 0},
     {"aspect", "aspect ratio", k_aspects, COUNT(k_aspects), 0},
+    {"cutscenes", "cutscenes", k_cutscenes, COUNT(k_cutscenes), 0},
     {"display", "display", k_displays, COUNT(k_displays), 0},
     {"vsync", "vsync", k_switches, COUNT(k_switches), 0},
     {"frame_limit", "frame limit", k_frames, COUNT(k_frames), 1},
@@ -147,6 +158,7 @@ static const VideoSetting k_settings[SETTING_COUNT] = {
     {"temporal_aa", "temporal aa", k_taa_modes, COUNT(k_taa_modes), 0},
     {"scene_width", "3d width", k_scene_widths, COUNT(k_scene_widths), 0},
     {"draw_distance", "draw distance", k_distances, COUNT(k_distances), 1},
+    {"lod_range", "lod range", k_lod_ranges, COUNT(k_lod_ranges), 0},
     {"heat_haze", "heat haze", k_hazes, COUNT(k_hazes), 2},
     {"shadows", "shadows", k_shadow_modes, COUNT(k_shadow_modes), 1},
     {"button_icons", "button icons", k_icons, COUNT(k_icons), 0},
@@ -834,14 +846,17 @@ static int values_of(int setting)
 #define GAME_TEXT_AUDIO_OUTPUT 40
 #define GAME_TEXT_HEAT_HAZE 46   /* after Audio out's five values */
 #define GAME_TEXT_SCENE_WIDTH 51  /* after Heat haze's four */
-#define GAME_TEXT_WEAPONS 54
+#define GAME_TEXT_WEAPONS 54     /* PC Controls' weapon rows' labels, 54 to 63 */
+#define GAME_TEXT_CUTSCENES 64   /* after the weapon labels */
+#define GAME_TEXT_LOD_RANGE 67   /* after Cutscenes' two values */
 
 static int in_game_text(int setting)
 {
     return setting == SET_SHADOWS || setting == SET_CONTROLLER_AIM || setting == SET_LADDER_FREELOOK ||
            setting == SET_KEEP_WEAPONS || setting == SET_FOLIAGE_AA || setting == SET_TAA ||
            setting == SET_LOOK_LIMIT || setting == SET_CLUB_HOLD || setting == SET_AUDIO_OUTPUT ||
-           setting == SET_HEAT_HAZE || setting == SET_SCENE_WIDTH;
+           setting == SET_HEAT_HAZE || setting == SET_SCENE_WIDTH || setting == SET_CUTSCENES ||
+           setting == SET_LOD_RANGE;
 }
 
 static int text_label(int setting)
@@ -858,6 +873,8 @@ static int text_label(int setting)
     if (setting == SET_AUDIO_OUTPUT) return GAME_TEXT_AUDIO_OUTPUT;
     if (setting == SET_HEAT_HAZE) return GAME_TEXT_HEAT_HAZE;
     if (setting == SET_SCENE_WIDTH) return GAME_TEXT_SCENE_WIDTH;
+    if (setting == SET_CUTSCENES) return GAME_TEXT_CUTSCENES;
+    if (setting == SET_LOD_RANGE) return GAME_TEXT_LOD_RANGE;
     for (s = 0; s < setting; s++)
         if (!in_game_text(s)) key += 1 + (values_of(s) == s ? k_settings[s].count : 0);
     return key;
@@ -1901,20 +1918,24 @@ static int write_patch(const char *game_dir)
      * come, and a row whose keys came after higher ones (Foliage AA's 26
      * ahead of Shadows' 14) left Shadows blank. */
     {
-        int key, next;
+        int key, next, weapons = 0;
         for (key = 0;; key = next) {
             int found = -1;
             next = 1 << 30;
             for (s = 0; s < SETTING_COUNT; s++)
                 if (in_game_text(s) && text_label(s) > key && text_label(s) < next) next = text_label(s), found = s;
+            /* The weapon rows' labels in their place among them. */
+            if (!weapons && (found < 0 || next > GAME_TEXT_WEAPONS)) {
+                for (s = BIND_WEAPON_FIRST; s < BIND_COUNT; s++)
+                    add_title_text(&files[GAME_TEXT].data, GAME_TEXT_WEAPONS + s - BIND_WEAPON_FIRST, k_binds[s].label);
+                weapons = 1;
+            }
             if (found < 0) break;
             add_text(&files[GAME_TEXT].data, text_label(found), k_settings[found].label);
             for (i = 0; i < k_settings[found].count; i++)
                 add_text(&files[GAME_TEXT].data, text_label(found) + 1 + i, k_settings[found].values[i]);
         }
     }
-    for (s = BIND_WEAPON_FIRST; s < BIND_COUNT; s++)
-        add_title_text(&files[GAME_TEXT].data, GAME_TEXT_WEAPONS + s - BIND_WEAPON_FIRST, k_binds[s].label);
     for (i = 0; i < KEY_COUNT; i++) add_title_text(&files[OPTIONS_TEXT].data, TEXT_KEYS + i, k_keys[i].name);
 
     if (!trees_read(&trees, "data\\history\\history.txt", &files[HISTORY_LIST].data)) goto done;
@@ -2209,7 +2230,8 @@ static DEVMODEA monitor_mode(void)
 
 /* Widescreen: the screen's width over 4:3's. The front end stays 4:3 (its
  * stage is a 3D set built to end just past the 4:3 edges), and so do the
- * in-engine cutscenes, framed for 4:3 with their own bars. */
+ * in-engine cutscenes, framed for 4:3 with their own bars, unless Cutscenes
+ * is set to wide. */
 static float aspect_ratio(void)
 {
     static const float ratios[] = {4.0f / 3, 16.0f / 10, 16.0f / 9, 64.0f / 27, 0};
@@ -2225,7 +2247,8 @@ static float s_wide_factor = 1.0f;
 
 static void apply_aspect(void)
 {
-    s_wide_factor = s_front_end || s_cinema || s_loading ? 1.0f : aspect_ratio() * 3 / 4;
+    int cutscene_4_3 = s_cinema && !s_values[SET_CUTSCENES];
+    s_wide_factor = s_front_end || cutscene_4_3 || s_loading ? 1.0f : aspect_ratio() * 3 / 4;
     nv2a_gpu_set_wide_factor(s_wide_factor);
 }
 
@@ -2258,6 +2281,7 @@ static void apply_setting(int setting)
     switch (setting) {
     case SET_RESOLUTION: nv2a_gpu_set_render_scale(k_resolution_scales[s_values[SET_RESOLUTION]]); break;
     case SET_ASPECT: apply_aspect(); xbox_FramebufferSetWindowAspect(aspect_ratio()); break;
+    case SET_CUTSCENES: apply_aspect(); break;
     case SET_DISPLAY: xbox_FramebufferSetFullscreen(s_values[SET_DISPLAY]); break;
     case SET_VSYNC: xbox_SetPresentInterval(s_values[SET_VSYNC]); break;
     case SET_FRAMES: apply_frames(); break;
@@ -2276,6 +2300,7 @@ static void apply_setting(int setting)
     case SET_ICONS: nv2a_gpu_set_texture_replacements(s_values[SET_ICONS]); break;
     case SET_MOUSE_LOOK: xbox_KbmSetRawMouse(s_values[SET_MOUSE_LOOK]); s_mouse_raw = s_values[SET_MOUSE_LOOK]; break;
     case SET_DRAW_DISTANCE:           /* read each frame */
+    case SET_LOD_RANGE:
     case SET_MOUSE_SPEED:
     case SET_FLIGHT_MOUSE:
     case SET_FLIGHT_SPEED:
@@ -2401,6 +2426,14 @@ float video_settings_look_limit(void)
     return s_values[SET_LOOK_LIMIT] ? 85.0f : 70.0f;
 }
 
+/* LOD range: 1, 2 or 4 times the game's level-of-detail distances, or
+ * "max": the detailed models at any distance. */
+float video_settings_lod_factor(void)
+{
+    static const float factors[] = {1.0f, 2.0f, 4.0f, 1.0e6f};
+    return factors[s_values[SET_LOD_RANGE]];
+}
+
 /* Audio output: XA2_OUTPUT_AUTO, _STEREO, _SURROUND, _7_1 or _MONO. */
 int video_settings_audio_output(void)
 {
@@ -2509,7 +2542,7 @@ void video_settings_cinema(int on)
     if (on == s_cinema) return;
     s_cinema = on;
     apply_dlaa_scene();
-    fprintf(stderr, "[VIDEO] cutscene %s\n", on ? "begins: 4:3" : "ends");
+    fprintf(stderr, "[VIDEO] cutscene %s\n", !on ? "ends" : s_values[SET_CUTSCENES] ? "begins: wide" : "begins: 4:3");
     apply_aspect();
 }
 

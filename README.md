@@ -67,7 +67,7 @@ CPU-renderer build (about 9 fps on the title screen).
   other changes apply immediately. `RECOMP_SHADOW_DISTANCE`, `RECOMP_SHADOW_AROUND`, `RECOMP_SHADOW_MAP`,
   `RECOMP_SHADOW_OFFSCREEN`, `RECOMP_SHADOW_EXACT`, `RECOMP_SHADOW_SCALE`,
   `RECOMP_SHADOW_FAR_LIT`, `RECOMP_SHADOW_BIRD_HEIGHT` and
-  `RECOMP_SHADOW_BIRDS=1` tune Enhanced.
+  `RECOMP_SHADOW_BIRDS=1` tune Enhanced. `RECOMP_SHADOW_TOLERANCE=<steps>` (a diagnostic) sets how far, in 16-bit depth steps, a surface may lie behind the stored shadow caster and still count as touching it (0.05 by default).
 - The window shows frames straight from the GPU through a swap chain, so it
   resizes and maximises freely (the frame stays 4:3, letterboxed), opens at
   the largest multiple of 640x480 that fits the screen, and **Alt+Enter**
@@ -417,6 +417,7 @@ effect at once and are kept in `turok_settings.ini` beside the exe:
 |-----|--------|---------|
 | Resolution | auto, 480p, 960p, 1440p, 1920p, 2160p (lines; the width follows the aspect; auto matches the monitor, 2160 on 4K) | `RECOMP_RENDER_SCALE` |
 | Aspect ratio | 4:3, 16:10, 16:9, 21:9, auto (the monitor's) | |
+| Cutscenes | original, wide (original by default: the in-engine cutscenes stay 4:3, as they were framed, with the game's own bars above and below. "wide" gives them the aspect ratio's wider view, as in play; the wider view can show what the camera was meant to leave out of shot) | |
 | Display | windowed, fullscreen (borderless) | Alt+Enter |
 | VSync | off, on | `RECOMP_VSYNC` |
 | Frame limit | 30, 60, 120, 144, 240, display (its refresh rate), off | |
@@ -438,6 +439,7 @@ effect at once and are kept in `turok_settings.ini` beside the exe:
 | Club hold | original, charge (original by default: with the war club a press swings at once and, held a second, the charged strike follows the swing; "charge" makes a tap swing when released -- a moment later -- and a hold go straight to the charged strike, with no swing first; combos are unchanged; on the PC Settings page) | |
 | Keep weapons | off, on (off by default; weapons you own stay yours from level to level; on the PC Settings page) | |
 | Draw distance | normal, 2x, 4x, 8x (2x by default) | |
+| LOD range | original, 2x, 4x, max (original by default: characters and other models switch to their less detailed versions at the game's own distances. 2x and 4x keep the detailed ones twice or four times as far, max at any distance, for a little frame rate: about 8% at max in the Chapter 1 jungle. A model with only one version does not change; issue #34's distant guard was one, its lighting coarse because the game lights per vertex. `RECOMP_LOD_TRACE=1` logs what the two detail choices see) | |
 | Heat haze | off, xbox, enhanced, gamecube (enhanced by default; off removes distortion; xbox keeps the original effect; enhanced refracts the full-resolution scene with filtered offsets and feathered edges; gamecube recreates the GameCube release's haze, see below) | |
 | Shadows | xbox, enhanced (default), enhanced+ (reduces shadow spill below indoor balconies) | `RECOMP_SHADOW_EXACT`, `RECOMP_SHADOW_SCALE`, `RECOMP_SHADOW_FAR_LIT` override parts |
 
@@ -524,7 +526,7 @@ saves the kept weapons with your progress as it saves any weapon. Saved as
   they reach the screen's edge (fades, the damage flash), so the HUD keeps its
   shape. The front end, movies, loading screens and in-engine cutscenes (framed
   for 4:3, with their own bars; StartCinema/EndCinema, `sub_00164230`/
-  `sub_001642A0`) stay 4:3. A level is 4:3 from its load until its loading
+  `sub_001642A0`) stay 4:3, unless Cutscenes is set to wide. A level is 4:3 from its load until its loading
   screen comes down (`sub_000FFF20`), so that screen holds one size. The window
   opens at the chosen shape.
 - **Loading screens** stay up at least 3 seconds (`RECOMP_LOADING_HOLD_MS`,

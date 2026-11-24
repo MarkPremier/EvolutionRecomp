@@ -1759,11 +1759,39 @@ static void add_to_float_arg(uint32_t address, float amount)
     TUROK_MEM32(address) = bits;
 }
 
+/* Level of detail (issue #34): characters and meshes pick a model by
+ * tan(fov x [0x1FAAD4]) x (distance - an offset), against each model's
+ * switch distances -- the actor draw from 0x000EECA0, the mesh draw from
+ * 0x000F04DE, both right after this call. Far off, characters drop to models
+ * with few vertices, whose per-vertex lighting jumps visibly as they move;
+ * the sniper scope magnifies it. LOD range (Video Options) divides that
+ * measure by 2 or 4 for those two calls alone: detailed models twice or four
+ * times as far, or near nothing ("max"): the detailed models at any distance. RECOMP_LOD_TRACE=1 logs what the two sites see. */
+float video_settings_lod_factor(void);   /* video_settings.h, included further down */
+static void lod_adjust(uint32_t out, uint32_t site)
+{
+    static int trace = -1;
+    static unsigned long last;
+    float factor = video_settings_lod_factor(), k = guest_float(0x1FAAD4u), fov = guest_float(out);
+    if (trace < 0) trace = getenv("RECOMP_LOD_TRACE") != NULL;
+    if (trace && (unsigned long)clock() - last >= 1000) {
+        last = (unsigned long)clock();
+        fprintf(stderr, "[LOD] site %08X fov %.4f k %.6f tan %.4f factor %.0f\n", site, fov, k, tanf(fov * k), factor);
+    }
+    if (factor > 1.0f && k > 0.0f && fov > 0.0f && fov * k < 1.55f) {
+        uint32_t bits;
+        fov = atanf(tanf(fov * k) / factor) / k;
+        memcpy(&bits, &fov, 4);
+        TUROK_MEM32(out) = bits;
+    }
+}
+
 void sub_0001FE00(void)
 {
-    uint32_t out = TUROK_MEM32(g_esp + 4);
+    uint32_t out = TUROK_MEM32(g_esp + 4), site = TUROK_MEM32(g_esp);
     float wide = video_settings_wide_factor();
     sub_0001FE00_gen();
+    if (out && (site == 0x000EECA0u || site == 0x000F04DEu)) lod_adjust(out, site);
     if (s_fov_widen && out) {
         float fov = guest_float(out), limit = 2.967f - s_fov_margin;   /* 170 degrees */
         uint32_t bits;

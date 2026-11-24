@@ -53,6 +53,8 @@ int video_settings_club_charge(void);
 /* Audio output (0 auto, 1 stereo, 2 5.1, 3 7.1, 4 mono: the toolkit's XA2_OUTPUT_*),
  * read at start-up. */
 int video_settings_audio_output(void);
+/* LOD range: 1, 2 or 4 times the game's level-of-detail distances, or 1e6 (max). */
+float video_settings_lod_factor(void);
 /* Owned weapons carry over between levels (off: as on the Xbox). */
 int video_settings_keep_weapons(void);
 #define VIDEO_WEAPON_SLOTS 10

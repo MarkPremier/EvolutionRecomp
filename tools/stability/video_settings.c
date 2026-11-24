@@ -22,6 +22,8 @@ int main(void)
     assert(k_settings[SET_SCENE_WIDTH].count == 2 && k_settings[SET_SCENE_WIDTH].fallback == 0);
     assert(value_index(SET_SCENE_WIDTH, "double") == 0 && value_index(SET_SCENE_WIDTH, "Screen") == 1);
     assert(in_game_text(SET_SCENE_WIDTH));
+    assert(k_settings[SET_LOD_RANGE].count == 4 && k_settings[SET_LOD_RANGE].fallback == 0);
+    assert(in_game_text(SET_LOD_RANGE));
     assert(value_index(SET_HEAT_HAZE, "original") == 1);
     assert(value_index(SET_HEAT_HAZE, "smooth") == 2);
     assert(value_index(SET_HEAT_HAZE, "sharp") == 2);
@@ -33,7 +35,10 @@ int main(void)
     assert(value_index(SET_SHADOWS, "Enhanced+") == 2);
     for (int setting = 0; setting < SETTING_COUNT; setting++) {
         if (!in_game_text(setting)) continue;
-        assert(text_values(setting) + k_settings[setting].count <= GAME_TEXT_WEAPONS);
+        /* Clear of the weapon rows' labels, and every key below 188. */
+        assert(text_values(setting) + k_settings[setting].count <= GAME_TEXT_WEAPONS ||
+               text_label(setting) >= GAME_TEXT_WEAPONS + VIDEO_WEAPON_SLOTS);
+        assert(text_values(setting) + k_settings[setting].count <= 188);
         for (int other = 0; other < SETTING_COUNT; other++) {
             if (other == setting || !in_game_text(other)) continue;
             int key = text_label(other);
@@ -41,6 +46,10 @@ int main(void)
         }
     }
     assert(GAME_TEXT_WEAPONS + VIDEO_WEAPON_SLOTS <= 188);
+    /* Cutscenes: 4:3 by default, as the console; "wide" opts in. */
+    assert(in_game_text(SET_CUTSCENES) && text_label(SET_CUTSCENES) == GAME_TEXT_CUTSCENES);
+    assert(k_settings[SET_CUTSCENES].count == 2 && k_settings[SET_CUTSCENES].fallback == 0);
+    assert(value_index(SET_CUTSCENES, "original") == 0 && value_index(SET_CUTSCENES, "wide") == 1);
     video_settings_level("D:\\Data\\Levels\\Pod-12-S-City-Defend-Escape\\sc-12-a.atr");
     assert(shadow_indoor);
     video_settings_level("D:\\Data\\Levels\\Pod-01-Through-The-Jungle\\pod01_03_ttjungle.atr");
