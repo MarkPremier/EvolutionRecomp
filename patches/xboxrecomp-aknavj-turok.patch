@@ -4909,7 +4909,7 @@ index b8d804a..2f7be7b 100644
  						  const float attributes[16][4], float constants[192][4]);
  
 diff --git a/src/kernel/nv2a_gpu_d3d11.cpp b/src/kernel/nv2a_gpu_d3d11.cpp
-index f031faf..693330a 100644
+index f031faf..4d4dcef 100644
 --- a/src/kernel/nv2a_gpu_d3d11.cpp
 +++ b/src/kernel/nv2a_gpu_d3d11.cpp
 @@ -1,6 +1,7 @@
@@ -5554,7 +5554,7 @@ index f031faf..693330a 100644
  static std::array<DynamicStream,2> vertex_streams;
  static DynamicStream constant_stream;
  static DynamicStream index_stream;
-@@ -460,7 +966,7 @@ struct SamplerVariant {
+@@ -460,9 +966,10 @@ struct SamplerVariant {
  static std::vector<SamplerVariant> sampler_cache;
  
  struct ShaderVariant {
@@ -5562,16 +5562,21 @@ index f031faf..693330a 100644
 +    std::array<uint32_t,44> key;
      ComPtr<ID3D11PixelShader> shader;
      uint64_t last_used, bytecode_bytes;
++    bool noted;   /* in this run's notes (the preload list) */
  };
-@@ -470,6 +976,7 @@ struct VertexVariant {
+ static std::vector<ShaderVariant> shader_variants;
+ 
+@@ -470,7 +977,9 @@ struct VertexVariant {
      std::vector<uint32_t> key;
      ComPtr<ID3D11VertexShader> shader;
      ComPtr<ID3D11InputLayout> layout;
 +    uint32_t input_mask = 0;   /* the packed attributes its layout reads */
      uint64_t last_used, bytecode_bytes;
++    bool noted = false;   /* in this run's notes (the preload list) */
  };
  static std::vector<VertexVariant> vertex_variants;
-@@ -531,7 +1038,7 @@ static std::string vertex_source(uint32_t mux, uint32_t temporary, uint32_t swiz
+ 
+@@ -531,7 +1040,7 @@ static std::string vertex_source(uint32_t mux, uint32_t temporary, uint32_t swiz
      return negate ? "-(" + result + ")" : result;
  }
  
@@ -5580,7 +5585,7 @@ index f031faf..693330a 100644
  {
      if (!state.vertex_program || !state.vertex_valid || !state.vertex_constants || state.vertex_start >= 136) return 0;
      for (uint32_t slot = state.vertex_start; slot < 136; slot++) {
-@@ -541,6 +1048,24 @@ static uint32_t vertex_program_word_count(const Nv2aGpuDraw &state)
+@@ -541,6 +1050,24 @@ static uint32_t vertex_program_word_count(const Nv2aGpuDraw &state)
      return 0;
  }
  
@@ -5605,7 +5610,7 @@ index f031faf..693330a 100644
  static bool vertex_program_key(const Nv2aGpuDraw &state, std::vector<uint32_t> &key)
  {
      uint32_t words = vertex_program_word_count(state);
-@@ -564,7 +1089,9 @@ static std::string vertex_program_source(const std::vector<uint32_t> &key, bool
+@@ -564,7 +1091,9 @@ static std::string vertex_program_source(const std::vector<uint32_t> &key, bool
              source += "input.attribute" + std::to_string(attribute) + "=stateAttributes[" + std::to_string(attribute) + "];\n";
      } else source += "Pixel vs_guest(GuestVertex input) {\n";
      source += "float4 temporary[13]; float4 outputs[16]; int address=0;\n";
@@ -5616,7 +5621,7 @@ index f031faf..693330a 100644
      for (size_t instruction = 0; instruction < key.size(); instruction += 4) {
          const uint32_t *words = key.data() + instruction;
          uint32_t mac = (words[1] >> 21) & 15, ilu = (words[1] >> 25) & 7;
-@@ -632,47 +1159,188 @@ static std::string vertex_program_source(const std::vector<uint32_t> &key, bool
+@@ -632,47 +1161,188 @@ static std::string vertex_program_source(const std::vector<uint32_t> &key, bool
          }
          source += "}\n";
      }
@@ -5839,7 +5844,7 @@ index f031faf..693330a 100644
  }
  
  extern "C" int nv2a_gpu_execute_state(const uint32_t program[136][4], const uint32_t valid[136], uint32_t start,
-@@ -695,8 +1363,8 @@ extern "C" int nv2a_gpu_execute_state(const uint32_t program[136][4], const uint
+@@ -695,8 +1365,8 @@ extern "C" int nv2a_gpu_execute_state(const uint32_t program[136][4], const uint
          std::string source = vertex_program_source(variant.key, true);
          if (source.empty()) return 0;
          ComPtr<ID3DBlob> code, errors;
@@ -5850,7 +5855,7 @@ index f031faf..693330a 100644
          if (FAILED(result)) {
              std::fprintf(stderr, "[GPU-D3D11] state compile: %s\n", errors ? (const char *)errors->GetBufferPointer() : "failed");
              return 0;
-@@ -738,7 +1406,289 @@ extern "C" int nv2a_gpu_execute_state(const uint32_t program[136][4], const uint
+@@ -738,7 +1408,530 @@ extern "C" int nv2a_gpu_execute_state(const uint32_t program[136][4], const uint
      return 1;
  }
  
@@ -5874,10 +5879,13 @@ index f031faf..693330a 100644
 +    ComPtr<ID3D11VertexShader> vertex_shader;
 +    ComPtr<ID3D11InputLayout> vertex_layout;
 +    uint32_t vertex_mask = 0;
++    bool preload = false;   /* from the preload list, not a draw's (see preload_shader_variants) */
 +};
 +static std::mutex pixel_jobs_lock;
 +static std::condition_variable pixel_jobs_signal;
 +static std::deque<std::shared_ptr<PixelCompileJob>> pixel_jobs_queued;
++/* Preloads: taken only when no draw's compile is queued. */
++static std::deque<std::shared_ptr<PixelCompileJob>> pixel_jobs_preload;
 +static std::vector<std::shared_ptr<PixelCompileJob>> pixel_jobs_done;
 +static std::vector<std::array<uint32_t,44>> pixel_jobs_pending;
 +/* The same program can read differently packed attributes on another draw. */
@@ -5976,10 +5984,12 @@ index f031faf..693330a 100644
 +        std::shared_ptr<PixelCompileJob> job;
 +        {
 +            std::unique_lock<std::mutex> hold(pixel_jobs_lock);
-+            pixel_jobs_signal.wait(hold, [] { return !pixel_jobs_queued.empty(); });
-+            job = pixel_jobs_queued.front();
-+            pixel_jobs_queued.pop_front();
++            pixel_jobs_signal.wait(hold, [] { return !pixel_jobs_queued.empty() || !pixel_jobs_preload.empty(); });
++            auto &queue = !pixel_jobs_queued.empty() ? pixel_jobs_queued : pixel_jobs_preload;
++            job = queue.front();
++            queue.pop_front();
 +        }
++        if (job->preload) SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
 +        /* The device is free-threaded: the driver's own compile of the
 +         * bytecode (long for the generic shader) happens here too. */
 +        if (job->vertex) {
@@ -5988,25 +5998,221 @@ index f031faf..693330a 100644
 +        } else if (SUCCEEDED(compile_pixel_variant(*job, job->code, job->errors)) &&
 +            FAILED(device->CreatePixelShader(job->code->GetBufferPointer(), job->code->GetBufferSize(), nullptr, &job->shader)))
 +            job->shader.Reset();
++        if (job->preload) SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_NORMAL);
 +        std::lock_guard<std::mutex> hold(pixel_jobs_lock);
 +        pixel_jobs_done.push_back(job);
 +        pixel_jobs_finished++;
 +    }
 +}
 +
-+static void queue_pixel_compile(std::shared_ptr<PixelCompileJob> job)
++static void start_compile_workers()
 +{
-+    static bool started;
-+    if (!started) {
-+        started = true;
++    static std::once_flag started;
++    std::call_once(started, [] {
 +        unsigned threads = std::max(1u, std::min(3u, std::thread::hardware_concurrency() / 4));
 +        for (unsigned index = 0; index < threads; index++) std::thread(pixel_compile_worker).detach();
-+    }
++    });
++}
++
++static void queue_pixel_compile(std::shared_ptr<PixelCompileJob> job)
++{
++    start_compile_workers();
 +    std::lock_guard<std::mutex> hold(pixel_jobs_lock);
 +    if (job->vertex) vertex_jobs_pending.emplace_back(job->vertex_key, job->vertex_mask);
 +    else if (!job->generic) pixel_jobs_pending.push_back(job->key);
 +    if (job->generic) pixel_jobs_queued.push_front(job); else pixel_jobs_queued.push_back(job);
 +    pixel_jobs_signal.notify_one();
++}
++
++/* Shader preloading. Each variant this machine creates is noted in
++ * <shader cache>\\<executable>.variants, and a preloaded one again when a draw
++ * first uses it, so the file lists them most recently used last. At the first
++ * draw a thread reads it (keeping each key's last note, and writing that back
++ * so the file stays short) and queues the newest 256 pixel and 256 vertex
++ * variants behind any compile a draw is waiting for: the workers load (or,
++ * with a changed shader source, compile) them and they are installed between
++ * draws, so a level's shaders are ready before it draws them -- not made in
++ * its first frame (11 ms of Turok Evolution's level start) or compiled while
++ * it plays. A preloaded variant takes a free place in the cache, never one in
++ * use, and is the first to go. RECOMP_SHADER_PRELOAD=0: none (still noted). */
++static std::mutex manifest_lock;
++static FILE *manifest_file;
++enum : uint32_t { MANIFEST_PIXEL = 0x31584950u /* PIX1 */, MANIFEST_VERTEX = 0x31585456u /* VTX1 */ };
++static constexpr size_t preload_limit = 256, manifest_limit = 1024, preload_room = 448;
++static std::atomic<int> preload_queued{-1}, preload_finished{0}, preload_installed{0};
++static std::chrono::steady_clock::time_point preload_started;
++
++static const std::wstring &manifest_path()
++{
++    static const std::wstring path = [] {
++        const std::wstring &directory = shader_cache_directory();
++        if (directory.empty()) return std::wstring();
++        wchar_t module[MAX_PATH];
++        DWORD length = GetModuleFileNameW(nullptr, module, MAX_PATH);
++        if (!length || length >= MAX_PATH) return std::wstring();
++        std::wstring name(module, length);
++        size_t slash = name.find_last_of(L"\\/");
++        if (slash != std::wstring::npos) name.erase(0, slash + 1);
++        size_t dot = name.find_last_of(L'.');
++        if (dot != std::wstring::npos) name.erase(dot);
++        return directory + L"\\" + name + L".variants";
++    }();
++    return path;
++}
++
++static void manifest_note(uint32_t tag, const std::vector<uint32_t> &words)
++{
++    const std::wstring &path = manifest_path();
++    if (path.empty()) return;
++    std::lock_guard<std::mutex> hold(manifest_lock);
++    if (!manifest_file) manifest_file = _wfopen(path.c_str(), L"ab");
++    if (!manifest_file) return;
++    uint32_t header[2] = {tag, (uint32_t)words.size()};
++    std::fwrite(header, sizeof header, 1, manifest_file);
++    if (!words.empty()) std::fwrite(words.data(), sizeof(uint32_t), words.size(), manifest_file);
++    std::fflush(manifest_file);
++}
++
++static void note_pixel_variant(ShaderVariant &variant)
++{
++    if (variant.noted) return;
++    variant.noted = true;
++    manifest_note(MANIFEST_PIXEL, std::vector<uint32_t>(variant.key.begin(), variant.key.end()));
++}
++
++static void note_vertex_variant(VertexVariant &variant)
++{
++    if (variant.noted) return;
++    variant.noted = true;
++    std::vector<uint32_t> words;
++    words.reserve(variant.key.size() + 1);
++    words.push_back(variant.input_mask);
++    words.insert(words.end(), variant.key.begin(), variant.key.end());
++    manifest_note(MANIFEST_VERTEX, words);
++}
++
++/* The definitions a pixel variant compiles with, from its key. */
++static void pixel_job_values(PixelCompileJob &job)
++{
++    const auto &key = job.key;
++    std::array<std::string,8> &values = job.values;
++    values[0] = std::to_string(key[0] & 255u) + "u";
++    values[1] = std::to_string(key[0]) + "u"; values[2] = std::to_string(key[1]) + "u";
++    values[3] = std::to_string(key[2]) + "u"; values[4] = std::to_string(key[3]) + "u";
++    values[5] = "{";
++    for (uint32_t stage = 0; stage < 8; stage++) {
++        if (stage) values[5] += ",";
++        values[5] += "uint4(";
++        for (uint32_t component = 0; component < 4; component++) {
++            if (component) values[5] += ",";
++            values[5] += std::to_string(key[4+stage*4+component]) + "u";
++        }
++        values[5] += ")";
++    }
++    values[5] += "}";
++    values[6] = "uint4(";
++    for (uint32_t stage = 0; stage < 4; stage++) {
++        if (stage) values[6] += ",";
++        values[6] += std::to_string(key[38 + stage]) + "u";
++    }
++    values[6] += ")";
++    values[7] = std::to_string(key[42]) + "u";
++}
++
++static void preload_shader_variants()
++{
++    const std::wstring &path = manifest_path();
++    if (path.empty()) return;
++    struct Note { uint32_t tag; std::vector<uint32_t> words; };
++    std::vector<Note> notes;
++    {
++        std::lock_guard<std::mutex> hold(manifest_lock);
++        if (manifest_file) { std::fclose(manifest_file); manifest_file = nullptr; }
++        std::vector<uint32_t> data;
++        if (FILE *file = _wfopen(path.c_str(), L"rb")) {
++            uint32_t chunk[4096];
++            size_t read;
++            while ((read = std::fread(chunk, sizeof(uint32_t), 4096, file)) > 0) data.insert(data.end(), chunk, chunk + read);
++            std::fclose(file);
++        }
++        /* Each key once, where it was last noted. */
++        std::vector<Note> all;
++        for (size_t at = 0; at + 2 <= data.size();) {
++            uint32_t tag = data[at], count = data[at + 1];
++            if ((tag != MANIFEST_PIXEL && tag != MANIFEST_VERTEX) || count > 4096 || at + 2 + count > data.size()) break;
++            all.push_back({tag, std::vector<uint32_t>(data.begin() + at + 2, data.begin() + at + 2 + count)});
++            at += 2 + count;
++        }
++        std::set<std::pair<uint32_t, std::vector<uint32_t>>> seen;
++        size_t pixels = 0, vertices = 0;
++        for (size_t index = all.size(); index-- > 0;) {
++            auto &note = all[index];
++            size_t &kept = note.tag == MANIFEST_PIXEL ? pixels : vertices;
++            if (kept >= manifest_limit || !seen.insert({note.tag, note.words}).second) continue;
++            kept++;
++            notes.push_back(std::move(note));
++        }
++        std::reverse(notes.begin(), notes.end());
++        std::wstring temporary = path + L".tmp";
++        if (FILE *file = _wfopen(temporary.c_str(), L"wb")) {
++            bool complete = true;
++            for (const auto &note : notes) {
++                uint32_t header[2] = {note.tag, (uint32_t)note.words.size()};
++                complete = complete && std::fwrite(header, sizeof header, 1, file) == 1 &&
++                           (note.words.empty() ||
++                            std::fwrite(note.words.data(), sizeof(uint32_t), note.words.size(), file) == note.words.size());
++            }
++            complete = std::fclose(file) == 0 && complete;
++            if (!complete || !MoveFileExW(temporary.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING)) DeleteFileW(temporary.c_str());
++        }
++    }
++    const char *setting = std::getenv("RECOMP_SHADER_PRELOAD");
++    if (setting && *setting == '0') return;
++    std::vector<std::shared_ptr<PixelCompileJob>> jobs;
++    size_t pixels = 0, vertices = 0;
++    for (size_t index = notes.size(); index-- > 0;) {   /* newest first */
++        const auto &note = notes[index];
++        auto job = std::make_shared<PixelCompileJob>();
++        job->preload = true;
++        if (note.tag == MANIFEST_PIXEL) {
++            if (pixels >= preload_limit || note.words.size() != job->key.size()) continue;
++            std::copy(note.words.begin(), note.words.end(), job->key.begin());
++            pixel_job_values(*job);
++            pixels++;
++        } else {
++            if (vertices >= preload_limit || note.words.size() < 2) continue;
++            job->vertex = true;
++            job->vertex_mask = note.words[0];
++            job->vertex_key.assign(note.words.begin() + 1, note.words.end());
++            job->vertex_source = vertex_program_source(job->vertex_key, false);
++            if (job->vertex_source.empty()) continue;
++            vertices++;
++        }
++        jobs.push_back(std::move(job));
++    }
++    preload_started = std::chrono::steady_clock::now();
++    preload_queued = (int)jobs.size();
++    if (jobs.empty()) return;
++    std::fprintf(stderr, "[GPU-D3D11] preloading %zu pixel and %zu vertex shaders\n", pixels, vertices);
++    start_compile_workers();
++    std::lock_guard<std::mutex> hold(pixel_jobs_lock);
++    for (auto &job : jobs) pixel_jobs_preload.push_back(std::move(job));
++    pixel_jobs_signal.notify_all();
++}
++
++static void start_shader_preload()
++{
++    static std::once_flag started;
++    std::call_once(started, [] { std::thread(preload_shader_variants).detach(); });
++}
++
++/* A preload the workers finished: counted, and reported when it was the last. */
++static void preload_done(bool installed)
++{
++    if (installed) preload_installed++;
++    if (++preload_finished == preload_queued.load())
++        std::fprintf(stderr, "[GPU-D3D11] preloaded %d of %d shaders in %.2f s\n", preload_installed.load(), preload_queued.load(),
++                     std::chrono::duration<double>(std::chrono::steady_clock::now() - preload_started).count());
 +}
 +
 +/* Variants the workers finished since the last draw, into the cache. */
@@ -6030,6 +6236,25 @@ index f031faf..693330a 100644
 +    }
 +    for (const auto &job : done) {
 +        if (job->vertex) {
++            bool present = std::any_of(vertex_variants.begin(), vertex_variants.end(), [&](const VertexVariant &variant) {
++                return variant.input_mask == job->vertex_mask && variant.key == job->vertex_key;
++            });
++            if (job->preload) {
++                bool install = job->vertex_shader && !present && vertex_variants.size() < preload_room;
++                if (install) {
++                    VertexVariant variant;
++                    variant.key = job->vertex_key;
++                    variant.shader = job->vertex_shader;
++                    variant.layout = job->vertex_layout;
++                    variant.input_mask = job->vertex_mask;
++                    variant.bytecode_bytes = job->code->GetBufferSize();
++                    if (auto *cached = cache_shader_variant(vertex_variants, std::move(variant))) cached->last_used = 0;
++                    else install = false;
++                }
++                preload_done(install);
++                continue;
++            }
++            if (present) continue;
 +            if (!job->vertex_shader) {
 +                vertex_jobs_failed.emplace(job->vertex_key, job->vertex_mask);
 +                gpu_timing.vertex_shader_failures++;
@@ -6044,8 +6269,23 @@ index f031faf..693330a 100644
 +            variant.input_mask = job->vertex_mask;
 +            variant.bytecode_bytes = job->code->GetBufferSize();
 +            gpu_timing.vertex_async_compiles++;
-+            if (!cache_shader_variant(vertex_variants, std::move(variant)))
-+                vertex_jobs_failed.emplace(job->vertex_key, job->vertex_mask);
++            if (auto *cached = cache_shader_variant(vertex_variants, std::move(variant))) note_vertex_variant(*cached);
++            else vertex_jobs_failed.emplace(job->vertex_key, job->vertex_mask);
++            continue;
++        }
++        if (job->preload) {
++            bool present = std::any_of(shader_variants.begin(), shader_variants.end(),
++                                       [&](const ShaderVariant &variant) { return variant.key == job->key; });
++            bool install = job->shader && !present && shader_variants.size() < preload_room;
++            if (install) {
++                ShaderVariant variant = {};
++                variant.key = job->key;
++                variant.shader = job->shader;
++                variant.bytecode_bytes = job->code->GetBufferSize();
++                if (auto *cached = cache_shader_variant(shader_variants, std::move(variant))) cached->last_used = 0;
++                else install = false;
++            }
++            preload_done(install);
 +            continue;
 +        }
 +        if (!job->shader) {
@@ -6064,7 +6304,10 @@ index f031faf..693330a 100644
 +        variant.shader = job->shader;
 +        variant.bytecode_bytes = job->code->GetBufferSize();
 +        gpu_timing.pixel_async_compiles++;
-+        if (!cache_shader_variant(shader_variants, std::move(variant))) pixel_jobs_failed.insert(job->key);
++        if (std::any_of(shader_variants.begin(), shader_variants.end(),
++                        [&](const ShaderVariant &cached) { return cached.key == job->key; })) continue;
++        if (auto *cached = cache_shader_variant(shader_variants, std::move(variant))) note_pixel_variant(*cached);
++        else pixel_jobs_failed.insert(job->key);
 +    }
 +}
 +
@@ -6076,6 +6319,7 @@ index f031faf..693330a 100644
 +static VertexVariant *get_vertex_shader(const Nv2aGpuDraw &state, bool *pending)
 +{
 +    *pending = false;
++    start_shader_preload();
 +    uint32_t words = vertex_program_word_count(state);
 +    if (!words) return nullptr;
 +    /* Finished compiles are installed by get_pixel_shader, which runs first:
@@ -6084,6 +6328,7 @@ index f031faf..693330a 100644
 +        !std::memcmp(cached.key.data(), state.vertex_program + state.vertex_start, words * sizeof(uint32_t))) {
 +        cached.last_used = ++shader_use_serial;
 +        gpu_timing.vertex_shader_hits++;
++        note_vertex_variant(cached);
 +        return &cached;
 +    }
 +    std::vector<uint32_t> key(state.vertex_program[state.vertex_start], state.vertex_program[state.vertex_start] + words);
@@ -6134,6 +6379,7 @@ index f031faf..693330a 100644
 +    variant.bytecode_bytes = code->GetBufferSize();
 +    auto *cached = cache_shader_variant(vertex_variants, std::move(variant));
 +    if (!cached) vertex_jobs_failed.insert(std::move(compile_key));
++    else note_vertex_variant(*cached);
 +    return cached;
 +}
 +
@@ -6141,7 +6387,7 @@ index f031faf..693330a 100644
  {
      ShaderVariant variant = {};
      variant.key[0] = state.combiners.control; variant.key[1] = state.stage_program;
-@@ -746,6 +1696,7 @@ static ID3D11PixelShader *get_pixel_shader(const Nv2aGpuDraw &state, uint32_t wi
+@@ -746,6 +1939,7 @@ static ID3D11PixelShader *get_pixel_shader(const Nv2aGpuDraw &state, uint32_t wi
      variant.key[36] = (state.control0 & 0x10000) != 0;
      variant.key[37] = state.depth_enable != 0;
      variant.key[42] = window_clip_mode;
@@ -6149,10 +6395,11 @@ index f031faf..693330a 100644
      for (uint32_t stage = 0; stage < 4; stage++)
          if (nv2a_gpu_texture_mode_samples((state.stage_program >> (stage * 5)) & 31u))
              variant.key[38 + stage] = state.textures[stage].filter >> 28;
-@@ -753,14 +1704,30 @@ static ID3D11PixelShader *get_pixel_shader(const Nv2aGpuDraw &state, uint32_t wi
+@@ -753,56 +1947,65 @@ static ID3D11PixelShader *get_pixel_shader(const Nv2aGpuDraw &state, uint32_t wi
          variant.key[4+stage*4] = state.combiners.rgb_input[stage]; variant.key[5+stage*4] = state.combiners.alpha_input[stage];
          variant.key[6+stage*4] = state.combiners.rgb_output[stage]; variant.key[7+stage*4] = state.combiners.alpha_output[stage];
      }
++    start_shader_preload();
 +    install_compiled_pixel_shaders();
 +    /* RECOMP_SHADER_GENERIC=1: every draw with the generic shader, to check it
 +     * against the compiled variants. */
@@ -6161,6 +6408,7 @@ index f031faf..693330a 100644
      for (auto &cached : shader_variants) if (cached.key == variant.key) {
          cached.last_used = ++shader_use_serial;
          gpu_timing.pixel_shader_hits++;
++        note_pixel_variant(cached);
          return cached.shader.Get();
      }
 +    if (pixel_jobs_failed.count(variant.key)) return generic_pixel_shader.Get();
@@ -6175,16 +6423,45 @@ index f031faf..693330a 100644
      gpu_timing.pixel_shader_misses++;
      GpuTimer compile_timer(gpu_timing.pixel_compile);
 -    std::array<std::string,8> values;
+-    values[0] = std::to_string(variant.key[0] & 255u) + "u";
+-    values[1] = std::to_string(variant.key[0]) + "u"; values[2] = std::to_string(variant.key[1]) + "u";
+-    values[3] = std::to_string(variant.key[2]) + "u"; values[4] = std::to_string(variant.key[3]) + "u";
+-    values[5] = "{";
+-    for (uint32_t stage = 0; stage < 8; stage++) {
+-        if (stage) values[5] += ",";
+-        values[5] += "uint4(";
+-        for (uint32_t component = 0; component < 4; component++) {
+-            if (component) values[5] += ",";
+-            values[5] += std::to_string(variant.key[4+stage*4+component]) + "u";
+-        }
+-        values[5] += ")";
 +    auto job = std::make_shared<PixelCompileJob>();
 +    job->key = variant.key;
-+    std::array<std::string,8> &values = job->values;
-     values[0] = std::to_string(variant.key[0] & 255u) + "u";
-     values[1] = std::to_string(variant.key[0]) + "u"; values[2] = std::to_string(variant.key[1]) + "u";
-     values[3] = std::to_string(variant.key[2]) + "u"; values[4] = std::to_string(variant.key[3]) + "u";
-@@ -782,27 +1749,38 @@ static ID3D11PixelShader *get_pixel_shader(const Nv2aGpuDraw &state, uint32_t wi
++    pixel_job_values(*job);
++    if (async && !generic_pixel_requested) {
++        /* The generic shader itself, first in the workers' queue (from disk
++         * after the first run); until it exists, misses compile in the draw. */
++        generic_pixel_requested = true;
++        auto generic = std::make_shared<PixelCompileJob>();
++        generic->generic = true;
++        queue_pixel_compile(generic);
      }
-     values[6] += ")";
-     values[7] = std::to_string(variant.key[42]) + "u";
+-    values[5] += "}";
+-    values[6] = "uint4(";
+-    for (uint32_t stage = 0; stage < 4; stage++) {
+-        if (stage) values[6] += ",";
+-        values[6] += std::to_string(variant.key[38 + stage]) + "u";
++    if (async && generic_pixel_shader) {
++        ComPtr<ID3DBlob> code, errors;
++        if (FAILED(compile_pixel_variant(*job, code, errors, false))) {
++            queue_pixel_compile(job);
++            gpu_timing.pixel_generic_draws++;
++            return generic_pixel_shader.Get();
++        }
++        job->code = code;
+     }
+-    values[6] += ")";
+-    values[7] = std::to_string(variant.key[42]) + "u";
 -    const D3D_SHADER_MACRO definitions[] = {
 -        {"NV_COMPILED","1"}, {"NV_STAGE_COUNT",values[0].c_str()}, {"NV_COMBINER_CONTROL",values[1].c_str()},
 -        {"NV_STAGE_PROGRAM",values[2].c_str()}, {"NV_FINAL0",values[3].c_str()}, {"NV_FINAL1",values[4].c_str()},
@@ -6198,23 +6475,6 @@ index f031faf..693330a 100644
 -    HRESULT result = D3DCompile(nv2a_gpu_shader_source, sizeof nv2a_gpu_shader_source - 1, "NV2A-guest", definitions, nullptr,
 -                               "ps_main", "ps_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3 | D3DCOMPILE_IEEE_STRICTNESS, 0, &code, &errors);
 -    if (FAILED(result)) {
-+    if (async && !generic_pixel_requested) {
-+        /* The generic shader itself, first in the workers' queue (from disk
-+         * after the first run); until it exists, misses compile in the draw. */
-+        generic_pixel_requested = true;
-+        auto generic = std::make_shared<PixelCompileJob>();
-+        generic->generic = true;
-+        queue_pixel_compile(generic);
-+    }
-+    if (async && generic_pixel_shader) {
-+        ComPtr<ID3DBlob> code, errors;
-+        if (FAILED(compile_pixel_variant(*job, code, errors, false))) {
-+            queue_pixel_compile(job);
-+            gpu_timing.pixel_generic_draws++;
-+            return generic_pixel_shader.Get();
-+        }
-+        job->code = code;
-+    }
 +    ComPtr<ID3DBlob> code = job->code, errors;
 +    if (!code && FAILED(compile_pixel_variant(*job, code, errors))) {
          gpu_timing.pixel_shader_failures++;
@@ -6232,11 +6492,12 @@ index f031faf..693330a 100644
      auto *cached = cache_shader_variant(shader_variants, std::move(variant));
 -    return cached ? cached->shader.Get() : nullptr;
 +    if (!cached) pixel_jobs_failed.insert(job->key);
++    else note_pixel_variant(*cached);
 +    return cached ? cached->shader.Get() : generic_pixel_shader.Get();
  }
  
  template<typename SurfaceType>
-@@ -824,6 +1802,29 @@ static void mark_written_mask(SurfaceType &surface, const D3D11_BOX &region)
+@@ -824,6 +2027,29 @@ static void mark_written_mask(SurfaceType &surface, const D3D11_BOX &region)
      }
  }
  
@@ -6266,7 +6527,7 @@ index f031faf..693330a 100644
  template<typename SurfaceType>
  static void mark_written_region(SurfaceType &surface, const D3D11_BOX &region)
  {
-@@ -831,6 +1832,10 @@ static void mark_written_region(SurfaceType &surface, const D3D11_BOX &region)
+@@ -831,6 +2057,10 @@ static void mark_written_region(SurfaceType &surface, const D3D11_BOX &region)
      if (!surface.dirty) {
          surface.written_region = region;
          surface.written_mask.clear();
@@ -6277,7 +6538,7 @@ index f031faf..693330a 100644
      }
      else {
          auto &written = surface.written_region;
-@@ -938,6 +1943,148 @@ static bool surface_memory_matches(const SurfaceType &surface, uint32_t bytes)
+@@ -938,6 +2168,148 @@ static bool surface_memory_matches(const SurfaceType &surface, uint32_t bytes)
      return true;
  }
  
@@ -6426,7 +6687,7 @@ index f031faf..693330a 100644
  static void refresh_surface(Surface &surface)
  {
      if (!surface.needs_refresh) return;
-@@ -968,9 +2115,9 @@ static void refresh_surface(Surface &surface)
+@@ -968,9 +2340,9 @@ static void refresh_surface(Surface &surface)
                  std::memcpy(surface.source_snapshot.data() + (size_t)row * row_bytes + changed.left * 4,
                              surface.memory + (size_t)row * surface.pitch + changed.left * 4,
                              (size_t)(changed.right - changed.left) * 4);
@@ -6439,7 +6700,7 @@ index f031faf..693330a 100644
              surface.alias_copy_serial = 0;
              gpu_timing.color_refreshed++;
              gpu_timing.color_refresh_bytes += (uint64_t)(changed.right - changed.left) * (changed.bottom - changed.top) * 4;
-@@ -979,7 +2126,7 @@ static void refresh_surface(Surface &surface)
+@@ -979,7 +2351,7 @@ static void refresh_surface(Surface &surface)
          surface.needs_refresh = false;
          return;
      }
@@ -6448,7 +6709,7 @@ index f031faf..693330a 100644
      surface.clear_value_valid = false;
      surface.alias_copy_serial = 0;
      gpu_timing.color_refresh_bytes += (uint64_t)surface.width * surface.height * 4;
-@@ -1015,7 +2162,13 @@ static bool refresh_depth(DepthSurface &surface)
+@@ -1015,7 +2387,13 @@ static bool refresh_depth(DepthSurface &surface)
          encode_depth_row(surface.format, source, destination, surface.width);
      }
      context->Unmap(surface.staging.Get(), 0);
@@ -6463,7 +6724,7 @@ index f031faf..693330a 100644
      surface.clear_value_valid = false;
      surface.needs_refresh = false;
      surface.snapshot_valid = false;
-@@ -1023,33 +2176,243 @@ static bool refresh_depth(DepthSurface &surface)
+@@ -1023,33 +2401,243 @@ static bool refresh_depth(DepthSurface &surface)
      return true;
  }
  
@@ -6733,7 +6994,7 @@ index f031faf..693330a 100644
  }
  
  static DepthSurface *get_depth(const Nv2aGpuDraw &state, bool preserve = true, TargetExtent extent = {})
-@@ -1066,26 +2429,44 @@ static DepthSurface *get_depth(const Nv2aGpuDraw &state, bool preserve = true, T
+@@ -1066,26 +2654,44 @@ static DepthSurface *get_depth(const Nv2aGpuDraw &state, bool preserve = true, T
                       state.depth_pitch, extent.width, state.depth_format);
          return nullptr;
      }
@@ -6788,7 +7049,7 @@ index f031faf..693330a 100644
      if (!target_operation_succeeded("depth", "create staging", device->CreateTexture2D(&description, nullptr, &surface.staging))) return nullptr;
      // Creation-data uploads can round D24 values; use the bit-preserving refresh path.
      surface.needs_refresh = preserve;
-@@ -1094,6 +2475,161 @@ static DepthSurface *get_depth(const Nv2aGpuDraw &state, bool preserve = true, T
+@@ -1094,6 +2700,161 @@ static DepthSurface *get_depth(const Nv2aGpuDraw &state, bool preserve = true, T
      return &depth_surfaces.back();
  }
  
@@ -6950,7 +7211,7 @@ index f031faf..693330a 100644
  static void readback_failed(const char *kind, HRESULT result, const char *operation = "map")
  {
      std::fprintf(stderr, "[GPU-D3D11] readback failed: %s %s 0x%08X; device 0x%08X\n",
-@@ -1224,6 +2760,54 @@ static void wait_ordering_completion(void)
+@@ -1224,6 +2985,54 @@ static void wait_ordering_completion(void)
      }
  }
  
@@ -7005,7 +7266,7 @@ index f031faf..693330a 100644
  static void gpu_sync_impl(bool publish, const void *only = nullptr, size_t only_bytes = 0)
  {
      GpuTimer sync_timer(gpu_timing.sync);
-@@ -1253,6 +2837,36 @@ static void gpu_sync_impl(bool publish, const void *only = nullptr, size_t only_
+@@ -1253,6 +3062,36 @@ static void gpu_sync_impl(bool publish, const void *only = nullptr, size_t only_
          }
          return;
      }
@@ -7042,7 +7303,7 @@ index f031faf..693330a 100644
      ID3D11RenderTargetView *empty = nullptr;
      context->OMSetRenderTargets(1, &empty, nullptr);
      bool has_readback = false;
-@@ -1266,13 +2880,14 @@ static void gpu_sync_impl(bool publish, const void *only = nullptr, size_t only_
+@@ -1266,13 +3105,14 @@ static void gpu_sync_impl(bool publish, const void *only = nullptr, size_t only_
                      has_known_clear = true;
                      continue;
                  }
@@ -7059,7 +7320,7 @@ index f031faf..693330a 100644
                      gpu_timing.color_copy_bytes += (uint64_t)surface.width * surface.height * 4;
                  }
                  has_readback = true;
-@@ -1284,7 +2899,7 @@ static void gpu_sync_impl(bool publish, const void *only = nullptr, size_t only_
+@@ -1284,7 +3124,7 @@ static void gpu_sync_impl(bool publish, const void *only = nullptr, size_t only_
                      has_known_clear = true;
                      continue;
                  }
@@ -7068,7 +7329,7 @@ index f031faf..693330a 100644
                  has_readback = true;
              }
      }
-@@ -1659,12 +3274,13 @@ static bool stage_flip(const void *presented, size_t bytes, uint32_t va, uint32_
+@@ -1659,12 +3499,13 @@ static bool stage_flip(const void *presented, size_t bytes, uint32_t va, uint32_
  {
      Surface *surface = surface_for_memory(presented);
      if (!surface) return false;
@@ -7084,7 +7345,7 @@ index f031faf..693330a 100644
      }
      if (!s_pending_flip.event) {
          D3D11_QUERY_DESC description = {D3D11_QUERY_EVENT, 0};
-@@ -1684,11 +3300,47 @@ static bool stage_flip(const void *presented, size_t bytes, uint32_t va, uint32_
+@@ -1684,11 +3525,47 @@ static bool stage_flip(const void *presented, size_t bytes, uint32_t va, uint32_
      return true;
  }
  
@@ -7132,7 +7393,7 @@ index f031faf..693330a 100644
      if (!presented) { nv2a_gpu_flush(); return va; }
      uint32_t show = va;
      if (async_flip_enabled()) {
-@@ -1708,17 +3360,350 @@ extern "C" uint32_t nv2a_gpu_flip(const void *presented, size_t bytes, uint32_t
+@@ -1708,17 +3585,350 @@ extern "C" uint32_t nv2a_gpu_flip(const void *presented, size_t bytes, uint32_t
      } else {
          gpu_sync_impl(true, presented, bytes);
      }
@@ -7491,7 +7752,7 @@ index f031faf..693330a 100644
  /* A GPU-engine blit wrote guest RAM a cached surface mirrors. Refresh only the
   * surfaces that overlap those bytes from guest RAM; never bump the global
   * texture-validation serial, which would re-upload GPU-only textures (UI). */
-@@ -1754,8 +3739,11 @@ static bool matches_color_target(const Surface &surface, const Nv2aGpuDraw &stat
+@@ -1754,8 +3964,11 @@ static bool matches_color_target(const Surface &surface, const Nv2aGpuDraw &stat
  
  static bool matches_depth_target(const DepthSurface &surface, const Nv2aGpuDraw &state, TargetExtent extent)
  {
@@ -7504,7 +7765,7 @@ index f031faf..693330a 100644
  }
  
  static TargetExtent reusable_target_extent(const Nv2aGpuDraw &state)
-@@ -1894,12 +3882,30 @@ extern "C" int nv2a_gpu_clear(const Nv2aGpuDraw *state, uint32_t flags, uint32_t
+@@ -1894,12 +4107,30 @@ extern "C" int nv2a_gpu_clear(const Nv2aGpuDraw *state, uint32_t flags, uint32_t
          const float rgba[] = {(float)((color >> 16) & 255u) / 255.0f, (float)((color >> 8) & 255u) / 255.0f,
                                (float)(color & 255u) / 255.0f, (float)(color >> 24) / 255.0f};
          context->ClearRenderTargetView(surface->target.Get(), rgba);
@@ -7536,7 +7797,7 @@ index f031faf..693330a 100644
      }
      if (surface) {
          mark_written_region(*surface, region);
-@@ -1908,7 +3914,7 @@ extern "C" int nv2a_gpu_clear(const Nv2aGpuDraw *state, uint32_t flags, uint32_t
+@@ -1908,7 +4139,7 @@ extern "C" int nv2a_gpu_clear(const Nv2aGpuDraw *state, uint32_t flags, uint32_t
      if (depth) {
          bool known = known_clears && !partial && (depth->format == 1 ? clear_depth :
              (clear_depth && clear_stencil) || depth->clear_value_valid);
@@ -7545,7 +7806,7 @@ index f031faf..693330a 100644
              (clear_depth ? depth_value & 0xFFFFFF00u : depth->clear_value & 0xFFFFFF00u) |
              (clear_stencil ? depth_value & 255u : depth->clear_value & 255u);
          mark_written_region(*depth, region);
-@@ -1928,10 +3934,16 @@ static void release_stream(DynamicStream &stream)
+@@ -1928,10 +4159,16 @@ static void release_stream(DynamicStream &stream)
      }
  }
  
@@ -7566,7 +7827,7 @@ index f031faf..693330a 100644
  static bool map_stream(DynamicStream &stream, UINT bytes, UINT bind, const char *kind, UINT &offset)
  {
      if (!stream.buffer || bytes > stream.capacity) {
-@@ -1953,18 +3965,18 @@ static bool map_stream(DynamicStream &stream, UINT bytes, UINT bind, const char
+@@ -1953,18 +4190,18 @@ static bool map_stream(DynamicStream &stream, UINT bytes, UINT bind, const char
          stream.capacity = capacity;
          stream.used = 0;
      }
@@ -7596,7 +7857,7 @@ index f031faf..693330a 100644
          gpu_timing.stream_discards++;
      } else {
          gpu_timing.stream_appends++;
-@@ -2011,26 +4023,109 @@ static bool initialize_pipeline()
+@@ -2011,26 +4248,109 @@ static bool initialize_pipeline()
  static ComPtr<ID3D11Texture2D> feedback_texture;
  static ComPtr<ID3D11ShaderResourceView> feedback_view;
  
@@ -7715,7 +7976,7 @@ index f031faf..693330a 100644
  }
  
  static ID3D11ShaderResourceView *default_white_view()
-@@ -2050,12 +4145,162 @@ static ID3D11ShaderResourceView *default_white_view()
+@@ -2050,12 +4370,162 @@ static ID3D11ShaderResourceView *default_white_view()
      return view.Get();
  }
  
@@ -7878,7 +8139,7 @@ index f031faf..693330a 100644
      static const bool mirror_aliases = []() {
          const char *setting = std::getenv("RECOMP_NV2A_GPU_ALIAS_COPIES");
          return !setting || std::strcmp(setting, "0") != 0;
-@@ -2153,14 +4398,22 @@ static ID3D11ShaderResourceView *get_texture(const Nv2aGpuTexture &binding, cons
+@@ -2153,14 +4623,22 @@ static ID3D11ShaderResourceView *get_texture(const Nv2aGpuTexture &binding, cons
              direct->needs_refresh = true;
              refresh_surface(*direct);
              if (direct->alias_copy_serial != alias_serial) {
@@ -7903,7 +8164,7 @@ index f031faf..693330a 100644
                          context->CopySubresourceRegion(direct->texture.Get(), 0, box.left, box.top, 0,
                                                        surface.texture.Get(), 0, &box);
                          direct->clear_value_valid = false;
-@@ -2207,6 +4460,20 @@ static ID3D11ShaderResourceView *get_texture(const Nv2aGpuTexture &binding, cons
+@@ -2207,6 +4685,20 @@ static ID3D11ShaderResourceView *get_texture(const Nv2aGpuTexture &binding, cons
          nv2a_gpu_surface_publish(binding.source, binding.source_bytes);
      }
      if (direct) {
@@ -7924,7 +8185,7 @@ index f031faf..693330a 100644
          direct->last_used = ++surface_use_serial;
          if (cloak_debug())
              std::fprintf(stderr, "[CLOAKDBG] direct src=%p %ux%u fmt=%X linear=%u pitch=%u; surf %ux%u pitch=%u dirty=%u needs_refresh=%u snapshot_valid=%u\n",
-@@ -2223,6 +4490,7 @@ static ID3D11ShaderResourceView *get_texture(const Nv2aGpuTexture &binding, cons
+@@ -2223,6 +4715,7 @@ static ID3D11ShaderResourceView *get_texture(const Nv2aGpuTexture &binding, cons
           * GPU stale data -- see RECOMP_SYNC_LIGHT. */
          if (!direct->dirty)
              refresh_surface(*direct);
@@ -7932,7 +8193,7 @@ index f031faf..693330a 100644
          return direct->view.Get();
      }
      CachedTexture *refresh = nullptr;
-@@ -2397,6 +4665,20 @@ static ID3D11ShaderResourceView *get_texture(const Nv2aGpuTexture &binding, cons
+@@ -2397,6 +4890,20 @@ static ID3D11ShaderResourceView *get_texture(const Nv2aGpuTexture &binding, cons
      description.MipLevels = levels; description.ArraySize = faces; description.Format = format;
      description.MiscFlags = binding.cube ? D3D11_RESOURCE_MISC_TEXTURECUBE : 0;
      description.SampleDesc.Count = 1; description.BindFlags = D3D11_BIND_SHADER_RESOURCE;
@@ -7953,7 +8214,7 @@ index f031faf..693330a 100644
      ComPtr<ID3D11Texture2D> texture;
      CachedTexture entry = {};
      entry.source = binding.source; entry.width = binding.width; entry.height = binding.height; entry.format = binding.format;
-@@ -2515,11 +4797,96 @@ static D3D11_TEXTURE_ADDRESS_MODE texture_address(uint32_t address)
+@@ -2515,11 +5022,96 @@ static D3D11_TEXTURE_ADDRESS_MODE texture_address(uint32_t address)
      }
  }
  
@@ -8050,7 +8311,7 @@ index f031faf..693330a 100644
      if (minimum > 6 || maximum > 2) return false;
      D3D11_SAMPLER_DESC description = {};
      description.AddressU = texture_address(binding.address_u);
-@@ -2535,6 +4902,10 @@ static bool make_sampler(const Nv2aGpuTexture &binding, ComPtr<ID3D11SamplerStat
+@@ -2535,6 +5127,10 @@ static bool make_sampler(const Nv2aGpuTexture &binding, ComPtr<ID3D11SamplerStat
      description.MipLODBias = (float)bias / 256.0f;
      if (description.MipLODBias > D3D11_MIP_LOD_BIAS_MAX) return false;
      description.MaxAnisotropy = binding.control0_valid ? 1u << ((binding.control0 >> 4) & 3u) : 1u;
@@ -8061,7 +8322,7 @@ index f031faf..693330a 100644
      if (description.MaxAnisotropy > 1) {
          if (maximum != 2 || (minimum != 2 && minimum != 6)) return false;
          description.Filter = D3D11_FILTER_ANISOTROPIC;
-@@ -2673,10 +5044,10 @@ static bool clear_target_rectangle(const Nv2aGpuDraw &state, Surface *surface, D
+@@ -2673,10 +5269,10 @@ static bool clear_target_rectangle(const Nv2aGpuDraw &state, Surface *surface, D
              "float4 ps():SV_Target{return clearColor;}";
          ClearPipeline created;
          ComPtr<ID3DBlob> vertex, pixel, errors;
@@ -8074,7 +8335,7 @@ index f031faf..693330a 100644
                                  "ps", "ps_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &pixel, &errors);
          if (FAILED(result)) {
              std::fprintf(stderr, "[GPU-D3D11] rectangle clear shader compile: 0x%08X %s\n",
-@@ -2725,7 +5096,7 @@ static bool clear_target_rectangle(const Nv2aGpuDraw &state, Surface *surface, D
+@@ -2725,7 +5321,7 @@ static bool clear_target_rectangle(const Nv2aGpuDraw &state, Surface *surface, D
      const float constants[8] = {
          (float)((color >> 16) & 255u) / 255.0f, (float)((color >> 8) & 255u) / 255.0f,
          (float)(color & 255u) / 255.0f, (float)(color >> 24) / 255.0f,
@@ -8083,7 +8344,7 @@ index f031faf..693330a 100644
              (float)(depth_value >> 8) / 16777215.0f, 0, 0, 0
      };
      D3D11_MAPPED_SUBRESOURCE mapped = {};
-@@ -2735,8 +5106,10 @@ static bool clear_target_rectangle(const Nv2aGpuDraw &state, Surface *surface, D
+@@ -2735,8 +5331,10 @@ static bool clear_target_rectangle(const Nv2aGpuDraw &state, Surface *surface, D
      context->Unmap(pipeline.constants.Get(), 0);
      ID3D11ShaderResourceView *empty[12] = {};
      context->PSSetShaderResources(0, 12, empty);
@@ -8096,7 +8357,7 @@ index f031faf..693330a 100644
      context->OMSetBlendState(pipeline.blend[surface ? 1 : 0].Get(), nullptr, UINT_MAX);
      context->OMSetDepthStencilState(pipeline.depth[(clear_depth ? 1 : 0) | (clear_stencil ? 2 : 0)].Get(), depth_value & 255u);
      context->IASetInputLayout(nullptr);
-@@ -2747,8 +5120,13 @@ static bool clear_target_rectangle(const Nv2aGpuDraw &state, Surface *surface, D
+@@ -2747,8 +5345,13 @@ static bool clear_target_rectangle(const Nv2aGpuDraw &state, Surface *surface, D
      ID3D11Buffer *buffer = pipeline.constants.Get();
      context->VSSetConstantBuffers(0, 1, &buffer);
      context->PSSetConstantBuffers(0, 1, &buffer);
@@ -8112,7 +8373,7 @@ index f031faf..693330a 100644
      context->RSSetState(pipeline.raster.Get());
      context->RSSetViewports(1, &viewport);
      context->RSSetScissorRects(1, &clip);
-@@ -2756,17 +5134,903 @@ static bool clear_target_rectangle(const Nv2aGpuDraw &state, Surface *surface, D
+@@ -2756,17 +5359,903 @@ static bool clear_target_rectangle(const Nv2aGpuDraw &state, Surface *surface, D
      return true;
  }
  
@@ -9018,7 +9279,7 @@ index f031faf..693330a 100644
      if (state->topology > NV2A_GPU_TOPOLOGY_POINTS) return reject("primitive topology");
      uint32_t primitive_width = state->topology == NV2A_GPU_TOPOLOGY_TRIANGLES ? 3u :
                                 state->topology == NV2A_GPU_TOPOLOGY_LINES ? 2u : 1u;
-@@ -2775,7 +6039,7 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -2775,7 +6264,7 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
          (state->indices && element_count > NV2A_GPU_MAX_INDICES)) return reject("primitive element count");
      if (state->topology == NV2A_GPU_TOPOLOGY_POINTS && state->point_size && state->point_size != 8)
          return reject("non-unit point size");
@@ -9027,7 +9288,7 @@ index f031faf..693330a 100644
          for (uint32_t index = 0; index < state->index_count; index++)
              if (state->indices[index] >= count) return reject("vertex index extent");
      }
-@@ -2856,12 +6120,25 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -2856,12 +6345,25 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
      for (uint32_t vertex = 0; !state->vertex_program && !state->fixed_transform && vertex < count; vertex++)
          if (!nv_cpu_finite(vertices[vertex].position[0]) || !nv_cpu_finite(vertices[vertex].position[1]) ||
              !nv_cpu_finite(vertices[vertex].position[2]) || !nv_cpu_finite(vertices[vertex].position[3])) return 0;
@@ -9055,7 +9316,7 @@ index f031faf..693330a 100644
      D3D11_DEPTH_STENCIL_DESC depth_description = {};
      depth_description.DepthEnable = state->depth_enable != 0;
      depth_description.DepthWriteMask = state->depth_mask ? D3D11_DEPTH_WRITE_MASK_ALL : D3D11_DEPTH_WRITE_MASK_ZERO;
-@@ -2903,8 +6180,24 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -2903,8 +6405,24 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
                        (LONG)std::min(state->clip_y + state->clip_height, state->height)};
      if (state->topology == NV2A_GPU_TOPOLOGY_TRIANGLES && state->cull_enable && state->cull_face == 0x408) { clip.right = clip.left; clip.bottom = clip.top; }
      configure_window_clip(*state, constants, clip);
@@ -9081,7 +9342,7 @@ index f031faf..693330a 100644
      constants.misc[1] = state->control0;
      constants.misc[2] = state->fixed_transform; constants.misc[3] = state->flat_shading;
      constants.final_input[0] = state->combiners.final_input[0]; constants.final_input[1] = state->combiners.final_input[1];
-@@ -2971,14 +6264,78 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -2971,14 +6489,78 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
              }
          }
      }
@@ -9162,7 +9423,7 @@ index f031faf..693330a 100644
      for (uint32_t stage = 0; stage < 8; stage++) {
          constants.stages[stage][0] = state->combiners.rgb_input[stage]; constants.stages[stage][1] = state->combiners.alpha_input[stage];
          constants.stages[stage][2] = state->combiners.rgb_output[stage]; constants.stages[stage][3] = state->combiners.alpha_output[stage];
-@@ -3052,7 +6409,8 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -3052,7 +6634,8 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
              constants.texture_info[stage][3] = 0.0f;
              continue;
          }
@@ -9172,7 +9433,7 @@ index f031faf..693330a 100644
              return reject("projective volume texture dimensionality");
          uint32_t sign_mask = binding.filter >> 28;
          uint32_t key_mode = binding.control0_valid ? binding.control0 & 3u : 0;
-@@ -3090,9 +6448,50 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -3090,9 +6673,50 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
              if ((mode == 1 || mode == 2) && vertices[vertex].texture[stage][3] == 0) return reject("zero projective texture coordinate");
          }
          if (!binding.source_bytes) return reject("missing texture data");
@@ -9225,7 +9486,7 @@ index f031faf..693330a 100644
          constants.texture_info[stage][0] = (float)binding.width; constants.texture_info[stage][1] = (float)binding.height; constants.texture_info[stage][2] = (float)binding.linear;
          constants.texture_key[stage][0] = binding.color_key;
          constants.texture_key[stage][1] = binding.format == 0x03 || binding.format == 0x07 ||
-@@ -3102,7 +6501,18 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -3102,7 +6726,18 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
          constants.texture_info[stage][3] = (float)((binding.format == 0x1E ? 1u : 0u) | (binding.cube ? 2u : 0u) |
              (binding.address_u == 5 ? 4u : 0u) | (binding.address_v == 5 ? 8u : 0u) |
              (binding.control0_valid && (binding.control0 & 4u) ? 16u : 0u) |
@@ -9245,7 +9506,7 @@ index f031faf..693330a 100644
          if (sign_mask) signed_texture_stages++;
          switch (binding.format) {
          case 0x01: case 0x16: case 0x17: case 0x1A: case 0x1B: case 0x20: case 0x28: case 0x29:
-@@ -3111,32 +6521,94 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -3111,32 +6746,94 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
          }
      }
      phase_timer.next_phase(gpu_timing.draw_streams);
@@ -9358,7 +9619,7 @@ index f031faf..693330a 100644
                  !std::memcmp(&uploaded_constants, &constants, sizeof constants)) {
              /* Same constants as the last upload this frame: rebind its offset. */
              gpu_timing.constant_reuses++;
-@@ -3146,6 +6618,8 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -3146,6 +6843,8 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
              if (!map_stream(constant_stream, kConstantSlot, D3D11_BIND_CONSTANT_BUFFER, "constants", constants_offset))
                  return 0;
              std::memcpy((uint8_t *)constant_stream.mapped.pData + constants_offset, &constants, sizeof constants);
@@ -9367,7 +9628,7 @@ index f031faf..693330a 100644
              constant_upload_offset = constants_offset;
              uploaded_constants = constants;
              uploaded_constants_valid = true;
-@@ -3168,22 +6642,60 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -3168,22 +6867,60 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
          if (((state->stage_program >> (stage * 5)) & 31u) == 5u ||
              ((uint32_t)constants.texture_info[stage][3] & 16u) ||
              constants.texture_key[stage][2] == 3u) uncombined = false;
@@ -9433,7 +9694,7 @@ index f031faf..693330a 100644
      context->OMSetDepthStencilState(depth_state.Get(), state->stencil_reference & 255u); context->OMSetBlendState(blending.Get(), blend_color, ~0u);
      context->IASetInputLayout(guest_vertex ? guest_vertex->layout.Get() : input_layout.Get()); context->IASetVertexBuffers(0, 1, buffers, &stride, &offset);
      context->IASetPrimitiveTopology(state->topology == NV2A_GPU_TOPOLOGY_LINES ? D3D11_PRIMITIVE_TOPOLOGY_LINELIST :
-@@ -3192,7 +6704,7 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -3192,7 +6929,7 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
      context->VSSetShader(guest_vertex ? guest_vertex->shader.Get() : vertex_shader.Get(), nullptr, 0);
      ID3D11GeometryShader *geometry = state->topology == NV2A_GPU_TOPOLOGY_LINES ? line_geometry_shader.Get() :
          state->topology == NV2A_GPU_TOPOLOGY_POINTS ? point_geometry_shader.Get() :
@@ -9442,7 +9703,7 @@ index f031faf..693330a 100644
      context->GSSetShader(geometry, nullptr, 0);
      context->PSSetShader(program, nullptr, 0);
      if (constants_ring && context1) {
-@@ -3200,25 +6712,32 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -3200,25 +6937,32 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
          context1->VSSetConstantBuffers1(0, 1, &constant_ring_buffer, &first, &num);
          context1->PSSetConstantBuffers1(0, 1, &constant_ring_buffer, &first, &num);
          context1->GSSetConstantBuffers1(0, 1, &constant_ring_buffer, &first, &num);
@@ -9480,7 +9741,7 @@ index f031faf..693330a 100644
      end_gpu_sample(sample);
      phase_timer.next_phase(gpu_timing.draw_bookkeeping);
      if (state->topology == NV2A_GPU_TOPOLOGY_LINES) gpu_timing.line_primitives += element_count / 2;
-@@ -3245,8 +6764,10 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -3245,8 +6989,10 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
          if (texture_matrix_used) gpu_timing.texture_matrix_draws++;
      }
      pending_draws = true;
@@ -9492,7 +9753,7 @@ index f031faf..693330a 100644
      bool stencil_writes = state->stencil_enable && (state->stencil_write_mask & 255u) &&
          (state->stencil_fail != 0x1E00 || state->stencil_depth_fail != 0x1E00 || state->stencil_pass != 0x1E00);
      if (depth && ((state->depth_enable && state->depth_mask) || stencil_writes) && writes) mark_written_region(*depth, region);
-@@ -3260,8 +6781,8 @@ extern "C" int nv2a_gpu_compile(void)
+@@ -3260,8 +7006,8 @@ extern "C" int nv2a_gpu_compile(void)
      if (vertex_shader && uncombined_shader && geometry_shader && line_geometry_shader && point_geometry_shader) return 1;
      if (!nv2a_gpu_available()) return 0;
      ComPtr<ID3DBlob> pixel_code, errors;
@@ -9503,7 +9764,7 @@ index f031faf..693330a 100644
      if (FAILED(result)) {
          std::fprintf(stderr, "[GPU-D3D11] shader compile: %s\n", errors ? (const char *)errors->GetBufferPointer() : "failed");
          return 0;
-@@ -3273,8 +6794,8 @@ extern "C" int nv2a_gpu_compile(void)
+@@ -3273,8 +7019,8 @@ extern "C" int nv2a_gpu_compile(void)
          return 0;
      }
      pixel_code.Reset(); errors.Reset();
@@ -9514,7 +9775,7 @@ index f031faf..693330a 100644
      if (FAILED(result)) return 0;
      if (FAILED(device->CreatePixelShader(pixel_code->GetBufferPointer(), pixel_code->GetBufferSize(), nullptr, &uncombined_shader))) return 0;
      const struct { const char *entry; ComPtr<ID3D11GeometryShader> *shader; } geometries[] = {
-@@ -3282,8 +6803,8 @@ extern "C" int nv2a_gpu_compile(void)
+@@ -3282,8 +7028,8 @@ extern "C" int nv2a_gpu_compile(void)
      };
      for (const auto &geometry : geometries) {
          pixel_code.Reset(); errors.Reset();
@@ -9525,7 +9786,7 @@ index f031faf..693330a 100644
          if (SUCCEEDED(result))
              result = device->CreateGeometryShader(pixel_code->GetBufferPointer(), pixel_code->GetBufferSize(), nullptr,
                                                     geometry.shader->ReleaseAndGetAddressOf());
-@@ -3296,28 +6817,98 @@ extern "C" int nv2a_gpu_compile(void)
+@@ -3296,28 +7042,98 @@ extern "C" int nv2a_gpu_compile(void)
      return 1;
  }
  

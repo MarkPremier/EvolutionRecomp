@@ -2125,8 +2125,16 @@ void sub_000FFA00(void)
  * stores its next frame in [0x257E74] -- kept on its frame until the Xbox's
  * 0.2 s have gone by. A load that draws more takes a little longer, inside
  * the hold. */
+static uint32_t s_tick_this;      /* the loading screen the loader last ticked */
+static clock_t s_tick_seen;       /* when it did */
+static int s_tick_between;        /* inside loading_tick_between's tick */
+
 void sub_000FFDE0(void)
 {
+    if (s_loading_since && !s_tick_between) {
+        s_tick_this = g_ecx;
+        s_tick_seen = clock() | 1;
+    }
     if (s_loading_since && loading_redraw() &&
             *(volatile uint8_t *)((uintptr_t)g_ecx + 0xB0u + g_xbox_mem_offset)) {
         clock_t now = clock();
@@ -2141,6 +2149,70 @@ void sub_000FFDE0(void)
         }
     }
     sub_000FFDE0_gen();
+}
+
+/* The generated code's XMM register type (recomp_types.h, same guard). */
+#ifndef RECOMP_XMM_DEFINED
+#define RECOMP_XMM_DEFINED
+typedef union RecompXmm {
+    float    f[4];
+    double   d[2];
+    uint32_t u[4];
+    int32_t  i[4];
+    uint64_t q[2];
+} RecompXmm;
+#endif
+extern __declspec(thread) RecompXmm g_xmm0, g_xmm1, g_xmm2, g_xmm3, g_xmm4, g_xmm5, g_xmm6, g_xmm7;
+extern __declspec(thread) uint32_t g_ebx, g_esi, g_edi, g_ebp, g_seh_ebp;
+extern __declspec(thread) int g_fp_top, g_df;
+extern __declspec(thread) double g_fp_stack[8];
+extern __declspec(thread) uint16_t g_fp_cc;
+
+/* The loader's longest stretch without a tick builds the level's shaders
+ * (XGraphics, sub_001ABF4D, 5-17 ms each), a dozen at a time: 130-150 ms
+ * with the loading screen standing still. After each one a tick is made
+ * here when a frame is due, as the loader would between its steps -- only
+ * while the loader itself is ticking (within the last half second), on the
+ * screen it ticks, and with everything of the guest's put back afterwards:
+ * the registers, the published frame, the x87 stack and its control word,
+ * the XMM registers and the direction flag. RECOMP_LOADING_REDRAW=0: not
+ * at all, as the redraw. */
+static void loading_tick_between(void)
+{
+    clock_t now;
+    if (!s_loading_since || !s_tick_this || s_tick_between || !loading_redraw()) return;
+    now = clock();
+    if (now - s_tick_seen > CLOCKS_PER_SEC / 2) return;
+    if (s_loading_drawn && now - s_loading_drawn < CLOCKS_PER_SEC / 125) return;
+    if (!*(volatile uint8_t *)((uintptr_t)s_tick_this + 0xB0u + g_xbox_mem_offset)) return;
+    {
+        uint32_t eax = g_eax, ecx = g_ecx, edx = g_edx, ebx = g_ebx, esi = g_esi, edi = g_edi, esp = g_esp;
+        uint32_t ebp = g_ebp, seh_ebp = g_seh_ebp;
+        int top = g_fp_top, df = g_df;
+        double stack[8];
+        uint16_t cc = g_fp_cc, control = g_fp_control_word;
+        RecompXmm xmm[8] = {g_xmm0, g_xmm1, g_xmm2, g_xmm3, g_xmm4, g_xmm5, g_xmm6, g_xmm7};
+        memcpy(stack, g_fp_stack, sizeof stack);
+        s_tick_between = 1;
+        g_esp -= 4;
+        TUROK_MEM32(g_esp) = 0;   /* return address */
+        g_ecx = s_tick_this;
+        sub_000FFDE0();
+        s_tick_between = 0;
+        g_eax = eax; g_ecx = ecx; g_edx = edx; g_ebx = ebx; g_esi = esi; g_edi = edi; g_esp = esp;
+        g_ebp = ebp; g_seh_ebp = seh_ebp;
+        g_fp_top = top; g_df = df; g_fp_cc = cc; g_fp_control_word = control;
+        memcpy(g_fp_stack, stack, sizeof stack);
+        g_xmm0 = xmm[0]; g_xmm1 = xmm[1]; g_xmm2 = xmm[2]; g_xmm3 = xmm[3];
+        g_xmm4 = xmm[4]; g_xmm5 = xmm[5]; g_xmm6 = xmm[6]; g_xmm7 = xmm[7];
+    }
+}
+
+extern void sub_001ABF4D_gen(void);
+void sub_001ABF4D(void)
+{
+    sub_001ABF4D_gen();
+    loading_tick_between();
 }
 
 void sub_000FFF20(void)
@@ -5244,18 +5316,6 @@ void sub_0001A980(void)
 extern __declspec(thread) uint32_t g_ebx, g_esi, g_edi, g_ebp;
 extern __declspec(thread) double g_fp_stack[8];
 #define LIFTED_RAM (64u << 20)
-/* The generated code's XMM register type (recomp_types.h, same guard). */
-#ifndef RECOMP_XMM_DEFINED
-#define RECOMP_XMM_DEFINED
-typedef union RecompXmm {
-    float    f[4];
-    double   d[2];
-    uint32_t u[4];
-    int32_t  i[4];
-    uint64_t q[2];
-} RecompXmm;
-#endif
-extern __declspec(thread) RecompXmm g_xmm0;
 
 typedef struct LiftedRegs {
     uint32_t r[8];

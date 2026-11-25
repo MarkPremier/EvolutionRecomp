@@ -123,6 +123,12 @@ still compiling is skipped for those few frames. The first time a scene is
 ever seen may show that briefly; after that it plays without compiling at all.
 `RECOMP_SHADER_CACHE=<folder>` moves the cache (`0` turns it off) and
 `RECOMP_SHADER_ASYNC=0` compiles in the frame instead, as before.
+The shaders this machine has used are also listed there
+(`turok_evolution.variants`), and the 256 pixel and 256 vertex shaders used
+most recently are loaded in the background when the game starts, so a
+level's first frame no longer makes them (11 ms of it at the jungle's
+start); after a shader change they are compiled then instead of in play.
+`RECOMP_SHADER_PRELOAD=0` turns that off.
 Vertex layouts are cached separately for each attribute mask. A shader
 that fails compilation or creation is remembered for the rest of the run,
 using the generic pixel shader where available, rather than retried on
@@ -571,7 +577,11 @@ saves the kept weapons with your progress as it saves any weapon. Saved as
   and its text otherwise flash past. The game redraws its loading screen
   every 0.2 s; here it is redrawn at the display's rate (up to 125 frames a
   second), with the spinner still turning at the Xbox's pace
-  (`RECOMP_LOADING_REDRAW=0` for the Xbox's 5 frames a second).
+  (`RECOMP_LOADING_REDRAW=0` for the Xbox's 5 frames a second). The
+  loader's longest stretch without a tick, building the level's vertex
+  shaders with XGraphics (`sub_001ABF4D`, a dozen at 5-17 ms each), held one
+  frame for 130-150 ms; a tick is now made between those builds when a frame
+  is due, with the guest's registers and FPU state put back afterwards.
 - **Frame limit**: the game steps by a measured clock (`sub_00028B40`), so it
   runs at the right speed at any rate. The front end stays at 60, as its
   movies are paced by the vertical blank. The aim wobble of scoped weapons
