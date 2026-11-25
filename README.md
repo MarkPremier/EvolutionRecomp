@@ -828,6 +828,19 @@ override) and an animation channel decoder (`sub_00076760`, whose square
 roots are scalar SSE). 27 in all; the test scene at 480p is at about 298
 fps, against 182 with `RECOMP_NATIVE_LIFTED=0`.
 
+At 2160p the graphics card is the limit, and nearly all of its time went on
+shading the foliage's pixels, about eleven layers deep: every pixel writes
+its own depth (the NV2A's rounding, polygon offset and depth range), which
+kept the card from rejecting a hidden pixel before shading it. The pixel
+shaders now declare that the depth they write is never below the one the
+card rasterises (the geometry shader puts that below the true depth by the
+triangle's change across a few pixels), so hidden pixels are rejected first;
+what is drawn is unchanged (checked per multisample with a shader that
+marks any pixel breaking the promise, at 2x, 4x and 8x MSAA). Draws with a
+polygon offset, or a depth range that clamps, keep the old way. The test
+scene at 2160p went from 122 to 185 fps (210 to 295 with 3D width "screen";
+1440p 238 to 283). `RECOMP_EARLY_DEPTH=0` turns it off.
+
 | Variable | What it does |
 |----------|--------------|
 | `RECOMP_NATIVE=0` | Runs the generated code for all of them (`run_original_code.bat`), to tell whether one is behind a problem |
