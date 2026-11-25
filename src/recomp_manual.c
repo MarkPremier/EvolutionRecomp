@@ -2067,11 +2067,13 @@ void sub_00054A60(void)
  * level begins; +0xB0 says it is up. Loads here take a fraction of the Xbox's
  * time, so a level's flashed past: it now stays at least
  * RECOMP_LOADING_HOLD_MS (default 3000) by ticking on before it comes down
- * (not the front end's own loads, such as its backdrop at boot).
+ * (not the front end's own loads, such as its backdrop at boot). While up,
+ * it is redrawn at the display's rate (RECOMP_LOADING_REDRAW).
  * The level stays 4:3 from its load (sub_00054A60) until then. */
 extern void sub_000FFA00_gen(void);
 extern void sub_000FFF20_gen(void);
-extern void sub_000FFDE0(void);
+extern void sub_000FFDE0_gen(void);
+void sub_000FFDE0(void);
 extern __declspec(thread) uint32_t g_edx;
 __declspec(dllimport) void __stdcall Sleep(unsigned long milliseconds);
 static clock_t s_loading_since;     /* when the screen went up; 0 when down */
@@ -2087,16 +2089,58 @@ static long loading_hold_ms(void)
     return ms;
 }
 
+/* RECOMP_LOADING_REDRAW=0: the loading screen redrawn every 0.2 s, as the
+ * game's loading tick does; by default it is redrawn at the display's rate,
+ * its spinner still turning at the Xbox's 5 frames a second. */
+static int loading_redraw(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *value = getenv("RECOMP_LOADING_REDRAW");
+        on = !(value && *value == '0');
+    }
+    return on;
+}
+
 static long loading_shown_ms(void)
 {
     return (long)((clock() - s_loading_since) * 1000 / CLOCKS_PER_SEC);
 }
 
+static clock_t s_loading_drawn, s_loading_spun;   /* the last redraw, the last spinner step */
+
 void sub_000FFA00(void)
 {
-    if (!*(volatile uint8_t *)((uintptr_t)g_ecx + 0xB0u + g_xbox_mem_offset))
+    if (!*(volatile uint8_t *)((uintptr_t)g_ecx + 0xB0u + g_xbox_mem_offset)) {
         s_loading_since = clock() | 1;
+        s_loading_drawn = s_loading_spun = 0;
+    }
     sub_000FFA00_gen();
+}
+
+/* The tick, from the loader between its reads and from the hold below. It
+ * draws once its time passes 0.2 s ([0x24E1B0] against [0x209400]): given
+ * the time whenever 8 ms have gone by, it draws at up to 125 frames a second
+ * (each waits for the display's next refresh), with the spinner -- the tick
+ * stores its next frame in [0x257E74] -- kept on its frame until the Xbox's
+ * 0.2 s have gone by. A load that draws more takes a little longer, inside
+ * the hold. */
+void sub_000FFDE0(void)
+{
+    if (s_loading_since && loading_redraw() &&
+            *(volatile uint8_t *)((uintptr_t)g_ecx + 0xB0u + g_xbox_mem_offset)) {
+        clock_t now = clock();
+        if (!s_loading_drawn || now - s_loading_drawn >= CLOCKS_PER_SEC / 125) {
+            static const double due = 1.0;
+            s_loading_drawn = now | 1;
+            if (!s_loading_spun || now - s_loading_spun >= CLOCKS_PER_SEC / 5)
+                s_loading_spun = now | 1;
+            else if (TUROK_MEM32(0x257E2Cu) && TUROK_MEM32(0x257E74u))
+                TUROK_MEM32(0x257E74u) -= 1;
+            memcpy((void *)((uintptr_t)0x24E1B0u + g_xbox_mem_offset), &due, sizeof due);
+        }
+    }
+    sub_000FFDE0_gen();
 }
 
 void sub_000FFF20(void)
@@ -2104,8 +2148,8 @@ void sub_000FFF20(void)
     uint32_t self = g_ecx;
     if (s_level_loading && s_loading_since &&
             *(volatile uint8_t *)((uintptr_t)self + 0xB0u + g_xbox_mem_offset)) {
-        fprintf(stderr, "[TUROK] level loaded in %ld ms; loading screen held to %ld ms\n",
-                loading_shown_ms(), loading_hold_ms());
+        fprintf(stderr, "[TUROK] level loaded in %ld ms; loading screen held to %ld ms%s\n",
+                loading_shown_ms(), loading_hold_ms(), loading_redraw() ? ", redrawn each frame" : "");
         while (loading_shown_ms() < loading_hold_ms()) {
             uint32_t eax = g_eax, edx = g_edx, esp = g_esp;
             g_esp -= 4;
@@ -2166,24 +2210,25 @@ void sub_0002F580(void)
  * For the draw distance setting the two are scaled while the fade is worked
  * out, then put back. */
 extern __declspec(thread) uint32_t g_esi;
-extern void sub_0003C9E0_gen(void);
+/* the body: lifted or generated (the "Lifted leaves" section below) */
+void sub_0003C9E0_lifted(void);
 
 void sub_0003C9E0(void)
 {
     float scale = video_settings_draw_distance(), fade_near, fade_far;
     uint32_t block = g_esi ? TUROK_MEM32(g_esi + 0x1CCu) : 0, near_bits, far_bits;
 
-    if (scale == 1.0f || !block) { sub_0003C9E0_gen(); return; }
+    if (scale == 1.0f || !block) { sub_0003C9E0_lifted(); return; }
     near_bits = TUROK_MEM32(block);
     far_bits = TUROK_MEM32(block + 4u);
     memcpy(&fade_near, &near_bits, 4);
     memcpy(&fade_far, &far_bits, 4);
-    if (!(fade_near > 0.0f)) { sub_0003C9E0_gen(); return; }
+    if (!(fade_near > 0.0f)) { sub_0003C9E0_lifted(); return; }
     fade_near *= scale;
     fade_far *= scale;
     memcpy((void *)((uintptr_t)block + g_xbox_mem_offset), &fade_near, 4);
     memcpy((void *)((uintptr_t)(block + 4u) + g_xbox_mem_offset), &fade_far, 4);
-    sub_0003C9E0_gen();
+    sub_0003C9E0_lifted();
     TUROK_MEM32(block) = near_bits;
     TUROK_MEM32(block + 4u) = far_bits;
 }
@@ -5163,36 +5208,80 @@ void sub_0001A980(void)
  *   py -3 tools/x86_lift.py <default.xbe> 0x0002FD10 0x0002FDF4 sub_0002FD10_native src/native/sub_0002FD10.c
  *   py -3 tools/x86_lift.py <default.xbe> 0x00070DF0 0x000712A7 sub_00070DF0_native src/native/sub_00070DF0.c
  *
+ * and thirteen more, about a third of the game thread at the jungle start
+ * (culling sub_000200C0..sub_000223F0, animation and skinning sub_000725F0 /
+ * sub_0008DD10 / sub_0008E1D0, actor and mesh work), each the same way; the
+ * last arguments name callees that return a float (one more on the x87
+ * stack):
+ *
+ *   0x0008E1D0 0x0008E85E 355f0=1 cf0c0=1   0x00020B50 0x00020D2B
+ *   0x000223F0 0x00022586                   0x000725F0 0x00072AB1
+ *   0x000213E0 0x000214A3                   0x000ED210 0x000ED628
+ *   0x000200C0 0x000201AC                   0x00022AE0 0x00022BBC cf3b0=1
+ *   0x00039220 0x000392DD                   0x000E7F70 0x000E807B
+ *   0x00072FA0 0x000730A8                   0x00030280 0x0003038A
+ *   0x0008DD10 0x0008DFAA cf0c0=1
+ *
+ * and seven with switch tables and indirect calls (made as the generated
+ * code makes them): 0x00032230 0x00032EE6, 0x000EEB10 0x000EEE31,
+ * 0x0003CFB0 0x0003D2A9, 0x000E8260 0x000E85ED, 0x000EE850 0x000EEB05,
+ * 0x000E80F0 0x000E8251, 0x00082F70 0x00083299.
+ *
+ * and three more: 0x00076760 0x00076D5A (scalar SSE: movss, rsqrtps, rcpps,
+ * on the shared XMM registers with the generated code's exact helpers),
+ * 0x0003C9E0 0x0003CB05 3ca0a=1 3ca97=1 88f00=1 cf0c0=1 (returns a float in
+ * st(0); its indirect calls at 0x3CA0A and 0x3CA97 return one too), and
+ * 0x000448D0 0x00044B99 387b0=1 3c9e0=1. sub_0003C9E0's lifted body runs
+ * under the draw distance override (sub_0003C9E0_lifted).
+ *
  * Like src/recomp/gen those files are made from the XBE and not kept in the
  * repository; without one, that function's generated code runs.
  * RECOMP_NATIVE_LIFTED=0 (or RECOMP_NATIVE=0) runs the generated code for
- * all four. RECOMP_LIFT_VERIFY=<n>: every nth call of each runs both from
+ * all of them. RECOMP_LIFT_VERIFY=<n>: every nth call of each runs both from
  * the same guest RAM and registers and reports any word or register that
  * differs ([LIFTED] lines; another thread writing RAM in that moment shows
  * up too). */
-extern __declspec(thread) uint32_t g_ebx, g_esi, g_edi;
+extern __declspec(thread) uint32_t g_ebx, g_esi, g_edi, g_ebp;
 extern __declspec(thread) double g_fp_stack[8];
 #define LIFTED_RAM (64u << 20)
+/* The generated code's XMM register type (recomp_types.h, same guard). */
+#ifndef RECOMP_XMM_DEFINED
+#define RECOMP_XMM_DEFINED
+typedef union RecompXmm {
+    float    f[4];
+    double   d[2];
+    uint32_t u[4];
+    int32_t  i[4];
+    uint64_t q[2];
+} RecompXmm;
+#endif
+extern __declspec(thread) RecompXmm g_xmm0;
 
 typedef struct LiftedRegs {
     uint32_t r[8];
+    uint32_t ebp, seh_ebp;   /* the published frame: not compared, but each run starts from the same one */
     int top;
     double stack[8];
     uint16_t cc;
+    RecompXmm xmm0;          /* the one XMM register a lifted function uses (sub_00076760) */
 } LiftedRegs;
 
 static void lifted_save(LiftedRegs *s)
 {
     s->r[0] = g_eax; s->r[1] = g_ecx; s->r[2] = g_edx; s->r[3] = g_ebx;
     s->r[4] = g_esi; s->r[5] = g_edi; s->r[6] = g_esp; s->r[7] = 0;
+    s->ebp = g_ebp; s->seh_ebp = g_seh_ebp;
     s->top = g_fp_top & 7; memcpy(s->stack, g_fp_stack, sizeof s->stack); s->cc = g_fp_cc;
+    s->xmm0 = g_xmm0;
 }
 
 static void lifted_load(const LiftedRegs *s)
 {
     g_eax = s->r[0]; g_ecx = s->r[1]; g_edx = s->r[2]; g_ebx = s->r[3];
     g_esi = s->r[4]; g_edi = s->r[5]; g_esp = s->r[6];
+    g_ebp = s->ebp; g_seh_ebp = s->seh_ebp;
     g_fp_top = s->top; memcpy(g_fp_stack, s->stack, sizeof s->stack); g_fp_cc = s->cc;
+    g_xmm0 = s->xmm0;
 }
 
 static void lifted_run(const char *name, void (*native)(void), void (*original)(void), unsigned *calls)
@@ -5206,6 +5295,11 @@ static void lifted_run(const char *name, void (*native)(void), void (*original)(
     if (!on || !native) { original(); return; }
     if (every < 0) { const char *v = getenv("RECOMP_LIFT_VERIFY"); every = v ? atoi(v) : 0; }
     if (every <= 0 || ++*calls % (unsigned)every) { native(); return; }
+    {   /* RECOMP_LIFT_VERIFY_SELF=1: the generated code against itself, the background's differences */
+        static int self = -1;
+        if (self < 0) self = getenv("RECOMP_LIFT_VERIFY_SELF") && *getenv("RECOMP_LIFT_VERIFY_SELF") == '1';
+        if (self) native = original;
+    }
     if (!before) {
         before = (uint8_t *)malloc(LIFTED_RAM);
         after = (uint8_t *)malloc(LIFTED_RAM);
@@ -5238,7 +5332,7 @@ static void lifted_run(const char *name, void (*native)(void), void (*original)(
     }
     native_regs.top &= 7; original_regs.top &= 7;
     if (memcmp(native_regs.r, original_regs.r, sizeof native_regs.r) || native_regs.top != original_regs.top ||
-            native_regs.cc != original_regs.cc ||
+            native_regs.cc != original_regs.cc || memcmp(&native_regs.xmm0, &original_regs.xmm0, sizeof native_regs.xmm0) ||
             (native_regs.top != entry.top && memcmp(&native_regs.stack[native_regs.top],
                                                     &original_regs.stack[original_regs.top], sizeof(double)))) {
         differ++;
@@ -5291,3 +5385,171 @@ LIFTED_LEAF(00070930)
 LIFTED_LEAF(00022ED0)
 LIFTED_LEAF(0002FD10)
 LIFTED_LEAF(00070DF0)
+#ifdef RECOMP_HAVE_LIFTED_0008E1D0
+extern void sub_0008E1D0_native(void);
+#define LIFTED_NATIVE_0008E1D0 sub_0008E1D0_native
+#else
+#define LIFTED_NATIVE_0008E1D0 NULL
+#endif
+#ifdef RECOMP_HAVE_LIFTED_00020B50
+extern void sub_00020B50_native(void);
+#define LIFTED_NATIVE_00020B50 sub_00020B50_native
+#else
+#define LIFTED_NATIVE_00020B50 NULL
+#endif
+#ifdef RECOMP_HAVE_LIFTED_000223F0
+extern void sub_000223F0_native(void);
+#define LIFTED_NATIVE_000223F0 sub_000223F0_native
+#else
+#define LIFTED_NATIVE_000223F0 NULL
+#endif
+#ifdef RECOMP_HAVE_LIFTED_000725F0
+extern void sub_000725F0_native(void);
+#define LIFTED_NATIVE_000725F0 sub_000725F0_native
+#else
+#define LIFTED_NATIVE_000725F0 NULL
+#endif
+#ifdef RECOMP_HAVE_LIFTED_000213E0
+extern void sub_000213E0_native(void);
+#define LIFTED_NATIVE_000213E0 sub_000213E0_native
+#else
+#define LIFTED_NATIVE_000213E0 NULL
+#endif
+#ifdef RECOMP_HAVE_LIFTED_000ED210
+extern void sub_000ED210_native(void);
+#define LIFTED_NATIVE_000ED210 sub_000ED210_native
+#else
+#define LIFTED_NATIVE_000ED210 NULL
+#endif
+#ifdef RECOMP_HAVE_LIFTED_000200C0
+extern void sub_000200C0_native(void);
+#define LIFTED_NATIVE_000200C0 sub_000200C0_native
+#else
+#define LIFTED_NATIVE_000200C0 NULL
+#endif
+#ifdef RECOMP_HAVE_LIFTED_00022AE0
+extern void sub_00022AE0_native(void);
+#define LIFTED_NATIVE_00022AE0 sub_00022AE0_native
+#else
+#define LIFTED_NATIVE_00022AE0 NULL
+#endif
+#ifdef RECOMP_HAVE_LIFTED_00039220
+extern void sub_00039220_native(void);
+#define LIFTED_NATIVE_00039220 sub_00039220_native
+#else
+#define LIFTED_NATIVE_00039220 NULL
+#endif
+#ifdef RECOMP_HAVE_LIFTED_000E7F70
+extern void sub_000E7F70_native(void);
+#define LIFTED_NATIVE_000E7F70 sub_000E7F70_native
+#else
+#define LIFTED_NATIVE_000E7F70 NULL
+#endif
+#ifdef RECOMP_HAVE_LIFTED_00072FA0
+extern void sub_00072FA0_native(void);
+#define LIFTED_NATIVE_00072FA0 sub_00072FA0_native
+#else
+#define LIFTED_NATIVE_00072FA0 NULL
+#endif
+#ifdef RECOMP_HAVE_LIFTED_00030280
+extern void sub_00030280_native(void);
+#define LIFTED_NATIVE_00030280 sub_00030280_native
+#else
+#define LIFTED_NATIVE_00030280 NULL
+#endif
+#ifdef RECOMP_HAVE_LIFTED_0008DD10
+extern void sub_0008DD10_native(void);
+#define LIFTED_NATIVE_0008DD10 sub_0008DD10_native
+#else
+#define LIFTED_NATIVE_0008DD10 NULL
+#endif
+LIFTED_LEAF(0008E1D0)
+LIFTED_LEAF(00020B50)
+LIFTED_LEAF(000223F0)
+LIFTED_LEAF(000725F0)
+LIFTED_LEAF(000213E0)
+LIFTED_LEAF(000ED210)
+LIFTED_LEAF(000200C0)
+LIFTED_LEAF(00022AE0)
+LIFTED_LEAF(00039220)
+LIFTED_LEAF(000E7F70)
+LIFTED_LEAF(00072FA0)
+LIFTED_LEAF(00030280)
+LIFTED_LEAF(0008DD10)
+#ifdef RECOMP_HAVE_LIFTED_00032230
+extern void sub_00032230_native(void);
+#define LIFTED_NATIVE_00032230 sub_00032230_native
+#else
+#define LIFTED_NATIVE_00032230 NULL
+#endif
+#ifdef RECOMP_HAVE_LIFTED_000EEB10
+extern void sub_000EEB10_native(void);
+#define LIFTED_NATIVE_000EEB10 sub_000EEB10_native
+#else
+#define LIFTED_NATIVE_000EEB10 NULL
+#endif
+#ifdef RECOMP_HAVE_LIFTED_0003CFB0
+extern void sub_0003CFB0_native(void);
+#define LIFTED_NATIVE_0003CFB0 sub_0003CFB0_native
+#else
+#define LIFTED_NATIVE_0003CFB0 NULL
+#endif
+#ifdef RECOMP_HAVE_LIFTED_000E8260
+extern void sub_000E8260_native(void);
+#define LIFTED_NATIVE_000E8260 sub_000E8260_native
+#else
+#define LIFTED_NATIVE_000E8260 NULL
+#endif
+#ifdef RECOMP_HAVE_LIFTED_000EE850
+extern void sub_000EE850_native(void);
+#define LIFTED_NATIVE_000EE850 sub_000EE850_native
+#else
+#define LIFTED_NATIVE_000EE850 NULL
+#endif
+#ifdef RECOMP_HAVE_LIFTED_000E80F0
+extern void sub_000E80F0_native(void);
+#define LIFTED_NATIVE_000E80F0 sub_000E80F0_native
+#else
+#define LIFTED_NATIVE_000E80F0 NULL
+#endif
+#ifdef RECOMP_HAVE_LIFTED_00076760
+extern void sub_00076760_native(void);
+#define LIFTED_NATIVE_00076760 sub_00076760_native
+#else
+#define LIFTED_NATIVE_00076760 NULL
+#endif
+#ifdef RECOMP_HAVE_LIFTED_000448D0
+extern void sub_000448D0_native(void);
+#define LIFTED_NATIVE_000448D0 sub_000448D0_native
+#else
+#define LIFTED_NATIVE_000448D0 NULL
+#endif
+#ifdef RECOMP_HAVE_LIFTED_0003C9E0
+extern void sub_0003C9E0_native(void);
+#define LIFTED_NATIVE_0003C9E0 sub_0003C9E0_native
+#else
+#define LIFTED_NATIVE_0003C9E0 NULL
+#endif
+#ifdef RECOMP_HAVE_LIFTED_00082F70
+extern void sub_00082F70_native(void);
+#define LIFTED_NATIVE_00082F70 sub_00082F70_native
+#else
+#define LIFTED_NATIVE_00082F70 NULL
+#endif
+LIFTED_LEAF(00032230)
+LIFTED_LEAF(000EEB10)
+LIFTED_LEAF(0003CFB0)
+LIFTED_LEAF(000E8260)
+LIFTED_LEAF(000EE850)
+LIFTED_LEAF(000E80F0)
+LIFTED_LEAF(00082F70)
+LIFTED_LEAF(00076760)
+LIFTED_LEAF(000448D0)
+
+/* Not a LIFTED_LEAF: sub_0003C9E0 itself is the draw distance override. */
+extern void sub_0003C9E0_gen(void);
+void sub_0003C9E0_lifted(void)
+{
+    static unsigned calls;
+    lifted_run("sub_0003C9E0", LIFTED_NATIVE_0003C9E0, sub_0003C9E0_gen, &calls);
+}

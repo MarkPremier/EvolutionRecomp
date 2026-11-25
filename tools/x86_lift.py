@@ -59,6 +59,13 @@ class Lift:
         assert self.ins and self.ins[-1].address + self.ins[-1].size <= end
         self.at = {i.address: k for k, i in enumerate(self.ins)}
         self.calls = set()
+        self.readmem = read
+        self.switches = {}
+        self.icall = False
+        # push ebp / mov ebp, esp: like the generated code, the frame is read
+        # from g_ebp and published to g_ebp and g_seh_ebp around every call
+        self.frame = (len(self.ins) > 1 and self.ins[0].mnemonic == 'push' and self.ins[0].op_str == 'ebp'
+                      and self.ins[1].mnemonic == 'mov' and self.ins[1].op_str == 'ebp, esp')
 
     # ---- control flow and x87 depth -------------------------------------
     def successors(self, k):
@@ -67,10 +74,39 @@ class Lift:
         nxt = [k + 1] if k + 1 < len(self.ins) else []
         if m == 'ret': return []
         if m == 'jmp':
+            if self.is_switch(i): return [self.at[t] for t in sorted(set(self.switch(k)))]
             return [self.target(i)]
         if m in JCC:
             return [self.target(i)] + nxt
         return nxt
+
+    # jmp [reg*4 + table], bounded by an earlier `cmp reg, n` / `ja`: a switch.
+    def is_switch(self, i):
+        op = i.operands[0]
+        return (op.type == x86.X86_OP_MEM and not op.mem.base and op.mem.index and op.mem.scale == 4
+                and not op.mem.segment)
+
+    def switch(self, k):
+        if k in self.switches: return self.switches[k][1]
+        i = self.ins[k]
+        op = i.operands[0]
+        reg = i.reg_name(op.mem.index)
+        fam = {reg} | {r for r, f in list(REG16.items()) + list(REG8L.items()) if f == reg}
+        count = None
+        for j in range(k - 1, max(-1, k - 16), -1):
+            p = self.ins[j]
+            if p.mnemonic == 'cmp' and p.operands[0].type == x86.X86_OP_REG and \
+                    p.reg_name(p.operands[0].reg) in fam and p.operands[1].type == x86.X86_OP_IMM:
+                count = (p.operands[1].imm & 0xFFFFFFFF) + 1
+                break
+        if count is None or count > 512: raise SystemExit('unbounded switch at %x' % i.address)
+        table = op.mem.disp & 0xFFFFFFFF
+        raw = self.readmem(table, 4 * count)
+        targets = list(struct.unpack('<%dI' % count, raw))
+        for t in targets:
+            if t not in self.at: raise SystemExit('switch target out of the function at %x -> %x' % (i.address, t))
+        self.switches[k] = (reg, targets)
+        return targets
 
     def target(self, i):
         op = i.operands[0]
@@ -82,9 +118,11 @@ class Lift:
     def fp_effect(self, i):
         m = i.mnemonic
         if m == 'call':
+            if i.operands[0].type != x86.X86_OP_IMM: return self.deltas.get(i.address, 0)
             t = i.operands[0].imm & 0xFFFFFFFF
             return self.deltas.get(t, 0)
-        if m in ('fld', 'fild', 'fld1', 'fldz'): return 1
+        if m in ('fld', 'fild', 'fld1', 'fldz', 'fptan', 'fsincos'): return 1
+        if m == 'fpatan': return -1
         if m in ('fcompp', 'fucompp'): return -2
         if m in FP_POP1: return -1
         return 0
@@ -176,6 +214,27 @@ class Lift:
         st = lambda k: self.st(d, k)
         arith = {'fadd': '%s + %s', 'fsub': '%s - %s', 'fmul': '%s * %s', 'fdiv': '%s / %s',
                  'fsubr': '%s - %s', 'fdivr': '%s / %s'}
+        # the transcendentals as the generated code has them
+        if m == 'fsqrt': return '%s = PC(sqrt(%s));' % (st(0), st(0))
+        if m == 'fsin': return '%s = sin(%s);' % (st(0), st(0))
+        if m == 'fcos': return '%s = cos(%s);' % (st(0), st(0))
+        if m == 'frndint': return '%s = recomp_frndint(%s, g_fp_control_word);' % (st(0), st(0))
+        if m == 'fptan': return '%s = tan(%s); f%d = 1.0;' % (st(0), st(0), d)
+        if m == 'fsincos': return '{ double a_ = %s; %s = sin(a_); f%d = cos(a_); }' % (st(0), st(0), d)
+        if m == 'fpatan': return '%s = atan2(%s, %s);' % (st(1), st(1), st(0))
+        if m == 'fld1': return 'f%d = 1.0;' % d
+        if m == 'fldz': return 'f%d = 0.0;' % d
+        if m == 'fchs': return '%s = -%s;' % (st(0), st(0))
+        if m == 'fabs': return '%s = fabs(%s);' % (st(0), st(0))
+        if m == 'fild':
+            a = self.addr(ops[0])
+            cast = {2: '(int16_t)L16(%s)', 4: '(int32_t)L32(%s)', 8: 'LI64(%s)'}[ops[0].size] % a
+            return 'f%d = (double)%s;' % (d, cast)
+        if m in ('fist', 'fistp'):
+            a, bits = self.addr(ops[0]), ops[0].size * 8
+            store = {2: 'S16', 4: 'S32', 8: 'SI64'}[ops[0].size]
+            cast = '(int64_t)' if bits == 64 else '(uint32_t)(int32_t)'
+            return '%s(%s, %srecomp_fist(%s, g_fp_control_word, %d));' % (store, a, cast, st(0), bits)
         if m in ('fld',):
             if ops[0].type == x86.X86_OP_REG:
                 return 'f%d = %s;' % (d, st(int(i.reg_name(ops[0].reg)[3])))
@@ -222,8 +281,9 @@ class Lift:
         raise SystemExit('x87 %s at %x' % (i.op_str and m + ' ' + i.op_str or m, i.address))
 
     # ---- calls and exits -------------------------------------------------
-    def sync_out(self, d):
+    def sync_out(self, d, final=False):
         s = 'g_eax = eax; g_ecx = ecx; g_edx = edx; g_ebx = ebx; g_esi = esi; g_edi = edi; g_esp = esp; '
+        if self.frame and not final: s += 'g_ebp = ebp; g_seh_ebp = ebp; '
         for k in range(d):
             s += 'g_fp_stack[(top0 - 1 - %d) & 7] = f%d; ' % (k, k)
         s += 'g_fp_top = (top0 - %d) & 7; g_fp_cc = fcc;' % d
@@ -276,17 +336,53 @@ class Lift:
             else: v, c = '(uint32_t)((int32_t)a_ >> n_)', '((uint32_t)((int32_t)a_ >> (n_ - 1u))) & 1u'
             return ('{ uint32_t a_ = %s, n_ = %s; if (n_) { uint32_t v_ = %s; cf = (int)(%s); %s %s } }'
                     % (a, cnt, v, c, self.flags('v_', 4, 'shift'), self.write(ops[0], 'v_')))
+        if m in ('imul', 'mul') and len(ops) == 1:
+            assert ops[0].size == 4, i
+            if m == 'imul':
+                return ('{ int64_t p_ = (int64_t)(int32_t)eax * (int32_t)%s; eax = (uint32_t)p_; '
+                        'edx = (uint32_t)((uint64_t)p_ >> 32); cf = of = p_ != (int64_t)(int32_t)eax; }' % self.read(ops[0]))
+            return ('{ uint64_t p_ = (uint64_t)eax * %s; eax = (uint32_t)p_; edx = (uint32_t)(p_ >> 32); '
+                    'cf = of = edx != 0; }' % self.read(ops[0]))
+        if m in ('idiv', 'div'):
+            assert ops[0].size == 4, i
+            if m == 'idiv':
+                return ('{ int64_t n_ = (int64_t)(((uint64_t)edx << 32) | eax); int32_t d_ = (int32_t)%s; '
+                        'eax = (uint32_t)(int32_t)(n_ / d_); edx = (uint32_t)(int32_t)(n_ %% d_); }' % self.read(ops[0]))
+            return ('{ uint64_t n_ = ((uint64_t)edx << 32) | eax; uint32_t d_ = %s; '
+                    'eax = (uint32_t)(n_ / d_); edx = (uint32_t)(n_ %% d_); }' % self.read(ops[0]))
         if m == 'imul':
             if len(ops) == 2:
                 return self.write(ops[0], '(uint32_t)((int32_t)%s * (int32_t)%s)' % (self.read(ops[0]), self.read(ops[1])))
             return self.write(ops[0], '(uint32_t)((int32_t)%s * (int32_t)%s)' % (self.read(ops[1]), self.read(ops[2], 4)))
-        if m == 'sete': return self.write(ops[0], 'zf ? 1u : 0u')
-        if m == 'setne': return self.write(ops[0], 'zf ? 0u : 1u')
+        if m == 'cdq': return 'edx = ((int32_t)eax < 0) ? 0xFFFFFFFFu : 0u;'
+        if m in ('movsx', 'movzx'):
+            v = self.read(ops[1])
+            if m == 'movsx': v = '(uint32_t)(int32_t)(%s)%s' % ({1: 'int8_t', 2: 'int16_t'}[ops[1].size], v)
+            return self.write(ops[0], v)
+        if m in ('neg', 'not'):
+            size = ops[0].size
+            if m == 'not': return '{ uint32_t a_ = %s; %s }' % (self.read(ops[0]), self.write(ops[0], '~a_'))
+            return ('{ uint32_t a_ = 0u, b_ = %s; %s %s cf = (b_ & 0x%Xu) != 0; }'
+                    % (self.read(ops[0]), self.flags('a_ - b_', size, 'sub', 'a_', 'b_'), self.write(ops[0], 'a_ - b_'),
+                       (1 << (size * 8)) - 1))
+        if m == 'rep movsd' or (m == 'rep' and 'movsd' in i.op_str) or (m == 'movsd' and i.prefix[0] == 0xF3):
+            return ('{ int32_t s_ = g_df ? -4 : 4; for (; ecx; ecx--) { S32N(edi, L32(esi)); esi += (uint32_t)s_; '
+                    'edi += (uint32_t)s_; } }')
+        if m.startswith('set') and 'j' + m[3:] in JCC:
+            return self.write(ops[0], '(%s) ? 1u : 0u' % JCC['j' + m[3:]])
         if m in JCC: return 'if (%s) goto L_%X;' % (JCC[m], self.ins[self.target(i)].address)
+        if m == 'jmp' and self.is_switch(i):
+            reg, targets = self.switches[self.at[i.address]]
+            cases = ' '.join('case %d: goto L_%X;' % (n, t) for n, t in enumerate(targets))
+            return 'switch (%s) { %s default: goto L_%X; }' % (reg, cases, targets[0])
         if m == 'jmp': return 'goto L_%X;' % self.ins[self.target(i)].address
         if m == 'call':
             op = ops[0]
-            if op.type != x86.X86_OP_IMM: raise SystemExit('indirect call at %x' % i.address)
+            if op.type != x86.X86_OP_IMM:
+                # the target is read before the return address goes on the stack (it may be esp-relative)
+                d2 = d + self.deltas.get(i.address, 0)
+                return ('{ uint32_t t_ = %s, s_ = esp; esp -= 4; S32(esp, 0x%Xu); %s nl_icall(t_, s_, 0x%Xu); %s }'
+                        % (self.read(op, 4), i.address + i.size, self.sync_out(d), i.address, self.sync_in(d2)))
             t = op.imm & 0xFFFFFFFF
             self.calls.add(t)
             d2 = d + self.deltas.get(t, 0)
@@ -294,8 +390,22 @@ class Lift:
                     % (i.address + i.size, self.sync_out(d), t, self.sync_in(d2)))
         if m == 'ret':
             n = ops[0].imm if ops else 0
-            if d: raise SystemExit('ret with %d on the x87 stack at %x' % (d, i.address))
-            return 'esp += %du; %s return;' % (4 + n, self.sync_out(0))
+            # A float result is left in st(0): written back to the shared x87
+            # stack like the live slots at a call (sync_out).
+            if d > 1: raise SystemExit('ret with %d on the x87 stack at %x' % (d, i.address))
+            return "esp += %du; %s return;" % (4 + n, self.sync_out(d, True))
+        # Scalar SSE, on the shared XMM registers (g_xmmN) as the generated code
+        # keeps them, with its helpers (XMM_RSQRT/XMM_RCP are exact, not the
+        # host's approximations).
+        if m == 'movss':
+            dst, src = ops
+            if dst.type == x86.X86_OP_REG and src.type == x86.X86_OP_MEM:
+                return 'g_%s = XMM_SCALAR(LF(%s));' % (i.reg_name(dst.reg), self.addr(src))
+            if dst.type == x86.X86_OP_MEM and src.type == x86.X86_OP_REG:
+                return 'SF(%s, g_%s.f[0]);' % (self.addr(dst), i.reg_name(src.reg))
+        if m in ('rsqrtps', 'rcpps') and all(o.type == x86.X86_OP_REG for o in ops):
+            return 'g_%s = %s(g_%s, g_%s);' % (i.reg_name(ops[0].reg), 'XMM_RSQRT' if m == 'rsqrtps' else 'XMM_RCP',
+                                               i.reg_name(ops[0].reg), i.reg_name(ops[1].reg))
         if m == 'rep stosd' or (m == 'rep' and 'stosd' in i.op_str) or m == 'stosd':
             return '{ int32_t s_ = g_df ? -4 : 4; for (; ecx; ecx--) { S32N(edi, eax); edi += (uint32_t)s_; } }'
         if m == 'rep stosb' or (m == 'rep' and 'stosb' in i.op_str) or m == 'stosb':
@@ -306,7 +416,9 @@ class Lift:
         depth = self.depths()
         targets = set()
         for k, i in enumerate(self.ins):
-            if i.mnemonic in JCC or i.mnemonic == 'jmp':
+            if i.mnemonic == 'jmp' and self.is_switch(i):
+                targets.update(self.switch(k))
+            elif i.mnemonic in JCC or i.mnemonic == 'jmp':
                 targets.add(self.ins[self.target(i)].address)
         maxd = max(depth.values()) + max([0] + list(self.deltas.values()))
         body = []
@@ -335,7 +447,7 @@ class Lift:
             head.append('#define SF SFT')
         for t in sorted(self.calls): head.append('extern void sub_%08X(void);' % t)
         head.append('void %s(void)\n{' % self.name)
-        head.append('    uint32_t eax, ecx, edx, ebx, esi, edi, esp, ebp = g_seh_ebp, top0;')
+        head.append('    uint32_t eax, ecx, edx, ebx, esi, edi, esp, ebp = %s, top0;' % ('g_ebp' if self.frame else 'g_seh_ebp'))
         head.append('    int zf = 0, sf = 0, cf = 0, of = 0, pf = 0, pc24;')
         head.append('    uint16_t fcc;')
         head.append('    double ' + ', '.join('f%d = 0' % k for k in range(max(1, min(8, maxd + 1)))) + ';')

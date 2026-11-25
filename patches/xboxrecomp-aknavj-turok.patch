@@ -4801,7 +4801,7 @@ index 6f8b112..3add01b 100644
              if (ResultLength) *ResultLength = sizeof(ULONG);
          }
 diff --git a/src/kernel/nv2a_gpu.h b/src/kernel/nv2a_gpu.h
-index b8d804a..610c082 100644
+index b8d804a..2f7be7b 100644
 --- a/src/kernel/nv2a_gpu.h
 +++ b/src/kernel/nv2a_gpu.h
 @@ -14,6 +14,50 @@ void nv2a_gpu_sync(void);
@@ -4874,7 +4874,7 @@ index b8d804a..610c082 100644
  	const uint32_t *indices;
  	uint32_t index_count;
  	uint32_t topology, point_size;
-@@ -111,11 +160,29 @@ typedef struct Nv2aGpuDraw {
+@@ -111,11 +160,33 @@ typedef struct Nv2aGpuDraw {
  	float light_infinite_direction[8][4];
  	float light_infinite_half_vector[8][4];
  	float light_spot_direction[8][4];    /* xyz = direction, w = spot cone parameter */
@@ -4882,6 +4882,10 @@ index b8d804a..610c082 100644
 +	 * width/height/clip above are in real surface pixels, vertex positions
 +	 * in logical ones, so the shader divides by the logical size. 0 = 1. */
 +	uint32_t aa_scale_x, aa_scale_y;
++	/* Nonzero: changes whenever a program word is loaded, so with the
++	 * start it names the program's contents (what the draw path works out
++	 * from the program is kept until it changes). 0: work it out each time. */
++	uint64_t vertex_serial;
  } Nv2aGpuDraw;
  
  int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices, uint32_t count);
@@ -4905,7 +4909,7 @@ index b8d804a..610c082 100644
  						  const float attributes[16][4], float constants[192][4]);
  
 diff --git a/src/kernel/nv2a_gpu_d3d11.cpp b/src/kernel/nv2a_gpu_d3d11.cpp
-index f031faf..c6e7b55 100644
+index f031faf..2e7a3ca 100644
 --- a/src/kernel/nv2a_gpu_d3d11.cpp
 +++ b/src/kernel/nv2a_gpu_d3d11.cpp
 @@ -1,6 +1,7 @@
@@ -5558,7 +5562,41 @@ index f031faf..c6e7b55 100644
      uint64_t last_used, bytecode_bytes;
  };
  static std::vector<VertexVariant> vertex_variants;
-@@ -564,7 +1071,9 @@ static std::string vertex_program_source(const std::vector<uint32_t> &key, bool
+@@ -531,7 +1038,7 @@ static std::string vertex_source(uint32_t mux, uint32_t temporary, uint32_t swiz
+     return negate ? "-(" + result + ")" : result;
+ }
+ 
+-static uint32_t vertex_program_word_count(const Nv2aGpuDraw &state)
++static uint32_t vertex_program_word_count_scan(const Nv2aGpuDraw &state)
+ {
+     if (!state.vertex_program || !state.vertex_valid || !state.vertex_constants || state.vertex_start >= 136) return 0;
+     for (uint32_t slot = state.vertex_start; slot < 136; slot++) {
+@@ -541,6 +1048,24 @@ static uint32_t vertex_program_word_count(const Nv2aGpuDraw &state)
+     return 0;
+ }
+ 
++/* A draw asks for this four times over and the program rarely changes from
++ * one draw to the next: kept for the last (program, serial, start). */
++static uint32_t vertex_program_word_count(const Nv2aGpuDraw &state)
++{
++    static thread_local const void *cached_program;
++    static thread_local uint64_t cached_serial;
++    static thread_local uint32_t cached_start, cached_words;
++    if (!state.vertex_serial || !state.vertex_constants) return vertex_program_word_count_scan(state);
++    if (state.vertex_serial != cached_serial || state.vertex_start != cached_start ||
++            (const void *)state.vertex_program != cached_program) {
++        cached_words = vertex_program_word_count_scan(state);
++        cached_serial = state.vertex_serial;
++        cached_start = state.vertex_start;
++        cached_program = state.vertex_program;
++    }
++    return cached_words;
++}
++
+ static bool vertex_program_key(const Nv2aGpuDraw &state, std::vector<uint32_t> &key)
+ {
+     uint32_t words = vertex_program_word_count(state);
+@@ -564,7 +1089,9 @@ static std::string vertex_program_source(const std::vector<uint32_t> &key, bool
              source += "input.attribute" + std::to_string(attribute) + "=stateAttributes[" + std::to_string(attribute) + "];\n";
      } else source += "Pixel vs_guest(GuestVertex input) {\n";
      source += "float4 temporary[13]; float4 outputs[16]; int address=0;\n";
@@ -5569,7 +5607,7 @@ index f031faf..c6e7b55 100644
      for (size_t instruction = 0; instruction < key.size(); instruction += 4) {
          const uint32_t *words = key.data() + instruction;
          uint32_t mac = (words[1] >> 21) & 15, ilu = (words[1] >> 25) & 7;
-@@ -632,47 +1141,167 @@ static std::string vertex_program_source(const std::vector<uint32_t> &key, bool
+@@ -632,47 +1159,188 @@ static std::string vertex_program_source(const std::vector<uint32_t> &key, bool
          }
          source += "}\n";
      }
@@ -5599,6 +5637,7 @@ index f031faf..c6e7b55 100644
 + * (nv2a_gpu_set_projection_registers): D3D's c0 by default. */
 +static int projection_registers[4] = {96};
 +static int projection_register_count = 1;
++static uint32_t projection_registers_serial = 1;
 +
 +extern "C" void nv2a_gpu_set_projection_registers(const int *registers, int count)
  {
@@ -5609,6 +5648,7 @@ index f031faf..c6e7b55 100644
 -        cached.last_used = ++shader_use_serial;
 -        gpu_timing.vertex_shader_hits++;
 -        return &cached;
++    projection_registers_serial++;
 +    projection_register_count = 0;
 +    for (int index = 0; index < count && index < 4; index++)
 +        if (registers[index] >= 0 && registers[index] < 192)
@@ -5617,9 +5657,8 @@ index f031faf..c6e7b55 100644
 +
 +/* The register a draw projects x through, read directly (not through a0): -1
 + * for a draw in screen space. The fixed-function transform's is c[0]. */
-+static int projection_register(const Nv2aGpuDraw &state)
++static int projection_register_scan(const Nv2aGpuDraw &state)
 +{
-+    if (!state.vertex_program) return state.fixed_transform ? 0 : -1;
 +    uint32_t words = vertex_program_word_count(state), found = 0;
 +    for (uint32_t slot = state.vertex_start; slot < state.vertex_start + words / 4; slot++) {
 +        const uint32_t *word = state.vertex_program[slot];
@@ -5648,6 +5687,32 @@ index f031faf..c6e7b55 100644
 +    for (int index = 0; index < projection_register_count; index++)
 +        if (found & (1u << index)) return projection_registers[index];
 +    return -1;
++}
++
++/* Kept like vertex_program_word_count's answer, and for the same registers. */
++static int projection_register(const Nv2aGpuDraw &state)
++{
++    if (!state.vertex_program) return state.fixed_transform ? 0 : -1;
++    static thread_local const void *cached_program;
++    static thread_local uint64_t cached_serial;
++    static thread_local uint32_t cached_start, cached_registers;
++    static thread_local int cached_projection;
++    if (!state.vertex_serial || !state.vertex_constants) return projection_register_scan(state);
++    if (state.vertex_serial != cached_serial || state.vertex_start != cached_start ||
++            (const void *)state.vertex_program != cached_program || projection_registers_serial != cached_registers) {
++        cached_projection = projection_register_scan(state);
++        cached_serial = state.vertex_serial;
++        cached_start = state.vertex_start;
++        cached_program = state.vertex_program;
++        cached_registers = projection_registers_serial;
+     }
+-    D3D11_INPUT_ELEMENT_DESC elements[16] = {};
+-    for (uint32_t attribute = 0; attribute < 16; attribute++) {
+-        elements[attribute].SemanticName = "TEXCOORD"; elements[attribute].SemanticIndex = attribute;
+-        elements[attribute].Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+-        elements[attribute].AlignedByteOffset = (UINT)offsetof(Nv2aGpuVertex, attributes) + attribute * 16;
+-        elements[attribute].InputSlotClass = D3D11_INPUT_PER_VERTEX_DATA;
++    return cached_projection;
 +}
 +
 +/* Compiled shaders persist on disk: each guest shader variant costs fxc
@@ -5690,12 +5755,10 @@ index f031faf..c6e7b55 100644
 +        key[0] = (key[0] ^ bytes[index]) * 0x100000001B3ull;
 +        key[1] = (key[1] ^ bytes[index]) * 0x9E3779B97F4A7C15ull + 0x632BE59BD9B4E019ull;
      }
--    D3D11_INPUT_ELEMENT_DESC elements[16] = {};
--    for (uint32_t attribute = 0; attribute < 16; attribute++) {
--        elements[attribute].SemanticName = "TEXCOORD"; elements[attribute].SemanticIndex = attribute;
--        elements[attribute].Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
--        elements[attribute].AlignedByteOffset = (UINT)offsetof(Nv2aGpuVertex, attributes) + attribute * 16;
--        elements[attribute].InputSlotClass = D3D11_INPUT_PER_VERTEX_DATA;
+-    if (FAILED(device->CreateVertexShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr, &variant.shader)) ||
+-        FAILED(device->CreateInputLayout(elements, 16, code->GetBufferPointer(), code->GetBufferSize(), &variant.layout))) return nullptr;
+-    variant.bytecode_bytes = code->GetBufferSize();
+-    return cache_shader_variant(vertex_variants, std::move(variant));
 +    key[0] = (key[0] ^ size) * 0x100000001B3ull;   /* separates the fields */
 +}
 +
@@ -5716,11 +5779,7 @@ index f031faf..c6e7b55 100644
 +    if (!switches.empty()) {
 +        prefixed.assign(switches).append(source, size);
 +        source = prefixed.data(); size = prefixed.size();
-     }
--    if (FAILED(device->CreateVertexShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr, &variant.shader)) ||
--        FAILED(device->CreateInputLayout(elements, 16, code->GetBufferPointer(), code->GetBufferSize(), &variant.layout))) return nullptr;
--    variant.bytecode_bytes = code->GetBufferSize();
--    return cache_shader_variant(vertex_variants, std::move(variant));
++    }
 +    const std::wstring &directory = shader_cache_directory();
 +    std::wstring path;
 +    if (!directory.empty()) {
@@ -5771,7 +5830,7 @@ index f031faf..c6e7b55 100644
  }
  
  extern "C" int nv2a_gpu_execute_state(const uint32_t program[136][4], const uint32_t valid[136], uint32_t start,
-@@ -695,8 +1324,8 @@ extern "C" int nv2a_gpu_execute_state(const uint32_t program[136][4], const uint
+@@ -695,8 +1363,8 @@ extern "C" int nv2a_gpu_execute_state(const uint32_t program[136][4], const uint
          std::string source = vertex_program_source(variant.key, true);
          if (source.empty()) return 0;
          ComPtr<ID3DBlob> code, errors;
@@ -5782,7 +5841,7 @@ index f031faf..c6e7b55 100644
          if (FAILED(result)) {
              std::fprintf(stderr, "[GPU-D3D11] state compile: %s\n", errors ? (const char *)errors->GetBufferPointer() : "failed");
              return 0;
-@@ -738,6 +1367,288 @@ extern "C" int nv2a_gpu_execute_state(const uint32_t program[136][4], const uint
+@@ -738,6 +1406,288 @@ extern "C" int nv2a_gpu_execute_state(const uint32_t program[136][4], const uint
      return 1;
  }
  
@@ -6071,7 +6130,7 @@ index f031faf..c6e7b55 100644
  static ID3D11PixelShader *get_pixel_shader(const Nv2aGpuDraw &state, uint32_t window_clip_mode)
  {
      ShaderVariant variant = {};
-@@ -753,14 +1664,30 @@ static ID3D11PixelShader *get_pixel_shader(const Nv2aGpuDraw &state, uint32_t wi
+@@ -753,14 +1703,30 @@ static ID3D11PixelShader *get_pixel_shader(const Nv2aGpuDraw &state, uint32_t wi
          variant.key[4+stage*4] = state.combiners.rgb_input[stage]; variant.key[5+stage*4] = state.combiners.alpha_input[stage];
          variant.key[6+stage*4] = state.combiners.rgb_output[stage]; variant.key[7+stage*4] = state.combiners.alpha_output[stage];
      }
@@ -6103,7 +6162,7 @@ index f031faf..c6e7b55 100644
      values[0] = std::to_string(variant.key[0] & 255u) + "u";
      values[1] = std::to_string(variant.key[0]) + "u"; values[2] = std::to_string(variant.key[1]) + "u";
      values[3] = std::to_string(variant.key[2]) + "u"; values[4] = std::to_string(variant.key[3]) + "u";
-@@ -782,27 +1709,38 @@ static ID3D11PixelShader *get_pixel_shader(const Nv2aGpuDraw &state, uint32_t wi
+@@ -782,27 +1748,38 @@ static ID3D11PixelShader *get_pixel_shader(const Nv2aGpuDraw &state, uint32_t wi
      }
      values[6] += ")";
      values[7] = std::to_string(variant.key[42]) + "u";
@@ -6158,7 +6217,7 @@ index f031faf..c6e7b55 100644
  }
  
  template<typename SurfaceType>
-@@ -824,6 +1762,29 @@ static void mark_written_mask(SurfaceType &surface, const D3D11_BOX &region)
+@@ -824,6 +1801,29 @@ static void mark_written_mask(SurfaceType &surface, const D3D11_BOX &region)
      }
  }
  
@@ -6188,7 +6247,7 @@ index f031faf..c6e7b55 100644
  template<typename SurfaceType>
  static void mark_written_region(SurfaceType &surface, const D3D11_BOX &region)
  {
-@@ -831,6 +1792,10 @@ static void mark_written_region(SurfaceType &surface, const D3D11_BOX &region)
+@@ -831,6 +1831,10 @@ static void mark_written_region(SurfaceType &surface, const D3D11_BOX &region)
      if (!surface.dirty) {
          surface.written_region = region;
          surface.written_mask.clear();
@@ -6199,7 +6258,7 @@ index f031faf..c6e7b55 100644
      }
      else {
          auto &written = surface.written_region;
-@@ -938,6 +1903,148 @@ static bool surface_memory_matches(const SurfaceType &surface, uint32_t bytes)
+@@ -938,6 +1942,148 @@ static bool surface_memory_matches(const SurfaceType &surface, uint32_t bytes)
      return true;
  }
  
@@ -6348,7 +6407,7 @@ index f031faf..c6e7b55 100644
  static void refresh_surface(Surface &surface)
  {
      if (!surface.needs_refresh) return;
-@@ -968,9 +2075,9 @@ static void refresh_surface(Surface &surface)
+@@ -968,9 +2114,9 @@ static void refresh_surface(Surface &surface)
                  std::memcpy(surface.source_snapshot.data() + (size_t)row * row_bytes + changed.left * 4,
                              surface.memory + (size_t)row * surface.pitch + changed.left * 4,
                              (size_t)(changed.right - changed.left) * 4);
@@ -6361,7 +6420,7 @@ index f031faf..c6e7b55 100644
              surface.alias_copy_serial = 0;
              gpu_timing.color_refreshed++;
              gpu_timing.color_refresh_bytes += (uint64_t)(changed.right - changed.left) * (changed.bottom - changed.top) * 4;
-@@ -979,7 +2086,7 @@ static void refresh_surface(Surface &surface)
+@@ -979,7 +2125,7 @@ static void refresh_surface(Surface &surface)
          surface.needs_refresh = false;
          return;
      }
@@ -6370,7 +6429,7 @@ index f031faf..c6e7b55 100644
      surface.clear_value_valid = false;
      surface.alias_copy_serial = 0;
      gpu_timing.color_refresh_bytes += (uint64_t)surface.width * surface.height * 4;
-@@ -1015,7 +2122,13 @@ static bool refresh_depth(DepthSurface &surface)
+@@ -1015,7 +2161,13 @@ static bool refresh_depth(DepthSurface &surface)
          encode_depth_row(surface.format, source, destination, surface.width);
      }
      context->Unmap(surface.staging.Get(), 0);
@@ -6385,7 +6444,7 @@ index f031faf..c6e7b55 100644
      surface.clear_value_valid = false;
      surface.needs_refresh = false;
      surface.snapshot_valid = false;
-@@ -1023,33 +2136,243 @@ static bool refresh_depth(DepthSurface &surface)
+@@ -1023,33 +2175,243 @@ static bool refresh_depth(DepthSurface &surface)
      return true;
  }
  
@@ -6655,7 +6714,7 @@ index f031faf..c6e7b55 100644
  }
  
  static DepthSurface *get_depth(const Nv2aGpuDraw &state, bool preserve = true, TargetExtent extent = {})
-@@ -1066,26 +2389,44 @@ static DepthSurface *get_depth(const Nv2aGpuDraw &state, bool preserve = true, T
+@@ -1066,26 +2428,44 @@ static DepthSurface *get_depth(const Nv2aGpuDraw &state, bool preserve = true, T
                       state.depth_pitch, extent.width, state.depth_format);
          return nullptr;
      }
@@ -6710,7 +6769,7 @@ index f031faf..c6e7b55 100644
      if (!target_operation_succeeded("depth", "create staging", device->CreateTexture2D(&description, nullptr, &surface.staging))) return nullptr;
      // Creation-data uploads can round D24 values; use the bit-preserving refresh path.
      surface.needs_refresh = preserve;
-@@ -1094,6 +2435,161 @@ static DepthSurface *get_depth(const Nv2aGpuDraw &state, bool preserve = true, T
+@@ -1094,6 +2474,161 @@ static DepthSurface *get_depth(const Nv2aGpuDraw &state, bool preserve = true, T
      return &depth_surfaces.back();
  }
  
@@ -6872,7 +6931,7 @@ index f031faf..c6e7b55 100644
  static void readback_failed(const char *kind, HRESULT result, const char *operation = "map")
  {
      std::fprintf(stderr, "[GPU-D3D11] readback failed: %s %s 0x%08X; device 0x%08X\n",
-@@ -1224,6 +2720,54 @@ static void wait_ordering_completion(void)
+@@ -1224,6 +2759,54 @@ static void wait_ordering_completion(void)
      }
  }
  
@@ -6927,7 +6986,7 @@ index f031faf..c6e7b55 100644
  static void gpu_sync_impl(bool publish, const void *only = nullptr, size_t only_bytes = 0)
  {
      GpuTimer sync_timer(gpu_timing.sync);
-@@ -1253,6 +2797,36 @@ static void gpu_sync_impl(bool publish, const void *only = nullptr, size_t only_
+@@ -1253,6 +2836,36 @@ static void gpu_sync_impl(bool publish, const void *only = nullptr, size_t only_
          }
          return;
      }
@@ -6964,7 +7023,7 @@ index f031faf..c6e7b55 100644
      ID3D11RenderTargetView *empty = nullptr;
      context->OMSetRenderTargets(1, &empty, nullptr);
      bool has_readback = false;
-@@ -1266,13 +2840,14 @@ static void gpu_sync_impl(bool publish, const void *only = nullptr, size_t only_
+@@ -1266,13 +2879,14 @@ static void gpu_sync_impl(bool publish, const void *only = nullptr, size_t only_
                      has_known_clear = true;
                      continue;
                  }
@@ -6981,7 +7040,7 @@ index f031faf..c6e7b55 100644
                      gpu_timing.color_copy_bytes += (uint64_t)surface.width * surface.height * 4;
                  }
                  has_readback = true;
-@@ -1284,7 +2859,7 @@ static void gpu_sync_impl(bool publish, const void *only = nullptr, size_t only_
+@@ -1284,7 +2898,7 @@ static void gpu_sync_impl(bool publish, const void *only = nullptr, size_t only_
                      has_known_clear = true;
                      continue;
                  }
@@ -6990,7 +7049,7 @@ index f031faf..c6e7b55 100644
                  has_readback = true;
              }
      }
-@@ -1659,12 +3234,13 @@ static bool stage_flip(const void *presented, size_t bytes, uint32_t va, uint32_
+@@ -1659,12 +3273,13 @@ static bool stage_flip(const void *presented, size_t bytes, uint32_t va, uint32_
  {
      Surface *surface = surface_for_memory(presented);
      if (!surface) return false;
@@ -7006,7 +7065,7 @@ index f031faf..c6e7b55 100644
      }
      if (!s_pending_flip.event) {
          D3D11_QUERY_DESC description = {D3D11_QUERY_EVENT, 0};
-@@ -1684,11 +3260,47 @@ static bool stage_flip(const void *presented, size_t bytes, uint32_t va, uint32_
+@@ -1684,11 +3299,47 @@ static bool stage_flip(const void *presented, size_t bytes, uint32_t va, uint32_
      return true;
  }
  
@@ -7054,7 +7113,7 @@ index f031faf..c6e7b55 100644
      if (!presented) { nv2a_gpu_flush(); return va; }
      uint32_t show = va;
      if (async_flip_enabled()) {
-@@ -1708,17 +3320,350 @@ extern "C" uint32_t nv2a_gpu_flip(const void *presented, size_t bytes, uint32_t
+@@ -1708,17 +3359,350 @@ extern "C" uint32_t nv2a_gpu_flip(const void *presented, size_t bytes, uint32_t
      } else {
          gpu_sync_impl(true, presented, bytes);
      }
@@ -7413,7 +7472,7 @@ index f031faf..c6e7b55 100644
  /* A GPU-engine blit wrote guest RAM a cached surface mirrors. Refresh only the
   * surfaces that overlap those bytes from guest RAM; never bump the global
   * texture-validation serial, which would re-upload GPU-only textures (UI). */
-@@ -1754,8 +3699,11 @@ static bool matches_color_target(const Surface &surface, const Nv2aGpuDraw &stat
+@@ -1754,8 +3738,11 @@ static bool matches_color_target(const Surface &surface, const Nv2aGpuDraw &stat
  
  static bool matches_depth_target(const DepthSurface &surface, const Nv2aGpuDraw &state, TargetExtent extent)
  {
@@ -7426,7 +7485,7 @@ index f031faf..c6e7b55 100644
  }
  
  static TargetExtent reusable_target_extent(const Nv2aGpuDraw &state)
-@@ -1894,12 +3842,30 @@ extern "C" int nv2a_gpu_clear(const Nv2aGpuDraw *state, uint32_t flags, uint32_t
+@@ -1894,12 +3881,30 @@ extern "C" int nv2a_gpu_clear(const Nv2aGpuDraw *state, uint32_t flags, uint32_t
          const float rgba[] = {(float)((color >> 16) & 255u) / 255.0f, (float)((color >> 8) & 255u) / 255.0f,
                                (float)(color & 255u) / 255.0f, (float)(color >> 24) / 255.0f};
          context->ClearRenderTargetView(surface->target.Get(), rgba);
@@ -7458,7 +7517,7 @@ index f031faf..c6e7b55 100644
      }
      if (surface) {
          mark_written_region(*surface, region);
-@@ -1908,7 +3874,7 @@ extern "C" int nv2a_gpu_clear(const Nv2aGpuDraw *state, uint32_t flags, uint32_t
+@@ -1908,7 +3913,7 @@ extern "C" int nv2a_gpu_clear(const Nv2aGpuDraw *state, uint32_t flags, uint32_t
      if (depth) {
          bool known = known_clears && !partial && (depth->format == 1 ? clear_depth :
              (clear_depth && clear_stencil) || depth->clear_value_valid);
@@ -7467,7 +7526,7 @@ index f031faf..c6e7b55 100644
              (clear_depth ? depth_value & 0xFFFFFF00u : depth->clear_value & 0xFFFFFF00u) |
              (clear_stencil ? depth_value & 255u : depth->clear_value & 255u);
          mark_written_region(*depth, region);
-@@ -1928,10 +3894,16 @@ static void release_stream(DynamicStream &stream)
+@@ -1928,10 +3933,16 @@ static void release_stream(DynamicStream &stream)
      }
  }
  
@@ -7488,7 +7547,7 @@ index f031faf..c6e7b55 100644
  static bool map_stream(DynamicStream &stream, UINT bytes, UINT bind, const char *kind, UINT &offset)
  {
      if (!stream.buffer || bytes > stream.capacity) {
-@@ -1953,18 +3925,18 @@ static bool map_stream(DynamicStream &stream, UINT bytes, UINT bind, const char
+@@ -1953,18 +3964,18 @@ static bool map_stream(DynamicStream &stream, UINT bytes, UINT bind, const char
          stream.capacity = capacity;
          stream.used = 0;
      }
@@ -7518,7 +7577,7 @@ index f031faf..c6e7b55 100644
          gpu_timing.stream_discards++;
      } else {
          gpu_timing.stream_appends++;
-@@ -2011,26 +3983,109 @@ static bool initialize_pipeline()
+@@ -2011,26 +4022,109 @@ static bool initialize_pipeline()
  static ComPtr<ID3D11Texture2D> feedback_texture;
  static ComPtr<ID3D11ShaderResourceView> feedback_view;
  
@@ -7637,7 +7696,7 @@ index f031faf..c6e7b55 100644
  }
  
  static ID3D11ShaderResourceView *default_white_view()
-@@ -2050,12 +4105,162 @@ static ID3D11ShaderResourceView *default_white_view()
+@@ -2050,12 +4144,162 @@ static ID3D11ShaderResourceView *default_white_view()
      return view.Get();
  }
  
@@ -7800,7 +7859,7 @@ index f031faf..c6e7b55 100644
      static const bool mirror_aliases = []() {
          const char *setting = std::getenv("RECOMP_NV2A_GPU_ALIAS_COPIES");
          return !setting || std::strcmp(setting, "0") != 0;
-@@ -2153,14 +4358,22 @@ static ID3D11ShaderResourceView *get_texture(const Nv2aGpuTexture &binding, cons
+@@ -2153,14 +4397,22 @@ static ID3D11ShaderResourceView *get_texture(const Nv2aGpuTexture &binding, cons
              direct->needs_refresh = true;
              refresh_surface(*direct);
              if (direct->alias_copy_serial != alias_serial) {
@@ -7825,7 +7884,7 @@ index f031faf..c6e7b55 100644
                          context->CopySubresourceRegion(direct->texture.Get(), 0, box.left, box.top, 0,
                                                        surface.texture.Get(), 0, &box);
                          direct->clear_value_valid = false;
-@@ -2207,6 +4420,20 @@ static ID3D11ShaderResourceView *get_texture(const Nv2aGpuTexture &binding, cons
+@@ -2207,6 +4459,20 @@ static ID3D11ShaderResourceView *get_texture(const Nv2aGpuTexture &binding, cons
          nv2a_gpu_surface_publish(binding.source, binding.source_bytes);
      }
      if (direct) {
@@ -7846,7 +7905,7 @@ index f031faf..c6e7b55 100644
          direct->last_used = ++surface_use_serial;
          if (cloak_debug())
              std::fprintf(stderr, "[CLOAKDBG] direct src=%p %ux%u fmt=%X linear=%u pitch=%u; surf %ux%u pitch=%u dirty=%u needs_refresh=%u snapshot_valid=%u\n",
-@@ -2223,6 +4450,7 @@ static ID3D11ShaderResourceView *get_texture(const Nv2aGpuTexture &binding, cons
+@@ -2223,6 +4489,7 @@ static ID3D11ShaderResourceView *get_texture(const Nv2aGpuTexture &binding, cons
           * GPU stale data -- see RECOMP_SYNC_LIGHT. */
          if (!direct->dirty)
              refresh_surface(*direct);
@@ -7854,7 +7913,7 @@ index f031faf..c6e7b55 100644
          return direct->view.Get();
      }
      CachedTexture *refresh = nullptr;
-@@ -2397,6 +4625,20 @@ static ID3D11ShaderResourceView *get_texture(const Nv2aGpuTexture &binding, cons
+@@ -2397,6 +4664,20 @@ static ID3D11ShaderResourceView *get_texture(const Nv2aGpuTexture &binding, cons
      description.MipLevels = levels; description.ArraySize = faces; description.Format = format;
      description.MiscFlags = binding.cube ? D3D11_RESOURCE_MISC_TEXTURECUBE : 0;
      description.SampleDesc.Count = 1; description.BindFlags = D3D11_BIND_SHADER_RESOURCE;
@@ -7875,7 +7934,7 @@ index f031faf..c6e7b55 100644
      ComPtr<ID3D11Texture2D> texture;
      CachedTexture entry = {};
      entry.source = binding.source; entry.width = binding.width; entry.height = binding.height; entry.format = binding.format;
-@@ -2515,11 +4757,96 @@ static D3D11_TEXTURE_ADDRESS_MODE texture_address(uint32_t address)
+@@ -2515,11 +4796,96 @@ static D3D11_TEXTURE_ADDRESS_MODE texture_address(uint32_t address)
      }
  }
  
@@ -7972,7 +8031,7 @@ index f031faf..c6e7b55 100644
      if (minimum > 6 || maximum > 2) return false;
      D3D11_SAMPLER_DESC description = {};
      description.AddressU = texture_address(binding.address_u);
-@@ -2535,6 +4862,10 @@ static bool make_sampler(const Nv2aGpuTexture &binding, ComPtr<ID3D11SamplerStat
+@@ -2535,6 +4901,10 @@ static bool make_sampler(const Nv2aGpuTexture &binding, ComPtr<ID3D11SamplerStat
      description.MipLODBias = (float)bias / 256.0f;
      if (description.MipLODBias > D3D11_MIP_LOD_BIAS_MAX) return false;
      description.MaxAnisotropy = binding.control0_valid ? 1u << ((binding.control0 >> 4) & 3u) : 1u;
@@ -7983,7 +8042,7 @@ index f031faf..c6e7b55 100644
      if (description.MaxAnisotropy > 1) {
          if (maximum != 2 || (minimum != 2 && minimum != 6)) return false;
          description.Filter = D3D11_FILTER_ANISOTROPIC;
-@@ -2673,10 +5004,10 @@ static bool clear_target_rectangle(const Nv2aGpuDraw &state, Surface *surface, D
+@@ -2673,10 +5043,10 @@ static bool clear_target_rectangle(const Nv2aGpuDraw &state, Surface *surface, D
              "float4 ps():SV_Target{return clearColor;}";
          ClearPipeline created;
          ComPtr<ID3DBlob> vertex, pixel, errors;
@@ -7996,7 +8055,7 @@ index f031faf..c6e7b55 100644
                                  "ps", "ps_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &pixel, &errors);
          if (FAILED(result)) {
              std::fprintf(stderr, "[GPU-D3D11] rectangle clear shader compile: 0x%08X %s\n",
-@@ -2725,7 +5056,7 @@ static bool clear_target_rectangle(const Nv2aGpuDraw &state, Surface *surface, D
+@@ -2725,7 +5095,7 @@ static bool clear_target_rectangle(const Nv2aGpuDraw &state, Surface *surface, D
      const float constants[8] = {
          (float)((color >> 16) & 255u) / 255.0f, (float)((color >> 8) & 255u) / 255.0f,
          (float)(color & 255u) / 255.0f, (float)(color >> 24) / 255.0f,
@@ -8005,7 +8064,7 @@ index f031faf..c6e7b55 100644
              (float)(depth_value >> 8) / 16777215.0f, 0, 0, 0
      };
      D3D11_MAPPED_SUBRESOURCE mapped = {};
-@@ -2735,8 +5066,10 @@ static bool clear_target_rectangle(const Nv2aGpuDraw &state, Surface *surface, D
+@@ -2735,8 +5105,10 @@ static bool clear_target_rectangle(const Nv2aGpuDraw &state, Surface *surface, D
      context->Unmap(pipeline.constants.Get(), 0);
      ID3D11ShaderResourceView *empty[12] = {};
      context->PSSetShaderResources(0, 12, empty);
@@ -8018,7 +8077,7 @@ index f031faf..c6e7b55 100644
      context->OMSetBlendState(pipeline.blend[surface ? 1 : 0].Get(), nullptr, UINT_MAX);
      context->OMSetDepthStencilState(pipeline.depth[(clear_depth ? 1 : 0) | (clear_stencil ? 2 : 0)].Get(), depth_value & 255u);
      context->IASetInputLayout(nullptr);
-@@ -2747,8 +5080,13 @@ static bool clear_target_rectangle(const Nv2aGpuDraw &state, Surface *surface, D
+@@ -2747,8 +5119,13 @@ static bool clear_target_rectangle(const Nv2aGpuDraw &state, Surface *surface, D
      ID3D11Buffer *buffer = pipeline.constants.Get();
      context->VSSetConstantBuffers(0, 1, &buffer);
      context->PSSetConstantBuffers(0, 1, &buffer);
@@ -8034,7 +8093,7 @@ index f031faf..c6e7b55 100644
      context->RSSetState(pipeline.raster.Get());
      context->RSSetViewports(1, &viewport);
      context->RSSetScissorRects(1, &clip);
-@@ -2756,17 +5094,903 @@ static bool clear_target_rectangle(const Nv2aGpuDraw &state, Surface *surface, D
+@@ -2756,17 +5133,903 @@ static bool clear_target_rectangle(const Nv2aGpuDraw &state, Surface *surface, D
      return true;
  }
  
@@ -8940,7 +8999,7 @@ index f031faf..c6e7b55 100644
      if (state->topology > NV2A_GPU_TOPOLOGY_POINTS) return reject("primitive topology");
      uint32_t primitive_width = state->topology == NV2A_GPU_TOPOLOGY_TRIANGLES ? 3u :
                                 state->topology == NV2A_GPU_TOPOLOGY_LINES ? 2u : 1u;
-@@ -2775,7 +5999,7 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -2775,7 +6038,7 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
          (state->indices && element_count > NV2A_GPU_MAX_INDICES)) return reject("primitive element count");
      if (state->topology == NV2A_GPU_TOPOLOGY_POINTS && state->point_size && state->point_size != 8)
          return reject("non-unit point size");
@@ -8949,7 +9008,7 @@ index f031faf..c6e7b55 100644
          for (uint32_t index = 0; index < state->index_count; index++)
              if (state->indices[index] >= count) return reject("vertex index extent");
      }
-@@ -2856,12 +6080,25 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -2856,12 +6119,25 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
      for (uint32_t vertex = 0; !state->vertex_program && !state->fixed_transform && vertex < count; vertex++)
          if (!nv_cpu_finite(vertices[vertex].position[0]) || !nv_cpu_finite(vertices[vertex].position[1]) ||
              !nv_cpu_finite(vertices[vertex].position[2]) || !nv_cpu_finite(vertices[vertex].position[3])) return 0;
@@ -8977,7 +9036,7 @@ index f031faf..c6e7b55 100644
      D3D11_DEPTH_STENCIL_DESC depth_description = {};
      depth_description.DepthEnable = state->depth_enable != 0;
      depth_description.DepthWriteMask = state->depth_mask ? D3D11_DEPTH_WRITE_MASK_ALL : D3D11_DEPTH_WRITE_MASK_ZERO;
-@@ -2903,8 +6140,24 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -2903,8 +6179,24 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
                        (LONG)std::min(state->clip_y + state->clip_height, state->height)};
      if (state->topology == NV2A_GPU_TOPOLOGY_TRIANGLES && state->cull_enable && state->cull_face == 0x408) { clip.right = clip.left; clip.bottom = clip.top; }
      configure_window_clip(*state, constants, clip);
@@ -9003,7 +9062,7 @@ index f031faf..c6e7b55 100644
      constants.misc[1] = state->control0;
      constants.misc[2] = state->fixed_transform; constants.misc[3] = state->flat_shading;
      constants.final_input[0] = state->combiners.final_input[0]; constants.final_input[1] = state->combiners.final_input[1];
-@@ -2971,14 +6224,78 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -2971,14 +6263,78 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
              }
          }
      }
@@ -9084,7 +9143,7 @@ index f031faf..c6e7b55 100644
      for (uint32_t stage = 0; stage < 8; stage++) {
          constants.stages[stage][0] = state->combiners.rgb_input[stage]; constants.stages[stage][1] = state->combiners.alpha_input[stage];
          constants.stages[stage][2] = state->combiners.rgb_output[stage]; constants.stages[stage][3] = state->combiners.alpha_output[stage];
-@@ -3052,7 +6369,8 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -3052,7 +6408,8 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
              constants.texture_info[stage][3] = 0.0f;
              continue;
          }
@@ -9094,7 +9153,7 @@ index f031faf..c6e7b55 100644
              return reject("projective volume texture dimensionality");
          uint32_t sign_mask = binding.filter >> 28;
          uint32_t key_mode = binding.control0_valid ? binding.control0 & 3u : 0;
-@@ -3090,9 +6408,50 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -3090,9 +6447,50 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
              if ((mode == 1 || mode == 2) && vertices[vertex].texture[stage][3] == 0) return reject("zero projective texture coordinate");
          }
          if (!binding.source_bytes) return reject("missing texture data");
@@ -9147,7 +9206,7 @@ index f031faf..c6e7b55 100644
          constants.texture_info[stage][0] = (float)binding.width; constants.texture_info[stage][1] = (float)binding.height; constants.texture_info[stage][2] = (float)binding.linear;
          constants.texture_key[stage][0] = binding.color_key;
          constants.texture_key[stage][1] = binding.format == 0x03 || binding.format == 0x07 ||
-@@ -3102,7 +6461,18 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -3102,7 +6500,18 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
          constants.texture_info[stage][3] = (float)((binding.format == 0x1E ? 1u : 0u) | (binding.cube ? 2u : 0u) |
              (binding.address_u == 5 ? 4u : 0u) | (binding.address_v == 5 ? 8u : 0u) |
              (binding.control0_valid && (binding.control0 & 4u) ? 16u : 0u) |
@@ -9167,7 +9226,7 @@ index f031faf..c6e7b55 100644
          if (sign_mask) signed_texture_stages++;
          switch (binding.format) {
          case 0x01: case 0x16: case 0x17: case 0x1A: case 0x1B: case 0x20: case 0x28: case 0x29:
-@@ -3111,32 +6481,94 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -3111,32 +6520,94 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
          }
      }
      phase_timer.next_phase(gpu_timing.draw_streams);
@@ -9280,7 +9339,7 @@ index f031faf..c6e7b55 100644
                  !std::memcmp(&uploaded_constants, &constants, sizeof constants)) {
              /* Same constants as the last upload this frame: rebind its offset. */
              gpu_timing.constant_reuses++;
-@@ -3146,6 +6578,8 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -3146,6 +6617,8 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
              if (!map_stream(constant_stream, kConstantSlot, D3D11_BIND_CONSTANT_BUFFER, "constants", constants_offset))
                  return 0;
              std::memcpy((uint8_t *)constant_stream.mapped.pData + constants_offset, &constants, sizeof constants);
@@ -9289,7 +9348,7 @@ index f031faf..c6e7b55 100644
              constant_upload_offset = constants_offset;
              uploaded_constants = constants;
              uploaded_constants_valid = true;
-@@ -3170,20 +6604,35 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -3170,20 +6643,35 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
              constants.texture_key[stage][2] == 3u) uncombined = false;
      ID3D11PixelShader *program = uncombined ? uncombined_shader.Get() : get_pixel_shader(*state, constants.window_clip_control[0]);
      if (!program) return 0;
@@ -9329,7 +9388,7 @@ index f031faf..c6e7b55 100644
      context->OMSetDepthStencilState(depth_state.Get(), state->stencil_reference & 255u); context->OMSetBlendState(blending.Get(), blend_color, ~0u);
      context->IASetInputLayout(guest_vertex ? guest_vertex->layout.Get() : input_layout.Get()); context->IASetVertexBuffers(0, 1, buffers, &stride, &offset);
      context->IASetPrimitiveTopology(state->topology == NV2A_GPU_TOPOLOGY_LINES ? D3D11_PRIMITIVE_TOPOLOGY_LINELIST :
-@@ -3192,7 +6641,7 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -3192,7 +6680,7 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
      context->VSSetShader(guest_vertex ? guest_vertex->shader.Get() : vertex_shader.Get(), nullptr, 0);
      ID3D11GeometryShader *geometry = state->topology == NV2A_GPU_TOPOLOGY_LINES ? line_geometry_shader.Get() :
          state->topology == NV2A_GPU_TOPOLOGY_POINTS ? point_geometry_shader.Get() :
@@ -9338,7 +9397,7 @@ index f031faf..c6e7b55 100644
      context->GSSetShader(geometry, nullptr, 0);
      context->PSSetShader(program, nullptr, 0);
      if (constants_ring && context1) {
-@@ -3200,25 +6649,32 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -3200,25 +6688,32 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
          context1->VSSetConstantBuffers1(0, 1, &constant_ring_buffer, &first, &num);
          context1->PSSetConstantBuffers1(0, 1, &constant_ring_buffer, &first, &num);
          context1->GSSetConstantBuffers1(0, 1, &constant_ring_buffer, &first, &num);
@@ -9376,7 +9435,7 @@ index f031faf..c6e7b55 100644
      end_gpu_sample(sample);
      phase_timer.next_phase(gpu_timing.draw_bookkeeping);
      if (state->topology == NV2A_GPU_TOPOLOGY_LINES) gpu_timing.line_primitives += element_count / 2;
-@@ -3245,8 +6701,10 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
+@@ -3245,8 +6740,10 @@ extern "C" int nv2a_gpu_draw(const Nv2aGpuDraw *state, Nv2aGpuVertex *vertices,
          if (texture_matrix_used) gpu_timing.texture_matrix_draws++;
      }
      pending_draws = true;
@@ -9388,7 +9447,7 @@ index f031faf..c6e7b55 100644
      bool stencil_writes = state->stencil_enable && (state->stencil_write_mask & 255u) &&
          (state->stencil_fail != 0x1E00 || state->stencil_depth_fail != 0x1E00 || state->stencil_pass != 0x1E00);
      if (depth && ((state->depth_enable && state->depth_mask) || stencil_writes) && writes) mark_written_region(*depth, region);
-@@ -3260,8 +6718,8 @@ extern "C" int nv2a_gpu_compile(void)
+@@ -3260,8 +6757,8 @@ extern "C" int nv2a_gpu_compile(void)
      if (vertex_shader && uncombined_shader && geometry_shader && line_geometry_shader && point_geometry_shader) return 1;
      if (!nv2a_gpu_available()) return 0;
      ComPtr<ID3DBlob> pixel_code, errors;
@@ -9399,7 +9458,7 @@ index f031faf..c6e7b55 100644
      if (FAILED(result)) {
          std::fprintf(stderr, "[GPU-D3D11] shader compile: %s\n", errors ? (const char *)errors->GetBufferPointer() : "failed");
          return 0;
-@@ -3273,8 +6731,8 @@ extern "C" int nv2a_gpu_compile(void)
+@@ -3273,8 +6770,8 @@ extern "C" int nv2a_gpu_compile(void)
          return 0;
      }
      pixel_code.Reset(); errors.Reset();
@@ -9410,7 +9469,7 @@ index f031faf..c6e7b55 100644
      if (FAILED(result)) return 0;
      if (FAILED(device->CreatePixelShader(pixel_code->GetBufferPointer(), pixel_code->GetBufferSize(), nullptr, &uncombined_shader))) return 0;
      const struct { const char *entry; ComPtr<ID3D11GeometryShader> *shader; } geometries[] = {
-@@ -3282,8 +6740,8 @@ extern "C" int nv2a_gpu_compile(void)
+@@ -3282,8 +6779,8 @@ extern "C" int nv2a_gpu_compile(void)
      };
      for (const auto &geometry : geometries) {
          pixel_code.Reset(); errors.Reset();
@@ -9421,7 +9480,7 @@ index f031faf..c6e7b55 100644
          if (SUCCEEDED(result))
              result = device->CreateGeometryShader(pixel_code->GetBufferPointer(), pixel_code->GetBufferSize(), nullptr,
                                                     geometry.shader->ReleaseAndGetAddressOf());
-@@ -3296,28 +6754,98 @@ extern "C" int nv2a_gpu_compile(void)
+@@ -3296,28 +6793,98 @@ extern "C" int nv2a_gpu_compile(void)
      return 1;
  }
  
@@ -10022,7 +10081,7 @@ index e27083f..afd754b 100644
 \ No newline at end of file
 +#endif
 diff --git a/src/kernel/nv2a_pb_exec.c b/src/kernel/nv2a_pb_exec.c
-index d7c0f20..0b53b55 100644
+index d7c0f20..ca93005 100644
 --- a/src/kernel/nv2a_pb_exec.c
 +++ b/src/kernel/nv2a_pb_exec.c
 @@ -31,6 +31,8 @@
@@ -10913,7 +10972,15 @@ index d7c0f20..0b53b55 100644
      state.stage_program = s_gpu.shader_stage_program; state.combiners = s_gpu.combiners;
      state.shader_clip_mode = s_gpu.shader_clip_mode;
      state.shader_other_stage_input = s_gpu.shader_other_stage_input;
-@@ -2793,9 +3341,21 @@ static int gpu_raster_batch(void)
+@@ -2788,14 +3336,29 @@ static int gpu_raster_batch(void)
+     if ((s_gpu.transform_execution_mode & 3u) == 2u) {
+         state.vertex_program = s_gpu.vp_program; state.vertex_valid = s_gpu.vp_valid;
+         state.vertex_constants = s_gpu.vp_constants; state.vertex_start = s_gpu.vp_start;
++        /* vp_words counts the program words loaded; it wraps only after 2^32
++         * of them, never between two draws. */
++        state.vertex_serial = (uint64_t)s_gpu.vp_words + 1u;
+         static int fetch_all = -1;
+         if (fetch_all < 0) {
              const char *value = getenv("RECOMP_NV2A_VERTEX_FETCH_ALL");
              fetch_all = value && *value && strcmp(value, "0") != 0;
          }
@@ -10938,7 +11005,7 @@ index d7c0f20..0b53b55 100644
      } else if ((s_gpu.transform_execution_mode & 3u) == 0u && s_gpu.composite_valid == 0xFFFFu) {
          state.fixed_transform = 1; state.vertex_constants = s_gpu.vp_constants;
          state.lighting_enable = s_gpu.lighting_enable; state.specular_enable = s_gpu.specular_enable;
-@@ -2869,6 +3429,45 @@ static int gpu_raster_batch(void)
+@@ -2869,6 +3432,45 @@ static int gpu_raster_batch(void)
          if (!texture->valid) return gpu_batch_rejected("invalid texture binding");
          if (((texture->raw_format >> 4) & 15u) == 3u)
              binding->depth = 1u << (texture->raw_format >> 28);
@@ -10984,7 +11051,7 @@ index d7c0f20..0b53b55 100644
          if ((mode == 2) != (binding->depth != 0) || (binding->depth && (texture->raw_format & 4u)))
              return gpu_batch_rejected("projective volume texture dimensionality");
          binding->source = memory + texture->offset; binding->width = texture->width; binding->height = texture->height;
-@@ -2937,6 +3536,27 @@ static int gpu_raster_batch(void)
+@@ -2937,6 +3539,27 @@ static int gpu_raster_batch(void)
          if (!bytes || (uint64_t)physical_alias(texture->offset) + bytes > XBOX_CONTIG_SIZE) return gpu_batch_rejected("texture memory extent");
          binding->source_bytes = (uint32_t)bytes;
      }
@@ -11012,7 +11079,7 @@ index d7c0f20..0b53b55 100644
      switch (s_gpu.prim) {
      case NV_PRIM_POINTS:
          for (index = 0; index < s_gpu.idx_count; index++)
-@@ -2979,6 +3599,8 @@ static int gpu_raster_batch(void)
+@@ -2979,6 +3602,8 @@ static int gpu_raster_batch(void)
          break;
      default: return 0;
      }
@@ -11021,7 +11088,7 @@ index d7c0f20..0b53b55 100644
      if (!gpu_submit_chunk(&state, &count)) return 0;
      if (s_gpu.batch_array32_count && s_gpu.gpu_batches != prior_batches) s_gpu.native_array32_batches++;
      return 1;
-@@ -2988,6 +3610,7 @@ static int gpu_submit_chunk(Nv2aGpuDraw *state, uint32_t *count)
+@@ -2988,6 +3613,7 @@ static int gpu_submit_chunk(Nv2aGpuDraw *state, uint32_t *count)
  {
      uint32_t index;
      if (!*count) return 1;
@@ -11029,7 +11096,7 @@ index d7c0f20..0b53b55 100644
      state->indices = gpu_indices; state->index_count = gpu_index_count;
      double started = gpu_clock_seconds();
      int drawn = nv2a_gpu_draw(state, gpu_vertices, *count);
-@@ -3008,12 +3631,17 @@ static int gpu_submit_chunk(Nv2aGpuDraw *state, uint32_t *count)
+@@ -3008,12 +3634,17 @@ static int gpu_submit_chunk(Nv2aGpuDraw *state, uint32_t *count)
      }
      s_gpu.gpu_batches++;
      if (state->topology == NV2A_GPU_TOPOLOGY_TRIANGLES) s_gpu.tris_drawn += gpu_index_count / 3;
@@ -11048,7 +11115,7 @@ index d7c0f20..0b53b55 100644
  static void raster_batch(void)
  {
  #ifndef _WIN32
-@@ -3049,6 +3677,184 @@ static void raster_batch(void)
+@@ -3049,6 +3680,184 @@ static void raster_batch(void)
      }
  
  #ifdef _WIN32
@@ -11233,7 +11300,7 @@ index d7c0f20..0b53b55 100644
      double started = gpu_clock_seconds();
      double prior_submit = s_gpu.gpu_submit_seconds;
      int rendered = gpu_raster_batch();
-@@ -3365,7 +4171,7 @@ static void imm_emit_vertex(void)
+@@ -3365,7 +4174,7 @@ static void imm_emit_vertex(void)
  {
      uint32_t at = s_gpu.imm_count * IMM_VERTEX_DWORDS;
  
@@ -11242,7 +11309,7 @@ index d7c0f20..0b53b55 100644
          return;
      for (uint32_t attribute = 0; attribute < NV_VERTEX_ATTRS; attribute++) {
          float *value = s_gpu.imm_attributes[s_gpu.imm_count][attribute];
-@@ -3556,6 +4362,83 @@ void nv2a_pb_exec_indices(uint32_t method, const uint32_t *parameters, uint32_t
+@@ -3556,6 +4365,151 @@ void nv2a_pb_exec_indices(uint32_t method, const uint32_t *parameters, uint32_t
      }
  }
  
@@ -11280,6 +11347,43 @@ index d7c0f20..0b53b55 100644
 +    }
 +}
 +
++/* vertex_program_upload for `count` words of one packet with incrementing
++ * methods, all within the program (0x0B00-0x0B7C) or all within the
++ * constants (0x0B80-0x0BFC): the component steps with the method and the
++ * cursor with every fourth, so the words land one after another from the
++ * cursor on. Kept in locals, which per word went back through memory. */
++static void vertex_program_upload_run(uint32_t method, const uint32_t *words, uint32_t count)
++{
++    uint32_t i;
++    if (method < 0x0B80) {
++        uint32_t component = ((method - 0x0B00) >> 2) & 3u, load = s_gpu.vp_load;
++        for (i = 0; i < count; i++) {
++            if (load < 136) {
++                s_gpu.vp_program[load][component] = words[i];
++                s_gpu.vp_valid[load] |= 1u << component;
++            }
++            if (component == 3) { component = 0; load++; }
++            else component++;
++        }
++        s_gpu.vp_load = load;
++        s_gpu.vp_words += count;
++    } else {
++        uint32_t component = ((method - 0x0B80) >> 2) & 3u, load = s_gpu.constant_load;
++        uint32_t composite = s_gpu.composite_valid;
++        for (i = 0; i < count; i++) {
++            if (load < 192)
++                memcpy(&s_gpu.vp_constants[load][component], &words[i], 4);
++            if (load < 4)
++                composite |= 1u << (load * 4 + component);
++            if (component == 3) { component = 0; load++; }
++            else component++;
++        }
++        s_gpu.composite_valid = composite;
++        s_gpu.constant_load = load;
++        s_gpu.constant_words += count;
++    }
++}
++
 +/* A run of a packet's parameters (contiguous words) for nv2a_pb_run: the
 + * ones nv2a_pb_exec_method's fast path would handle -- index lists, vertex-
 + * program and constant uploads, zero no-ops -- in one call. Returns how many
@@ -11294,25 +11398,45 @@ index d7c0f20..0b53b55 100644
 +    if (noninc && (method == NV097_ARRAY_ELEMENT16 || method == NV097_ARRAY_ELEMENT32)) {
 +        int sixteen = method == NV097_ARRAY_ELEMENT16;
 +        if (!require_index_capacity(count * (sixteen ? 2u : 1u), method)) return 0;
-+        for (; taken < count; taken++) {
-+            uint32_t word = words[taken];
-+            if (sixteen) {
-+                append_vertex_index(word & 0xFFFFu);
-+                append_vertex_index(word >> 16);
-+            } else
-+                append_vertex_index(word);
-+        }
-+        if (sixteen) s_gpu.array16_indices += (uint64_t)count * 2;
-+        else {
++        /* append_vertex_index for the run, its counters kept in locals: the
++         * stores into the index list could alias them, so per index they
++         * were read and written back through memory. */
++        uint32_t *dst = s_gpu.idx + s_gpu.idx_count;
++        if (sixteen) {
++            for (; taken < count; taken++) {
++                uint32_t word = words[taken];
++                dst[2 * taken] = word & 0xFFFFu;
++                dst[2 * taken + 1] = word >> 16;
++            }
++            s_gpu.idx_count += 2 * count;
++            s_gpu.array16_indices += (uint64_t)count * 2;
++        } else {
++            uint32_t wide = 0;
++            for (; taken < count; taken++) {
++                uint32_t word = words[taken];
++                dst[taken] = word;
++                wide += word > 65535u;
++            }
++            s_gpu.idx_count += count;
++            s_gpu.wide_indices += wide;
 +            s_gpu.array32_indices += count;
 +            s_gpu.batch_array32_count += count;
 +        }
++        if (s_gpu.idx_count > s_gpu.max_index_count) s_gpu.max_index_count = s_gpu.idx_count;
 +        return taken;
 +    }
 +    if (method >= 0x0B00 && method < 0x0C00) {
-+        for (; taken < count && method >= 0x0B00 && method < 0x0C00; taken++) {
-+            vertex_program_upload(method, words[taken]);
-+            if (!noninc) method += 4;
++        if (noninc) {
++            for (; taken < count; taken++)
++                vertex_program_upload(method, words[taken]);
++            return taken;
++        }
++        while (taken < count && method < 0x0C00) {
++            uint32_t n = ((method < 0x0B80 ? 0x0B80u : 0x0C00u) - method) / 4u;
++            if (n > count - taken) n = count - taken;
++            vertex_program_upload_run(method, words + taken, n);
++            taken += n;
++            method += n * 4u;
 +        }
 +        return taken;
 +    }
@@ -11320,13 +11444,24 @@ index d7c0f20..0b53b55 100644
 +        while (taken < count && !words[taken]) taken++;
 +        return taken;
 +    }
++    if (noninc && method == NV097_INLINE_ARRAY) {
++        /* nv2a_pb_exec_method's INLINE_ARRAY case for the run: kept while
++         * a batch is open and the buffer has room, dropped otherwise. */
++        if (s_gpu.prim) {
++            uint32_t room = NV_MAX_INLINE - s_gpu.inline_count;
++            uint32_t n = count < room ? count : room;
++            memcpy(s_gpu.inline_buf + s_gpu.inline_count, words, (size_t)n * 4u);
++            s_gpu.inline_count += n;
++        }
++        return count;
++    }
 +    return 0;
 +}
 +
  void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
  {
      static int inited;
-@@ -3615,6 +4498,44 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -3615,6 +4569,65 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
                      subch, method, param);
      }
  
@@ -11359,11 +11494,32 @@ index d7c0f20..0b53b55 100644
 +            if (s_gpu.prim && s_gpu.inline_count < NV_MAX_INLINE)
 +                s_gpu.inline_buf[s_gpu.inline_count++] = param;
 +            return;
++        /* The load cursors: a quarter of the other words in a Turok
++         * Evolution level, handled eighty-odd tests further down. */
++        case 0x1E9C: s_gpu.vp_load = param; return;
++        case 0x1EA0: s_gpu.vp_start = param; return;
++        case 0x1EA4: s_gpu.constant_load = param; return;
++        case NV097_SET_BEGIN_END: goto state_switch;
 +        default:
 +            if (method >= 0x0B00 && method < 0x0C00) {
 +                vertex_program_upload(method, param);
 +                return;
 +            }
++            /* The rest of the frequent state, straight to where it is
++             * handled: no test before each label claims a method sent to it
++             * (that is what makes it the same dispatch; keep it so when
++             * adding a test above one). 0x0310 can be claimed by the
++             * subchannel-class test below, and 0x0320/0x0324/0x0380 are
++             * benign_state_method's. */
++            if (method >= 0x1B00 && method < 0x1C00) goto texture_stages;
++            if (method >= NV097_SET_VERTEX_DATA_ARRAY_OFFSET &&
++                    method < NV097_SET_VERTEX_DATA_ARRAY_FORMAT + NV_VERTEX_ATTRS * 4)
++                goto state_switch;
++            if (method >= 0x0300 && method < 0x0400 && method != 0x0310 && !benign_state_method(method))
++                goto render_state;
++            if ((method >= 0x0440 && method < 0x0940) || (method >= 0x0A20 && method < 0x0A30) ||
++                    (method >= 0x0A50 && method < 0x0A60) || (method >= 0x0AF0 && method < 0x0B00))
++                goto transform_registers;
 +            break;
 +        }
 +    }
@@ -11371,7 +11527,7 @@ index d7c0f20..0b53b55 100644
      if (xbox_Nv2aNativeFencesEnabled() && subch < 8) {
          if (method == 0) {
              uint32_t instance;
-@@ -3702,8 +4623,34 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -3702,8 +4715,34 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
          extern void xbox_Nv2aAcknowledgeHandshakes(void);
          if (!param)
              return;
@@ -11406,7 +11562,11 @@ index d7c0f20..0b53b55 100644
              /* Deferred: the routine can wait on the GPU (this thread), so the
               * synchronous form deadlocks -- see kernel_bridge. Never dropping it
               * (re-issue until queued, stall on the 0xC-0xE pushbuffer fixups) is
-@@ -3820,6 +4767,7 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -3817,9 +4856,11 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+         s_gpu.window_clip_valid = 1;
+         return;
+     }
++render_state:
      if (method == 0x037C) { s_gpu.shade_mode = param; return; }
      if (method == 0x0300) { s_gpu.alpha_enable = param; return; }
      if (method == 0x033C) { s_gpu.alpha_func = param; return; }
@@ -11414,7 +11574,12 @@ index d7c0f20..0b53b55 100644
      if (method == 0x0340) { s_gpu.alpha_ref = param & 255u; return; }
      if (method == 0x034C) { s_gpu.blend_constant = param; return; }
      if (method == 0x0350) { s_gpu.blend_equation = param; return; }
-@@ -3947,7 +4895,21 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -3943,11 +4984,26 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+         memcpy(&s_gpu.fog_plane[(method - 0x09D0) >> 2], &param, sizeof param);
+         return;
+     }
++texture_stages:
+     if (method >= 0x1B00 && method < 0x1C00 && (method & 63u) >= 0x28u) {
          uint32_t stage = (method - 0x1B00) >> 6;
          uint32_t offset = method & 63u;
          Texture *texture = stage ? &s_gpu.extra_tex[stage - 1] : &s_gpu.tex;
@@ -11437,7 +11602,7 @@ index d7c0f20..0b53b55 100644
          else if (offset == 0x38u) memcpy(&texture->bump_scale, &param, sizeof param);
          else if (offset == 0x3Cu) memcpy(&texture->bump_offset, &param, sizeof param);
          else { note_unhandled(subch, method, param); return; }
-@@ -4018,26 +4980,8 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -4018,28 +5074,11 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
      #endif
          return;
      }
@@ -11465,8 +11630,15 @@ index d7c0f20..0b53b55 100644
 +        vertex_program_upload(method, param);
          return;
      }
++transform_registers:
      if (method >= 0x0A20 && method < 0x0A30) {
-@@ -4096,13 +5040,8 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+         uint32_t component = (method - 0x0A20) >> 2;
+         memcpy(&s_gpu.viewport_offset[component], &param, 4);
+@@ -4093,16 +5132,12 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+                     method, param);
+         return;
+     }
++state_switch:
      switch (method) {
      case NV097_CLEAR_REPORT_VALUE:
      case NV097_SET_ZPASS_PIXEL_COUNT_ENABLE:
@@ -11481,7 +11653,7 @@ index d7c0f20..0b53b55 100644
      case NV097_SET_SURFACE_CLIP_HORIZONTAL:
          s_gpu.clip_x = param & 0xFFFF;
          s_gpu.clip_w = (param >> 16) & 0xFFFF;
-@@ -4253,6 +5192,7 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -4253,6 +5288,7 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
          return;
  
      case NV097_FLIP_STALL:
@@ -11489,7 +11661,7 @@ index d7c0f20..0b53b55 100644
          s_gpu.flush_flip++;
          cloak_marker_idle();
          /* The stall ends when the buffer being read is the one just finished.
-@@ -4276,25 +5216,88 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+@@ -4276,25 +5312,88 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
           * per-frame re-decode of render-to-texture surfaces. */
          if (s_gpu.pitch) {
              extern void xbox_FramebufferWindowPresent(uint32_t, uint32_t);
@@ -11586,7 +11758,7 @@ index d7c0f20..0b53b55 100644
              } else {
                  nv2a_pb_exec_flush();
              }
-@@ -4723,11 +5726,8 @@ void nv2a_pb_exec_report(void)
+@@ -4723,11 +5822,8 @@ void nv2a_pb_exec_report(void)
                  nv_class_name(s_engine_class[i].class_id),
                  s_engine_class[i].count);
  
@@ -11796,7 +11968,7 @@ index 341bcaa..ba0c9dd 100644
      s_get = put_va;
  }
 diff --git a/src/kernel/xbox_memory_layout.c b/src/kernel/xbox_memory_layout.c
-index 4916a66..aa9e58b 100644
+index 4916a66..d4a834e 100644
 --- a/src/kernel/xbox_memory_layout.c
 +++ b/src/kernel/xbox_memory_layout.c
 @@ -203,6 +203,39 @@ static int xbox_TiledAliasMappable(uintptr_t base, size_t tiled_size)
@@ -11851,7 +12023,34 @@ index 4916a66..aa9e58b 100644
  
  /* The display framebuffer, as reported by AvSetDisplayMode. Checksummed once a
   * second so a run can answer the only question that matters before building a
-@@ -1317,7 +1355,7 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+@@ -1106,12 +1144,21 @@ volatile uint32_t *xbox_Nv2aRegisterPointer(uint32_t offset, uint32_t bytes)
+ 
+ void xbox_Nv2aAcknowledgeHandshakes(void)
+ {
++    /* The executor calls this at every packet header: the aperture is
++     * checked once per call, and the table's offsets (all within it, see
++     * xbox_Nv2aRegisterPointer) once per run. */
++    static volatile int offsets_checked;
++    uint8_t *base = (uint8_t *)g_nv2a_memory;
++    if (!offsets_checked || !base) {
++        for (size_t i = 0; i < sizeof(NV2A_ACK) / sizeof(NV2A_ACK[0]); i++)
++            if (!xbox_Nv2aRegisterPointer(NV2A_ACK[i].offset, 4)) {
++                fflush(stderr);
++                _Exit(EXIT_FAILURE);
++            }
++        offsets_checked = 1;
++    }
+     for (size_t i = 0; i < sizeof(NV2A_ACK) / sizeof(NV2A_ACK[0]); i++) {
+-        volatile uint32_t *r = xbox_Nv2aRegisterPointer(NV2A_ACK[i].offset, 4);
+-        if (!r) {
+-            fflush(stderr);
+-            _Exit(EXIT_FAILURE);
+-        }
++        volatile uint32_t *r = (volatile uint32_t *)(base + NV2A_ACK[i].offset);
+         if (*r & NV2A_ACK[i].busy_mask)
+             *r &= ~NV2A_ACK[i].busy_mask;
+     }
+@@ -1317,7 +1364,7 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
                          report_ms = e ? atol(e) : 10000;
                          if (report_ms < 100) report_ms = 100;
                      }
@@ -11860,7 +12059,7 @@ index 4916a66..aa9e58b 100644
                          last_report = now_ms;
                          nv2a_pb_scan_report();
                      }
-@@ -2158,6 +2196,13 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
+@@ -2158,6 +2205,13 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
               * -- the title's first surface write then faults and the screen
               * stays black. */
              0x18000000,             /* 384 MB */
@@ -11874,7 +12073,7 @@ index 4916a66..aa9e58b 100644
              0,                      /* sentinel - let OS choose */
          };
  
-@@ -2251,8 +2296,12 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
+@@ -2251,8 +2305,12 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
          if (tiled_size > XBOX_CONTIG_SIZE)
              tiled_size = XBOX_CONTIG_SIZE;
          const size_t n_bases = sizeof(try_bases) / sizeof(try_bases[0]);
@@ -11889,7 +12088,7 @@ index 4916a66..aa9e58b 100644
              g_memory_base = MapViewOfFileEx(
                  g_mapping_handle,
                  FILE_MAP_ALL_ACCESS,
-@@ -2261,7 +2310,7 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
+@@ -2261,7 +2319,7 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
                  hint            /* desired base address */
              );
              if (g_memory_base) {
@@ -11898,7 +12097,7 @@ index 4916a66..aa9e58b 100644
                      /* OS gave us a different address, retry */
                      UnmapViewOfFile(g_memory_base);
                      g_memory_base = NULL;
-@@ -2281,6 +2330,11 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
+@@ -2281,6 +2339,11 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
                      g_memory_base = NULL;
                      continue;
                  }
@@ -11910,7 +12109,7 @@ index 4916a66..aa9e58b 100644
                  break;
              }
          }
-@@ -2786,10 +2840,15 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
+@@ -2786,10 +2849,15 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
              PAGE_READWRITE
          );
          /* The pushbuffer survey rides on the same poll, so either
@@ -11929,7 +12128,7 @@ index 4916a66..aa9e58b 100644
          if (g_nv2a_memory) {
              fprintf(stderr, "  NV2A register aperture: %u MB at Xbox VA "
                      "0x%08X (zeroed, no register semantics)\n",
-@@ -3588,6 +3647,8 @@ static uint32_t g_contig_next = XBOX_CONTIG_BASE + 0x1000u;
+@@ -3588,6 +3656,8 @@ static uint32_t g_contig_next = XBOX_CONTIG_BASE + 0x1000u;
  static struct { uint32_t addr, size; int free; } g_contig_blocks[CONTIG_MAX_BLOCKS];
  static int g_contig_block_count;
  static SRWLOCK g_contig_lock = SRWLOCK_INIT;
@@ -11938,7 +12137,7 @@ index 4916a66..aa9e58b 100644
  
  static void contig_insert(int at, uint32_t addr, uint32_t size, int is_free)
  {
-@@ -3612,6 +3673,7 @@ uint32_t xbox_ContiguousAlloc(uint32_t size, uint32_t alignment)
+@@ -3612,6 +3682,7 @@ uint32_t xbox_ContiguousAlloc(uint32_t size, uint32_t alignment)
       * provenance queries need to tell a genuine contiguous allocation from an
       * ordinary-RAM numeric collision at all times. */
      AcquireSRWLockExclusive(&g_contig_lock);
@@ -11946,7 +12145,7 @@ index 4916a66..aa9e58b 100644
      size = (size + 4095u) & ~4095u;
      if (size == 0) size = 4096;
  
-@@ -3672,6 +3734,7 @@ int xbox_ContiguousFree(uint32_t addr)
+@@ -3672,6 +3743,7 @@ int xbox_ContiguousFree(uint32_t addr)
      if (!xbox_HeapReclaimEnabled())
          return 0;
      AcquireSRWLockExclusive(&g_contig_lock);
@@ -11954,7 +12153,7 @@ index 4916a66..aa9e58b 100644
      for (i = 0; i < g_contig_block_count; i++) {
          if (g_contig_blocks[i].addr != addr || g_contig_blocks[i].free)
              continue;
-@@ -3752,8 +3815,24 @@ static int contig_block_at(uint32_t off, uint32_t *start_off, uint32_t *size)
+@@ -3752,8 +3824,24 @@ static int contig_block_at(uint32_t off, uint32_t *start_off, uint32_t *size)
      int i, found = 0;
      int it = 0;
  
@@ -11979,7 +12178,7 @@ index 4916a66..aa9e58b 100644
      for (i = 0; i < g_contig_block_count; i++) {
          uint32_t s;
          it++;
-@@ -3764,6 +3843,7 @@ static int contig_block_at(uint32_t off, uint32_t *start_off, uint32_t *size)
+@@ -3764,6 +3852,7 @@ static int contig_block_at(uint32_t off, uint32_t *start_off, uint32_t *size)
              if (start_off) *start_off = s;
              if (size)      *size = g_contig_blocks[i].size;
              found = 1;
@@ -11987,35 +12186,82 @@ index 4916a66..aa9e58b 100644
              break;
          }
      }
-@@ -3812,8 +3892,25 @@ int xbox_ContiguousOwnsHead(uint32_t offset)
+@@ -3810,10 +3899,72 @@ int xbox_ContiguousOwnsHead(uint32_t offset)
+     return found;
+ }
  
++/* Whether window offset `off` lies in a live block, and the largest range
++ * around it with the same answer: the block itself, or the gap between the
++ * live blocks on either side. */
++static int contig_classify(uint32_t off, uint32_t *lo, uint32_t *hi)
++{
++    uint32_t gap_lo = 0, gap_hi = CONTIG_ARENA_BYTES;
++    int i, found = 0;
++    AcquireSRWLockShared(&g_contig_lock);
++    g_cba_calls++;
++    for (i = 0; i < g_contig_block_count; i++) {
++        uint32_t s, e;
++        if (g_contig_blocks[i].free)
++            continue;
++        s = g_contig_blocks[i].addr - XBOX_CONTIG_BASE;
++        e = s + g_contig_blocks[i].size;
++        if (off >= s && off < e) {
++            gap_lo = s;
++            gap_hi = e;
++            found = 1;
++            break;
++        }
++        if (e <= off && e > gap_lo) gap_lo = e;
++        if (s > off && s < gap_hi) gap_hi = s;
++    }
++    g_cba_iters += (unsigned)(i + (i < g_contig_block_count));
++    ReleaseSRWLockShared(&g_contig_lock);
++    *lo = gap_lo;
++    *hi = gap_hi;
++    return found;
++}
++
  int xbox_ContigOwnsOffset(uint64_t physical)
  {
 -    return (physical < CONTIG_ARENA_BYTES)
 -        ? contig_block_at((uint32_t)physical, NULL, NULL) : 0;
 +    /* The GPU executor asks this for every vertex array and texture it
-+     * binds, mostly about the same few blocks: the last block found, kept
-+     * per thread, answers without the lock until any allocation or free
-+     * (g_contig_generation) could have changed it. */
++     * binds, about a few dozen blocks a frame and as many offsets outside
++     * any block (ordinary RAM). The answers, kept per thread with the range
++     * each holds for, stand until any allocation or free
++     * (g_contig_generation) could have changed them; a one-entry cache of
++     * owned blocks still left the executor scanning the table for most of
++     * them. The generation is read before the table, so a change in between
++     * only leaves the entry already stale. */
++    enum { OWN_CACHE = 16 };
 +    static __declspec(thread) LONG cached_generation = -1;
-+    static __declspec(thread) uint32_t cached_start, cached_end;
-+    uint32_t start, size;
++    static __declspec(thread) struct { uint32_t lo, hi; int owned; } cached[OWN_CACHE];
++    static __declspec(thread) unsigned cached_count, cached_next;
++    uint32_t off = (uint32_t)physical, lo, hi;
++    unsigned k;
 +    LONG generation;
++    int owned;
 +    if (physical >= CONTIG_ARENA_BYTES)
 +        return 0;
-+    generation = InterlockedCompareExchange(&g_contig_generation, 0, 0);
-+    if (generation == cached_generation && (uint32_t)physical >= cached_start && (uint32_t)physical < cached_end)
-+        return 1;
-+    if (!contig_block_at((uint32_t)physical, &start, &size))
-+        return 0;
-+    cached_generation = generation;
-+    cached_start = start;
-+    cached_end = start + size;
-+    return 1;
++    generation = g_contig_generation;
++    if (generation != cached_generation) {
++        cached_generation = generation;
++        cached_count = cached_next = 0;
++    }
++    for (k = 0; k < cached_count; k++)
++        if (off >= cached[k].lo && off < cached[k].hi)
++            return cached[k].owned;
++    owned = contig_classify(off, &lo, &hi);
++    k = cached_next++ % OWN_CACHE;
++    cached[k].lo = lo;
++    cached[k].hi = hi;
++    cached[k].owned = owned;
++    if (cached_count < OWN_CACHE) cached_count++;
++    return owned;
  }
  
  /* Pages the APU actually wrote through the redirect (clash diagnostic). */
-@@ -4017,6 +4114,22 @@ uint8_t *xbox_ApuPhysicalPointer(uint64_t physical, uint32_t bytes)
+@@ -4017,6 +4168,22 @@ uint8_t *xbox_ApuPhysicalPointer(uint64_t physical, uint32_t bytes)
      return xbox_DmaPhysicalPointer(physical, bytes);
  }
  

@@ -568,7 +568,10 @@ saves the kept weapons with your progress as it saves any weapon. Saved as
   opens at the chosen shape.
 - **Loading screens** stay up at least 3 seconds (`RECOMP_LOADING_HOLD_MS`,
   0 for none): levels load here in under a second, so the chapter picture
-  and its text otherwise flash past.
+  and its text otherwise flash past. The game redraws its loading screen
+  every 0.2 s; here it is redrawn at the display's rate (up to 125 frames a
+  second), with the spinner still turning at the Xbox's pace
+  (`RECOMP_LOADING_REDRAW=0` for the Xbox's 5 frames a second).
 - **Frame limit**: the game steps by a measured clock (`sub_00028B40`), so it
   runs at the right speed at any rate. The front end stays at 60, as its
   movies are paced by the vertical blank. The aim wobble of scoped weapons
@@ -792,10 +795,43 @@ fps. The three native ones were checked over 30 million calls with no
 difference; the lifted ones from RAM snapshots, the only differences being
 counters other threads advance meanwhile.
 
+A third round (2026-11-25): twenty more lifted the same way, now that
+`tools/x86_lift.py` also handles switch tables, indirect calls, integer x87
+loads and stores, division and the x87 transcendentals -- the culling chain
+(`sub_000200C0`..`sub_000223F0`), animation and skinning (`sub_000725F0`,
+`sub_0008DD10`, `sub_0008E1D0`), the scene's mesh and actor walks
+(`sub_000E8260`, `sub_000EE850`, `sub_000EEB10`, `sub_00032230`,
+`sub_0003CFB0`) and others, together over 40% of the game thread. At 480p
+the test scene went from about 195 to 245 fps; the GPU command executor,
+not the game thread, is now the limit there. The RAM-snapshot check
+(`RECOMP_LIFT_VERIFY`) found no more differences between the lifted and
+generated code than between the generated code and itself
+(`RECOMP_LIFT_VERIFY_SELF=1`).
+
+The executor was then made cheaper (in xboxrecomp): index lists, inline
+vertices and vertex-program and constant uploads are taken a packet at a
+time instead of a word at a time; the frequent state methods (the
+constant-load cursor alone is a quarter of them) jump straight to their
+handlers instead of passing a hundred-odd tests first; the per-draw scans of
+the vertex program are kept until a program word is loaded; and the check of
+whether an address is contiguous memory keeps sixteen answers, for gaps
+between blocks as well as for blocks, instead of scanning the block table
+for most of them. The test scene at 480p went from 245 to 275-290 fps, and
+the game thread is the limit again; at 2160p (about 120 fps) the graphics
+card is.
+
+Three more were lifted after that, the last of the busy ones the lifter had
+refused: the actor draw (`sub_000448D0`), its distance fade
+(`sub_0003C9E0`, which returns its factor on the x87 stack, as does a
+virtual call inside it, and runs under the draw distance setting's
+override) and an animation channel decoder (`sub_00076760`, whose square
+roots are scalar SSE). 27 in all; the test scene at 480p is at about 298
+fps, against 182 with `RECOMP_NATIVE_LIFTED=0`.
+
 | Variable | What it does |
 |----------|--------------|
 | `RECOMP_NATIVE=0` | Runs the generated code for all of them (`run_original_code.bat`), to tell whether one is behind a problem |
-| `RECOMP_NATIVE_ANIM=0`, `RECOMP_NATIVE_MATRIX4=0`, `RECOMP_NATIVE_LIGHTING=0`, `RECOMP_NATIVE_LEAF=0` (the three native leaves), `RECOMP_NATIVE_LIFTED=0` (the four lifted ones) | The same for one |
+| `RECOMP_NATIVE_ANIM=0`, `RECOMP_NATIVE_MATRIX4=0`, `RECOMP_NATIVE_LIGHTING=0`, `RECOMP_NATIVE_LEAF=0` (the three native leaves), `RECOMP_NATIVE_LIFTED=0` (the 27 lifted ones) | The same for one |
 | `RECOMP_ANIM_VERIFY=1`, `RECOMP_MATRIX_VERIFY=1` (also the native leaves), `RECOMP_LIGHTING_VERIFY=<n>`, `RECOMP_LIFT_VERIFY=<n>` (the lifted leaves) | Run both and report any difference (lighting and lifted leaves: every nth call, from guest RAM snapshots; `RECOMP_LIGHTING_VERIFY_AFTER=<s>` starts it later, `RECOMP_LIGHTING_TRACE=1` with the traced copies from `tools/lift_trace.py` names the first differing block and store) |
 
 Useful while debugging:

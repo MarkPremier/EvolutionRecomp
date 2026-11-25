@@ -29,6 +29,8 @@ NL_INLINE uint32_t L16(uint32_t a) { uint16_t v; memcpy(&v, NL_P(a), 2); return 
 NL_INLINE uint32_t L8(uint32_t a) { return *NL_P(a); }
 NL_INLINE float LF(uint32_t a) { float v; memcpy(&v, NL_P(a), 4); return v; }
 NL_INLINE double LD(uint32_t a) { double v; memcpy(&v, NL_P(a), 8); return v; }
+NL_INLINE int64_t LI64(uint32_t a) { int64_t v; memcpy(&v, NL_P(a), 8); return v; }
+NL_INLINE void SI64(uint32_t a, int64_t v) { memcpy(NL_P(a), &v, 8); }
 NL_INLINE void S32(uint32_t a, uint32_t v) { memcpy(NL_P(a), &v, 4); }
 NL_INLINE void S16(uint32_t a, uint32_t v) { uint16_t w = (uint16_t)v; memcpy(NL_P(a), &w, 2); }
 NL_INLINE void S8(uint32_t a, uint32_t v) { *NL_P(a) = (uint8_t)v; }
@@ -37,6 +39,15 @@ NL_INLINE void SD(uint32_t a, double v) { memcpy(NL_P(a), &v, 8); }
 /* the same, never traced (rep stos) */
 NL_INLINE void S32N(uint32_t a, uint32_t v) { memcpy(NL_P(a), &v, 4); }
 NL_INLINE void S8N(uint32_t a, uint32_t v) { *NL_P(a) = (uint8_t)v; }
+
+/* An indirect call, as the generated code makes it (RECOMP_ICALL_SAFE_AT),
+ * with the registers already in the globals. */
+static __inline void nl_icall(uint32_t va, uint32_t saved_esp, uint32_t site)
+{
+#define eax g_eax
+    RECOMP_ICALL_SAFE_AT(va, saved_esp, site);
+#undef eax
+}
 
 #define PC(x) (pc24 ? recomp_fp_round24(x) : (double)(x))
 #define FCMP_CC(a, b) RECOMP_FCMP_CC(RECOMP_FCMP((a), (b)))
