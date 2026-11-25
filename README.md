@@ -575,13 +575,20 @@ saves the kept weapons with your progress as it saves any weapon. Saved as
 - **Loading screens** stay up at least 3 seconds (`RECOMP_LOADING_HOLD_MS`,
   0 for none): levels load here in under a second, so the chapter picture
   and its text otherwise flash past. The game redraws its loading screen
-  every 0.2 s; here it is redrawn at the display's rate (up to 125 frames a
-  second), with the spinner still turning at the Xbox's pace
-  (`RECOMP_LOADING_REDRAW=0` for the Xbox's 5 frames a second). The
-  loader's longest stretch without a tick, building the level's vertex
-  shaders with XGraphics (`sub_001ABF4D`, a dozen at 5-17 ms each), held one
-  frame for 130-150 ms; a tick is now made between those builds when a frame
-  is due, with the guest's registers and FPU state put back afterwards.
+  every 0.2 s; a level's is redrawn here at up to the display's rate (125
+  frames a second at most), with the spinner still turning at the Xbox's pace
+  (`RECOMP_LOADING_REDRAW=0` for the Xbox's 5 frames a second). Each redraw
+  waits for the display and the loader ticks after every file, so redraws
+  get at most half of the loader's time (the next is due no sooner after the
+  last ended than that one took); front end screens, which are not held and
+  tick some 600 times in half a second, keep the Xbox's 0.2 s (redrawing
+  each of those ticks had made them take 4-10 s). The loader's longest
+  stretch without a tick, building the level's vertex shaders with XGraphics
+  (`sub_001ABF4D`, a dozen at 5-17 ms each), held one frame for 130-150 ms; a
+  tick is now made between those builds when a redraw is due, on the
+  loader's own thread, with the guest's registers and FPU state put back
+  afterwards. `RECOMP_LOADING_LOG=1` prints how long each loading screen was
+  up.
 - **Frame limit**: the game steps by a measured clock (`sub_00028B40`), so it
   runs at the right speed at any rate. The front end stays at 60, as its
   movies are paced by the vertical blank. The aim wobble of scoped weapons
@@ -838,6 +845,18 @@ override) and an animation channel decoder (`sub_00076760`, whose square
 roots are scalar SSE). 27 in all; the test scene at 480p is at about 298
 fps, against 182 with `RECOMP_NATIVE_LIFTED=0`.
 
+A fourth round lifted the next thirty by time on the game thread, among
+them the in-view test's fallback (`sub_00021A90`), the update-distance
+check (`sub_0003B110`) and the three earlier hand-written leaves
+(`sub_00015DE0`, `sub_0017F940`, `sub_0001A980`), whose lifted bodies are
+faster than the hand-written ones (those still run with
+`RECOMP_NATIVE_LIFTED=0`). The ones with a wrapper of their own call the
+lifted body through `sub_X_lifted`. `sub_00089580` stays generated (it
+returns with four values on the x87 stack). 57 lifted; the test scene at
+480p went from about 298 to 330 fps (195 with `RECOMP_NATIVE_LIFTED=0`).
+`RECOMP_LIFT_VERIFY` found no difference beyond what the generated code
+shows against itself (`RECOMP_LIFT_VERIFY_SELF=1`).
+
 At 2160p the graphics card is the limit, and nearly all of its time went on
 shading the foliage's pixels, about eleven layers deep: every pixel writes
 its own depth (the NV2A's rounding, polygon offset and depth range), which
@@ -854,7 +873,7 @@ scene at 2160p went from 122 to 185 fps (210 to 295 with 3D width "screen";
 | Variable | What it does |
 |----------|--------------|
 | `RECOMP_NATIVE=0` | Runs the generated code for all of them (`run_original_code.bat`), to tell whether one is behind a problem |
-| `RECOMP_NATIVE_ANIM=0`, `RECOMP_NATIVE_MATRIX4=0`, `RECOMP_NATIVE_LIGHTING=0`, `RECOMP_NATIVE_LEAF=0` (the three native leaves), `RECOMP_NATIVE_LIFTED=0` (the 27 lifted ones) | The same for one |
+| `RECOMP_NATIVE_ANIM=0`, `RECOMP_NATIVE_MATRIX4=0`, `RECOMP_NATIVE_LIGHTING=0`, `RECOMP_NATIVE_LEAF=0` (the three native leaves), `RECOMP_NATIVE_LIFTED=0` (the 57 lifted ones) | The same for one |
 | `RECOMP_ANIM_VERIFY=1`, `RECOMP_MATRIX_VERIFY=1` (also the native leaves), `RECOMP_LIGHTING_VERIFY=<n>`, `RECOMP_LIFT_VERIFY=<n>` (the lifted leaves) | Run both and report any difference (lighting and lifted leaves: every nth call, from guest RAM snapshots; `RECOMP_LIGHTING_VERIFY_AFTER=<s>` starts it later, `RECOMP_LIGHTING_TRACE=1` with the traced copies from `tools/lift_trace.py` names the first differing block and store) |
 
 Useful while debugging:

@@ -1945,6 +1945,8 @@ static int in_view(uint32_t camera, uint32_t point, uint32_t axes)
 /* RECOMP_CULL_STATS=1 reports how many tests were settled here;
  * RECOMP_CULL_VERIFY=1 also runs the original for every one and counts the
  * answers that differ. */
+int sub_00021A90_lifted(void);
+
 void sub_00021A90(void)
 {
     static int stats = -1, verify;
@@ -1962,7 +1964,7 @@ void sub_00021A90(void)
     }
     if (answer < 0 || verify) {
         s_cull_widen++;
-        sub_00021A90_gen();
+        if (verify || !sub_00021A90_lifted()) sub_00021A90_gen();
         s_cull_widen--;
         if (answer < 0) passed++;
         else { settled++; if ((int)g_eax != answer) differ++; }
@@ -2076,6 +2078,7 @@ extern void sub_000FFDE0_gen(void);
 void sub_000FFDE0(void);
 extern __declspec(thread) uint32_t g_edx;
 __declspec(dllimport) void __stdcall Sleep(unsigned long milliseconds);
+__declspec(dllimport) unsigned long __stdcall GetCurrentThreadId(void);
 static clock_t s_loading_since;     /* when the screen went up; 0 when down */
 
 static long loading_hold_ms(void)
@@ -2107,40 +2110,58 @@ static long loading_shown_ms(void)
     return (long)((clock() - s_loading_since) * 1000 / CLOCKS_PER_SEC);
 }
 
-static clock_t s_loading_drawn, s_loading_spun;   /* the last redraw, the last spinner step */
+static clock_t s_loading_drawn, s_loading_spun;   /* when the last redraw ended, the last spinner step */
+static clock_t s_loading_cost;                    /* how long that redraw took */
+static int s_loading_holding;                     /* in the hold (sub_000FFF20): nothing else to do */
 
 void sub_000FFA00(void)
 {
     if (!*(volatile uint8_t *)((uintptr_t)g_ecx + 0xB0u + g_xbox_mem_offset)) {
         s_loading_since = clock() | 1;
-        s_loading_drawn = s_loading_spun = 0;
+        s_loading_drawn = s_loading_spun = s_loading_cost = 0;
     }
     sub_000FFA00_gen();
 }
 
 /* The tick, from the loader between its reads and from the hold below. It
  * draws once its time passes 0.2 s ([0x24E1B0] against [0x209400]): given
- * the time whenever 8 ms have gone by, it draws at up to 125 frames a second
- * (each waits for the display's next refresh), with the spinner -- the tick
- * stores its next frame in [0x257E74] -- kept on its frame until the Xbox's
- * 0.2 s have gone by. A load that draws more takes a little longer, inside
- * the hold. */
+ * the time whenever a redraw is due, it draws at up to 125 frames a second,
+ * with the spinner -- the tick stores its next frame in [0x257E74] -- kept on
+ * its frame until the Xbox's 0.2 s have gone by.
+ *
+ * Only a level's loading screen, which is held to RECOMP_LOADING_HOLD_MS
+ * anyway, and with the redraws given at most half of the loader's time: the
+ * next one is due no sooner after the last one ended than that one took
+ * (8 ms at least). A draw waits for the display's next refresh, and the
+ * loader ticks after every file: a front end screen ticks ~600 times in its
+ * half second, and drawing each of those made it 4-10 s. Front end screens
+ * draw every 0.2 s, as on the Xbox. */
 static uint32_t s_tick_this;      /* the loading screen the loader last ticked */
 static clock_t s_tick_seen;       /* when it did */
+static unsigned long s_tick_thread; /* and on which thread */
 static int s_tick_between;        /* inside loading_tick_between's tick */
+
+static int loading_redraw_due(clock_t now)
+{
+    clock_t gap = CLOCKS_PER_SEC / 125;
+    if (!s_level_loading || !loading_redraw()) return 0;
+    if (!s_loading_holding && s_loading_cost > gap) gap = s_loading_cost;
+    return !s_loading_drawn || now - s_loading_drawn >= gap;
+}
 
 void sub_000FFDE0(void)
 {
+    clock_t forced = 0;
     if (s_loading_since && !s_tick_between) {
         s_tick_this = g_ecx;
         s_tick_seen = clock() | 1;
+        s_tick_thread = GetCurrentThreadId();
     }
-    if (s_loading_since && loading_redraw() &&
-            *(volatile uint8_t *)((uintptr_t)g_ecx + 0xB0u + g_xbox_mem_offset)) {
+    if (s_loading_since && *(volatile uint8_t *)((uintptr_t)g_ecx + 0xB0u + g_xbox_mem_offset)) {
         clock_t now = clock();
-        if (!s_loading_drawn || now - s_loading_drawn >= CLOCKS_PER_SEC / 125) {
+        if (loading_redraw_due(now)) {
             static const double due = 1.0;
-            s_loading_drawn = now | 1;
+            forced = now | 1;
             if (!s_loading_spun || now - s_loading_spun >= CLOCKS_PER_SEC / 5)
                 s_loading_spun = now | 1;
             else if (TUROK_MEM32(0x257E2Cu) && TUROK_MEM32(0x257E74u))
@@ -2149,6 +2170,11 @@ void sub_000FFDE0(void)
         }
     }
     sub_000FFDE0_gen();
+    if (forced) {
+        clock_t end = clock();
+        s_loading_cost = end - forced;
+        s_loading_drawn = end | 1;
+    }
 }
 
 /* The generated code's XMM register type (recomp_types.h, same guard). */
@@ -2175,15 +2201,15 @@ extern __declspec(thread) uint16_t g_fp_cc;
  * while the loader itself is ticking (within the last half second), on the
  * screen it ticks, and with everything of the guest's put back afterwards:
  * the registers, the published frame, the x87 stack and its control word,
- * the XMM registers and the direction flag. RECOMP_LOADING_REDRAW=0: not
- * at all, as the redraw. */
+ * the XMM registers and the direction flag. Only when a redraw is due (above);
+ * RECOMP_LOADING_REDRAW=0: not at all. */
 static void loading_tick_between(void)
 {
     clock_t now;
-    if (!s_loading_since || !s_tick_this || s_tick_between || !loading_redraw()) return;
+    if (!s_loading_since || !s_tick_this || s_tick_between) return;
     now = clock();
-    if (now - s_tick_seen > CLOCKS_PER_SEC / 2) return;
-    if (s_loading_drawn && now - s_loading_drawn < CLOCKS_PER_SEC / 125) return;
+    if (now - s_tick_seen > CLOCKS_PER_SEC / 2 || GetCurrentThreadId() != s_tick_thread) return;
+    if (!loading_redraw_due(now)) return;
     if (!*(volatile uint8_t *)((uintptr_t)s_tick_this + 0xB0u + g_xbox_mem_offset)) return;
     {
         uint32_t eax = g_eax, ecx = g_ecx, edx = g_edx, ebx = g_ebx, esi = g_esi, edi = g_edi, esp = g_esp;
@@ -2222,6 +2248,7 @@ void sub_000FFF20(void)
             *(volatile uint8_t *)((uintptr_t)self + 0xB0u + g_xbox_mem_offset)) {
         fprintf(stderr, "[TUROK] level loaded in %ld ms; loading screen held to %ld ms%s\n",
                 loading_shown_ms(), loading_hold_ms(), loading_redraw() ? ", redrawn each frame" : "");
+        s_loading_holding = 1;
         while (loading_shown_ms() < loading_hold_ms()) {
             uint32_t eax = g_eax, edx = g_edx, esp = g_esp;
             g_esp -= 4;
@@ -2231,7 +2258,10 @@ void sub_000FFF20(void)
             g_eax = eax; g_edx = edx; g_esp = esp;
             Sleep(1);
         }
+        s_loading_holding = 0;
     }
+    if (s_loading_since && getenv("RECOMP_LOADING_LOG"))
+        fprintf(stderr, "[TUROK] loading screen up %ld ms\n", loading_shown_ms());
     s_loading_since = 0;
     s_level_loading = 0;
     g_ecx = self;
@@ -2324,6 +2354,7 @@ void sub_0003C9E0(void)
  * Butterflies are the FlyingIndigenousAI (vtable 0x21A240) with
  * FlyingPerturb (+0x7F8) 3: no bird, dragonfly or pteranodon has it. */
 extern void sub_0003B110_gen(void);
+int sub_0003B110_lifted(void);
 
 static int wildlife_vtable(uint32_t table)
 {
@@ -2345,7 +2376,7 @@ void sub_0003B110(void)
 
     if (!visible_always && (scale == 1.0f || table != FLYING_INDIGENOUS_AI_VTABLE ||
         TUROK_MEM32(actor + 0x7F8u) != 3u)) {
-        sub_0003B110_gen();
+        if (!sub_0003B110_lifted()) sub_0003B110_gen();
         /* Name any other class seen frozen on screen, once each, so the
          * next report of a frozen creature says what it is. */
         if (drawn && !g_eax) {
@@ -5228,8 +5259,10 @@ static void matrix44_context(void *c) { uint32_t *a = c; matrix44_native(a[0], a
 static void box_context(void *c) { uint32_t *a = c; box_transform_native(a[0], a[1], a[2], a[3]); }
 static void total_context(void *c) { uint32_t *a = c; running_total_native(a[0], a[1]); }
 
+int sub_00015DE0_lifted(void);
 void sub_00015DE0(void)
 {
+    if (sub_00015DE0_lifted()) return;   /* the lifted body, when there is one */
     uint32_t args[3] = {TUROK_MEM32(g_esp + 4u), TUROK_MEM32(g_esp + 8u), TUROK_MEM32(g_esp + 12u)};
     if (!leaf_native()) { sub_00015DE0_gen(); return; }
     if (leaf_verify()) {
@@ -5241,8 +5274,10 @@ void sub_00015DE0(void)
     g_esp += 4u;   /* ret */
 }
 
+int sub_0017F940_lifted(void);
 void sub_0017F940(void)
 {
+    if (sub_0017F940_lifted()) return;   /* the lifted body, when there is one */
     uint32_t args[4] = {TUROK_MEM32(g_esp + 4u), TUROK_MEM32(g_esp + 8u), TUROK_MEM32(g_esp + 12u), g_esp + 8u};
     if (!leaf_native()) { sub_0017F940_gen(); return; }
     if (leaf_verify()) {
@@ -5254,8 +5289,10 @@ void sub_0017F940(void)
     g_esp += 4u;   /* ret */
 }
 
+int sub_0001A980_lifted(void);
 void sub_0001A980(void)
 {
+    if (sub_0001A980_lifted()) return;   /* the lifted body, when there is one */
     uint32_t args[2] = {TUROK_MEM32(g_esp + 4u), g_esp + 8u};
     if (!leaf_native()) { sub_0001A980_gen(); return; }
     if (leaf_verify()) {
@@ -5605,6 +5642,259 @@ LIFTED_LEAF(000E80F0)
 LIFTED_LEAF(00082F70)
 LIFTED_LEAF(00076760)
 LIFTED_LEAF(000448D0)
+
+/* A fourth round, the next thirty by time on the game thread (see "Lifted
+ * leaves" above; start, end and the float-returning callees as before):
+ *   0x00047470 0x000485D7 cf0c0=1   0x0001FFB0 0x0002002A
+ *   0x000ED070 0x000ED15D            0x000B5EE0 0x000B62B9
+ *   0x00044460 0x00044577            0x0001A7C0 0x0001A812
+ *   0x000382B0 0x0003847C            0x00016000 0x00016030
+ *   0x00070D90 0x00070DED            0x000D0100 0x000D0235 cf6b0=1
+ *   0x00038580 0x000385D1            0x000EEE60 0x000EEED2
+ *   0x0001BE80 0x0001BFAA            0x0002FCB0 0x0002FD0A
+ *   0x00069940 0x00069A43            0x00035330 0x00035375
+ *   0x00022D30 0x00022D55            0x000671F0 0x00067354
+ *   0x000712B0 0x00071759            0x0003D2C0 0x0003D3EF
+ *   0x0003CF30 0x0003CFA7            0x00051940 0x000519AE
+ *   0x000387B0 0x000387EB cf0c0=1   0x00088F00 0x00088F32
+ *   0x000F3410 0x000F356D
+ * and five that have a wrapper here, which calls sub_X_lifted:
+ *   0x00021A90 0x000223E8 (the in-view test's fallback), 0x0003B110
+ *   0x0003B1A7 (update distance), and the three hand-written leaves above,
+ *   0x00015DE0 0x00015FF4, 0x0017F940 0x0017FA9B, 0x0001A980 0x0001A9D9,
+ *   whose lifted bodies are faster (the hand-written ones still run with
+ *   RECOMP_NATIVE_LIFTED=0). sub_00089580 stays generated: it returns with
+ *   four values on the x87 stack. */
+#ifdef RECOMP_HAVE_LIFTED_00047470
+extern void sub_00047470_native(void);
+#define LIFTED_NATIVE_00047470 sub_00047470_native
+#else
+#define LIFTED_NATIVE_00047470 NULL
+#endif
+#ifdef RECOMP_HAVE_LIFTED_0001FFB0
+extern void sub_0001FFB0_native(void);
+#define LIFTED_NATIVE_0001FFB0 sub_0001FFB0_native
+#else
+#define LIFTED_NATIVE_0001FFB0 NULL
+#endif
+#ifdef RECOMP_HAVE_LIFTED_000ED070
+extern void sub_000ED070_native(void);
+#define LIFTED_NATIVE_000ED070 sub_000ED070_native
+#else
+#define LIFTED_NATIVE_000ED070 NULL
+#endif
+#ifdef RECOMP_HAVE_LIFTED_000B5EE0
+extern void sub_000B5EE0_native(void);
+#define LIFTED_NATIVE_000B5EE0 sub_000B5EE0_native
+#else
+#define LIFTED_NATIVE_000B5EE0 NULL
+#endif
+#ifdef RECOMP_HAVE_LIFTED_00044460
+extern void sub_00044460_native(void);
+#define LIFTED_NATIVE_00044460 sub_00044460_native
+#else
+#define LIFTED_NATIVE_00044460 NULL
+#endif
+#ifdef RECOMP_HAVE_LIFTED_0001A7C0
+extern void sub_0001A7C0_native(void);
+#define LIFTED_NATIVE_0001A7C0 sub_0001A7C0_native
+#else
+#define LIFTED_NATIVE_0001A7C0 NULL
+#endif
+#ifdef RECOMP_HAVE_LIFTED_000382B0
+extern void sub_000382B0_native(void);
+#define LIFTED_NATIVE_000382B0 sub_000382B0_native
+#else
+#define LIFTED_NATIVE_000382B0 NULL
+#endif
+#ifdef RECOMP_HAVE_LIFTED_00016000
+extern void sub_00016000_native(void);
+#define LIFTED_NATIVE_00016000 sub_00016000_native
+#else
+#define LIFTED_NATIVE_00016000 NULL
+#endif
+#ifdef RECOMP_HAVE_LIFTED_00070D90
+extern void sub_00070D90_native(void);
+#define LIFTED_NATIVE_00070D90 sub_00070D90_native
+#else
+#define LIFTED_NATIVE_00070D90 NULL
+#endif
+#ifdef RECOMP_HAVE_LIFTED_000D0100
+extern void sub_000D0100_native(void);
+#define LIFTED_NATIVE_000D0100 sub_000D0100_native
+#else
+#define LIFTED_NATIVE_000D0100 NULL
+#endif
+#ifdef RECOMP_HAVE_LIFTED_00038580
+extern void sub_00038580_native(void);
+#define LIFTED_NATIVE_00038580 sub_00038580_native
+#else
+#define LIFTED_NATIVE_00038580 NULL
+#endif
+#ifdef RECOMP_HAVE_LIFTED_000EEE60
+extern void sub_000EEE60_native(void);
+#define LIFTED_NATIVE_000EEE60 sub_000EEE60_native
+#else
+#define LIFTED_NATIVE_000EEE60 NULL
+#endif
+#ifdef RECOMP_HAVE_LIFTED_0001BE80
+extern void sub_0001BE80_native(void);
+#define LIFTED_NATIVE_0001BE80 sub_0001BE80_native
+#else
+#define LIFTED_NATIVE_0001BE80 NULL
+#endif
+#ifdef RECOMP_HAVE_LIFTED_0002FCB0
+extern void sub_0002FCB0_native(void);
+#define LIFTED_NATIVE_0002FCB0 sub_0002FCB0_native
+#else
+#define LIFTED_NATIVE_0002FCB0 NULL
+#endif
+#ifdef RECOMP_HAVE_LIFTED_00069940
+extern void sub_00069940_native(void);
+#define LIFTED_NATIVE_00069940 sub_00069940_native
+#else
+#define LIFTED_NATIVE_00069940 NULL
+#endif
+#ifdef RECOMP_HAVE_LIFTED_00035330
+extern void sub_00035330_native(void);
+#define LIFTED_NATIVE_00035330 sub_00035330_native
+#else
+#define LIFTED_NATIVE_00035330 NULL
+#endif
+#ifdef RECOMP_HAVE_LIFTED_00022D30
+extern void sub_00022D30_native(void);
+#define LIFTED_NATIVE_00022D30 sub_00022D30_native
+#else
+#define LIFTED_NATIVE_00022D30 NULL
+#endif
+#ifdef RECOMP_HAVE_LIFTED_000671F0
+extern void sub_000671F0_native(void);
+#define LIFTED_NATIVE_000671F0 sub_000671F0_native
+#else
+#define LIFTED_NATIVE_000671F0 NULL
+#endif
+#ifdef RECOMP_HAVE_LIFTED_000712B0
+extern void sub_000712B0_native(void);
+#define LIFTED_NATIVE_000712B0 sub_000712B0_native
+#else
+#define LIFTED_NATIVE_000712B0 NULL
+#endif
+#ifdef RECOMP_HAVE_LIFTED_0003D2C0
+extern void sub_0003D2C0_native(void);
+#define LIFTED_NATIVE_0003D2C0 sub_0003D2C0_native
+#else
+#define LIFTED_NATIVE_0003D2C0 NULL
+#endif
+#ifdef RECOMP_HAVE_LIFTED_0003CF30
+extern void sub_0003CF30_native(void);
+#define LIFTED_NATIVE_0003CF30 sub_0003CF30_native
+#else
+#define LIFTED_NATIVE_0003CF30 NULL
+#endif
+#ifdef RECOMP_HAVE_LIFTED_00051940
+extern void sub_00051940_native(void);
+#define LIFTED_NATIVE_00051940 sub_00051940_native
+#else
+#define LIFTED_NATIVE_00051940 NULL
+#endif
+#ifdef RECOMP_HAVE_LIFTED_000387B0
+extern void sub_000387B0_native(void);
+#define LIFTED_NATIVE_000387B0 sub_000387B0_native
+#else
+#define LIFTED_NATIVE_000387B0 NULL
+#endif
+#ifdef RECOMP_HAVE_LIFTED_00088F00
+extern void sub_00088F00_native(void);
+#define LIFTED_NATIVE_00088F00 sub_00088F00_native
+#else
+#define LIFTED_NATIVE_00088F00 NULL
+#endif
+#ifdef RECOMP_HAVE_LIFTED_000F3410
+extern void sub_000F3410_native(void);
+#define LIFTED_NATIVE_000F3410 sub_000F3410_native
+#else
+#define LIFTED_NATIVE_000F3410 NULL
+#endif
+#ifdef RECOMP_HAVE_LIFTED_00021A90
+extern void sub_00021A90_native(void);
+#define LIFTED_NATIVE_00021A90 sub_00021A90_native
+#else
+#define LIFTED_NATIVE_00021A90 NULL
+#endif
+#ifdef RECOMP_HAVE_LIFTED_0003B110
+extern void sub_0003B110_native(void);
+#define LIFTED_NATIVE_0003B110 sub_0003B110_native
+#else
+#define LIFTED_NATIVE_0003B110 NULL
+#endif
+#ifdef RECOMP_HAVE_LIFTED_0017F940
+extern void sub_0017F940_native(void);
+#define LIFTED_NATIVE_0017F940 sub_0017F940_native
+#else
+#define LIFTED_NATIVE_0017F940 NULL
+#endif
+#ifdef RECOMP_HAVE_LIFTED_0001A980
+extern void sub_0001A980_native(void);
+#define LIFTED_NATIVE_0001A980 sub_0001A980_native
+#else
+#define LIFTED_NATIVE_0001A980 NULL
+#endif
+#ifdef RECOMP_HAVE_LIFTED_00015DE0
+extern void sub_00015DE0_native(void);
+#define LIFTED_NATIVE_00015DE0 sub_00015DE0_native
+#else
+#define LIFTED_NATIVE_00015DE0 NULL
+#endif
+LIFTED_LEAF(00047470)
+LIFTED_LEAF(0001FFB0)
+LIFTED_LEAF(000ED070)
+LIFTED_LEAF(000B5EE0)
+LIFTED_LEAF(00044460)
+LIFTED_LEAF(0001A7C0)
+LIFTED_LEAF(000382B0)
+LIFTED_LEAF(00016000)
+LIFTED_LEAF(00070D90)
+LIFTED_LEAF(000D0100)
+LIFTED_LEAF(00038580)
+LIFTED_LEAF(000EEE60)
+LIFTED_LEAF(0001BE80)
+LIFTED_LEAF(0002FCB0)
+LIFTED_LEAF(00069940)
+LIFTED_LEAF(00035330)
+LIFTED_LEAF(00022D30)
+LIFTED_LEAF(000671F0)
+LIFTED_LEAF(000712B0)
+LIFTED_LEAF(0003D2C0)
+LIFTED_LEAF(0003CF30)
+LIFTED_LEAF(00051940)
+LIFTED_LEAF(000387B0)
+LIFTED_LEAF(00088F00)
+LIFTED_LEAF(000F3410)
+
+/* Functions with a hand-written wrapper: the wrapper calls sub_X_lifted,
+ * which runs the lifted body and returns 1, or returns 0 when there is
+ * none or RECOMP_NATIVE_LIFTED=0 (the wrapper then does as before). */
+static int lifted_enabled(void)
+{
+    static int on = -1;
+    if (on < 0) on = native_enabled("RECOMP_NATIVE_LIFTED");
+    return on;
+}
+
+#define LIFTED_WRAPPED(addr)                                                                 \
+    int sub_##addr##_lifted(void)                                                            \
+    {                                                                                        \
+        static unsigned calls;                                                               \
+        void (*native)(void) = LIFTED_NATIVE_##addr;                                         \
+        if (!native || !lifted_enabled()) return 0;                                          \
+        lifted_run("sub_" #addr, native, sub_##addr##_gen, &calls);                          \
+        return 1;                                                                            \
+    }
+LIFTED_WRAPPED(00021A90)
+LIFTED_WRAPPED(0003B110)
+LIFTED_WRAPPED(0017F940)
+LIFTED_WRAPPED(0001A980)
+LIFTED_WRAPPED(00015DE0)
 
 /* Not a LIFTED_LEAF: sub_0003C9E0 itself is the draw distance override. */
 extern void sub_0003C9E0_gen(void);

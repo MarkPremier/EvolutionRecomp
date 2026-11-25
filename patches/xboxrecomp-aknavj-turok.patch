@@ -941,7 +941,7 @@ index 342f1f8..287570d 100644
      struct {
          int current_entry;
 diff --git a/src/apu/apu_vp.c b/src/apu/apu_vp.c
-index 7c36737..e60cfa1 100644
+index 7c36737..9ccc968 100644
 --- a/src/apu/apu_vp.c
 +++ b/src/apu/apu_vp.c
 @@ -54,26 +54,45 @@ static void set_notify_status(MCPXAPUState *d, uint32_t v, int notifier,
@@ -1576,7 +1576,17 @@ index 7c36737..e60cfa1 100644
      (void)voice_list;
  }
  
-@@ -1240,16 +1429,136 @@ void mcpx_apu_vp_frame(MCPXAPUState *d,
+@@ -1223,6 +1412,9 @@ static void voice_process(MCPXAPUState *d,
+ void mcpx_apu_vp_frame(MCPXAPUState *d,
+                         float mixbins[NUM_MIXBINS][NUM_SAMPLES_PER_FRAME])
+ {
++    static uint32_t idle_reported[MCPX_HW_MAX_VOICES], idle_serial;   /* when each was last reported idle */
++    int idle_pick = -1;
++
+     memset(d->vp.sample_buf, 0, sizeof(d->vp.sample_buf));
+ 
+     for (int list = 0; list < 3; list++) {
+@@ -1240,20 +1432,160 @@ void mcpx_apu_vp_frame(MCPXAPUState *d,
              }
  
              uint16_t v = (uint16_t)d->regs[current];
@@ -1700,7 +1710,8 @@ index 7c36737..e60cfa1 100644
 +                static uint16_t locked_idle_frames[MCPX_HW_MAX_VOICES];
 +                if (!locked_now) {
 +                    locked_idle_frames[v] = 0;
-+                    fe_method(d, SE2FE_IDLE_VOICE, v);
++                    if (idle_pick < 0 || idle_reported[v] < idle_reported[idle_pick])
++                        idle_pick = v;   /* reported after the walk (below) */
 +                } else if (++locked_idle_frames[v] == 188) {
 +                    static unsigned reported;
 +                    if (reported++ < 16)
@@ -1715,7 +1726,30 @@ index 7c36737..e60cfa1 100644
              d->regs[current] = d->regs[next];
          }
      }
-@@ -1275,13 +1584,12 @@ void mcpx_apu_vp_frame(MCPXAPUState *d,
+ 
++    /* One idle voice is reported a frame, through the front end's trap: the
++     * one reported least recently, checked again under its guard. Hardware
++     * stops on each idle voice's trap until the ISR resumes it and then goes
++     * on down the list, so every idle voice is reported. Taking the first in
++     * the list each frame instead starved the rest behind one DirectSound
++     * leaves linked -- a stereo stream's other half, whose report it ignores
++     * -- and the title's wait for the voice it stopped (sub_001B404B) ran to
++     * its 5 s timeout: Turok Evolution's New Game, after the start press. */
++    if (idle_pick >= 0 && (d->regs[NV_PAPU_FECTL] & NV_PAPU_FECTL_FEMETHMODE) != NV_PAPU_FECTL_FEMETHMODE_TRAPPED) {
++        uint16_t v = (uint16_t)idle_pick;
++        qemu_mutex_lock(&d->vp.voice_guard[v]);
++        if (!is_voice_locked(d, v) &&
++            !voice_get_mask(d, v, NV_PAVS_VOICE_PAR_STATE, NV_PAVS_VOICE_PAR_STATE_ACTIVE_VOICE)) {
++            idle_reported[v] = ++idle_serial;
++            fe_method(d, SE2FE_IDLE_VOICE, v);
++        }
++        qemu_mutex_unlock(&d->vp.voice_guard[v]);
++    }
++
+     /* VP monitor output */
+     if (d->monitor.point == MCPX_APU_DEBUG_MON_VP) {
+         int16_t isamp[NUM_SAMPLES_PER_FRAME * 2];
+@@ -1275,13 +1607,12 @@ void mcpx_apu_vp_frame(MCPXAPUState *d,
  
  void mcpx_apu_vp_init(MCPXAPUState *d)
  {
@@ -13634,3 +13668,54 @@ index 0650472..1fb1119 100644
  void xbox_Nv2aFrameCounterFlip(void) {}
  
  typedef struct TestVertex {
+diff --git a/tools/recomp/manual_scan.py b/tools/recomp/manual_scan.py
+index b74a7c7..585af56 100644
+--- a/tools/recomp/manual_scan.py
++++ b/tools/recomp/manual_scan.py
+@@ -21,6 +21,10 @@ _SUB_DEF_RE = re.compile(r"^void (sub_([0-9A-Fa-f]{8}))\(void\)\s*(?:\{|$)", re.
+ # recomp_manual.c wraps rather than replaces some functions: it defines sub_X
+ # itself and calls the generated body as sub_X_gen.
+ _WRAP_RE = re.compile(r"^extern void (sub_([0-9A-Fa-f]{8}))_gen\(void\);", re.M)
++# A macro wrapper, LIFTED_LEAF(XXXXXXXX): it expands to an `extern void
++# sub_X_gen(void);` and a `void sub_X(void)` definition that the regexes above
++# cannot see through the token pasting, so it counts as both.
++_LIFTED_RE = re.compile(r"^LIFTED_LEAF\(([0-9A-Fa-f]{8})\)", re.M)
+ 
+ 
+ def strip_disabled(src):
+@@ -89,4 +93,5 @@ def scan(path):
+     skip = {int(m.group(2), 16) for m in _SUB_DEF_RE.finditer(live)}
+     wrap = {int(m.group(2), 16) for m in _WRAP_RE.finditer(live)}
+     referenced = {int(m.group(1), 16) for m in _REF_RE.finditer(live)}
+-    return skip, wrap, referenced
++    lifted = {int(m.group(1), 16) for m in _LIFTED_RE.finditer(live)}
++    return skip | lifted, wrap | lifted, referenced | lifted
+diff --git a/tools/recomp/test_manual_scan.py b/tools/recomp/test_manual_scan.py
+index db6ed27..86a4022 100644
+--- a/tools/recomp/test_manual_scan.py
++++ b/tools/recomp/test_manual_scan.py
+@@ -53,7 +53,11 @@ static void *tbl[] = { sub_00055000 };
+ #if 0
+ /* Disabled override kept as documentation -- must NOT count as defined. */
+ void sub_00066000(void) { nothing(); }
++LIFTED_LEAF(00088000)
+ #endif
++
++/* A macro wrapper: defines sub_00077000 and calls sub_00077000_gen. */
++LIFTED_LEAF(00077000)
+ """
+ 
+ 
+@@ -68,9 +72,9 @@ def test_scan_partitions_correctly():
+     with tempfile.TemporaryDirectory() as tmp:
+         skip, wrap, ref = scan(_write(tmp))
+     # defined by hand (incl. the wrapper's own sub_X definition)
+-    assert skip == {0x11000, 0x22000, 0x44000}, [hex(a) for a in sorted(skip)]
+-    # wrapped
+-    assert wrap == {0x44000}, [hex(a) for a in sorted(wrap)]
++    assert skip == {0x11000, 0x22000, 0x44000, 0x77000}, [hex(a) for a in sorted(skip)]
++    # wrapped (LIFTED_LEAF too; not the one inside #if 0)
++    assert wrap == {0x44000, 0x77000}, [hex(a) for a in sorted(wrap)]
+     # every sub_ the file mentions at all
+     assert {0x11000, 0x22000, 0x33000, 0x44000, 0x55000} <= ref, \
+         [hex(a) for a in sorted(ref)]
