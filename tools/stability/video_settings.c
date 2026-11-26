@@ -24,6 +24,11 @@ int main(void)
     assert(in_game_text(SET_SCENE_WIDTH));
     assert(k_settings[SET_LOD_RANGE].count == 4 && k_settings[SET_LOD_RANGE].fallback == 0);
     assert(in_game_text(SET_LOD_RANGE));
+    /* Character lighting: per vertex by default, as the console. */
+    assert(k_settings[SET_LIGHTING].count == 2 && k_settings[SET_LIGHTING].fallback == 0);
+    assert(value_index(SET_LIGHTING, "original") == 0 && value_index(SET_LIGHTING, "Per Pixel") == 1);
+    assert(value_index(SET_LIGHTING, "all") < 0);
+    assert(in_game_text(SET_LIGHTING) && text_label(SET_LIGHTING) == GAME_TEXT_LIGHTING);
     assert(value_index(SET_HEAT_HAZE, "original") == 1);
     assert(value_index(SET_HEAT_HAZE, "smooth") == 2);
     assert(value_index(SET_HEAT_HAZE, "sharp") == 2);
@@ -52,6 +57,8 @@ int main(void)
     assert(value_index(SET_CUTSCENES, "original") == 0 && value_index(SET_CUTSCENES, "wide") == 1);
     video_settings_level("D:\\Data\\Levels\\Pod-12-S-City-Defend-Escape\\sc-12-a.atr");
     assert(shadow_indoor);
+    video_settings_level("D:\\Data\\Levels\\Pod-05-Stealth-Entrance\\StealthPart1\\StealthPart1.atr");
+    assert(shadow_indoor && !video_settings_indoor_level());   /* the fade, with outdoor reach */
     video_settings_level("D:\\Data\\Levels\\Pod-01-Through-The-Jungle\\pod01_03_ttjungle.atr");
     assert(!shadow_indoor);
     puts("PASS: Enhanced+ has a distinct saved value and menu text, and indoor state follows level changes");

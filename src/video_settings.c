@@ -62,6 +62,7 @@ extern void nv2a_gpu_set_taa(int on);
 extern void nv2a_gpu_set_shadow_scale(int factor);
 extern void nv2a_gpu_set_shadow_mode(int mode);
 extern void nv2a_gpu_set_shadow_indoor(int indoor);
+extern void nv2a_gpu_set_pixel_lighting(int mode);
 extern void nv2a_gpu_allow_dlaa(int allowed);
 extern void nv2a_gpu_set_scene_width(int screen);
 
@@ -72,7 +73,7 @@ extern void nv2a_gpu_set_scene_width(int screen);
  * text). */
 enum { SET_RESOLUTION, SET_ASPECT, SET_CUTSCENES, SET_DISPLAY, SET_VSYNC, SET_FRAMES, SET_ANISOTROPY, SET_MSAA, SET_FOLIAGE_AA,
        SET_TAA, SET_SCENE_WIDTH, SET_DRAW_DISTANCE, SET_LOD_RANGE,
-       SET_HEAT_HAZE, SET_SHADOWS, SET_ICONS,
+       SET_HEAT_HAZE, SET_SHADOWS, SET_LIGHTING, SET_ICONS,
        SET_MOUSE_LOOK, SET_MOUSE_SPEED, SET_FLIGHT_MOUSE, SET_FLIGHT_SPEED, SET_FLIGHT_INVERT,
        SET_CONTROLLER_AIM, SET_LADDER_FREELOOK, SET_LOOK_LIMIT, SET_CLUB_HOLD, SET_KEEP_WEAPONS,
        SET_AUDIO_OUTPUT, SETTING_COUNT };
@@ -110,6 +111,14 @@ static const char *const k_hazes[] = {"off", "xbox", "enhanced", "gamecube"};
 /* The renderer's API retains its older mode numbers. */
 static const int k_haze_modes[] = {3, 0, 2, 4};
 static const char *const k_shadow_modes[] = {"xbox", "enhanced", "enhanced+"};
+/* Character lighting: the game lights its models per vertex, so a
+ * low-polygon character's arms and head share a few values that jump
+ * together as it moves or a light comes into range (issue #34). "per pixel"
+ * lights creatures and people per pixel -- the GPU runs the game's own
+ * lighting program for each pixel (nv2a_gpu_set_pixel_lighting). Not the
+ * scenery: its lights were placed for per-vertex lighting, and per pixel a
+ * light's pool ended partway across a wall, at half the frame rate. */
+static const char *const k_lightings[] = {"original", "per pixel"};
 static const char *const k_icons[] = {"xbox", "pc"};
 static const char *const k_mouse_looks[] = {"stick", "raw"};
 static const char *const k_controller_aims[] = {"original", "modern"};
@@ -161,6 +170,7 @@ static const VideoSetting k_settings[SETTING_COUNT] = {
     {"lod_range", "lod range", k_lod_ranges, COUNT(k_lod_ranges), 0},
     {"heat_haze", "heat haze", k_hazes, COUNT(k_hazes), 2},
     {"shadows", "shadows", k_shadow_modes, COUNT(k_shadow_modes), 1},
+    {"character_lighting", "character lighting", k_lightings, COUNT(k_lightings), 0},
     {"button_icons", "button icons", k_icons, COUNT(k_icons), 0},
     {"mouse_look", "mouse look", k_mouse_looks, COUNT(k_mouse_looks), 1},
     {"mouse_speed", "mouse speed", k_speeds, COUNT(k_speeds), 4},
@@ -861,6 +871,7 @@ static int values_of(int setting)
 #define GAME_TEXT_WEAPONS 54     /* PC Controls' weapon rows' labels, 54 to 63 */
 #define GAME_TEXT_CUTSCENES 64   /* after the weapon labels */
 #define GAME_TEXT_LOD_RANGE 67   /* after Cutscenes' two values */
+#define GAME_TEXT_LIGHTING 72    /* after LOD range's four */
 
 static int in_game_text(int setting)
 {
@@ -868,7 +879,7 @@ static int in_game_text(int setting)
            setting == SET_KEEP_WEAPONS || setting == SET_FOLIAGE_AA || setting == SET_TAA ||
            setting == SET_LOOK_LIMIT || setting == SET_CLUB_HOLD || setting == SET_AUDIO_OUTPUT ||
            setting == SET_HEAT_HAZE || setting == SET_SCENE_WIDTH || setting == SET_CUTSCENES ||
-           setting == SET_LOD_RANGE;
+           setting == SET_LOD_RANGE || setting == SET_LIGHTING;
 }
 
 static int text_label(int setting)
@@ -887,6 +898,7 @@ static int text_label(int setting)
     if (setting == SET_SCENE_WIDTH) return GAME_TEXT_SCENE_WIDTH;
     if (setting == SET_CUTSCENES) return GAME_TEXT_CUTSCENES;
     if (setting == SET_LOD_RANGE) return GAME_TEXT_LOD_RANGE;
+    if (setting == SET_LIGHTING) return GAME_TEXT_LIGHTING;
     for (s = 0; s < setting; s++)
         if (!in_game_text(s)) key += 1 + (values_of(s) == s ? k_settings[s].count : 0);
     return key;
@@ -2601,6 +2613,8 @@ static void apply_setting(int setting)
         nv2a_gpu_set_shadow_scale(s_values[SET_SHADOWS] ? 4 : 1);
         nv2a_gpu_set_shadow_mode(s_values[SET_SHADOWS]);
         break;
+    case SET_LIGHTING: nv2a_gpu_set_pixel_lighting(s_values[SET_LIGHTING]);
+        break;
     case SET_ICONS: nv2a_gpu_set_texture_replacements(s_values[SET_ICONS]); break;
     case SET_MOUSE_LOOK: xbox_KbmSetRawMouse(s_values[SET_MOUSE_LOOK]); s_mouse_raw = s_values[SET_MOUSE_LOOK]; break;
     case SET_DRAW_DISTANCE:           /* read each frame */
@@ -2772,9 +2786,13 @@ float video_settings_take_mouse_turn(int axis)
  * being removed -- the stealth level's alarms, generators that open doors
  * once their spawns are gone -- and kept bodies softlocked it.) */
 static int s_flying_level;
-/* Indoors (the base interiors of pods 05 and 06, Sleg City's pods 10-12): a
- * room under a roof is all in shadow, so the shadow map's edge beside the
- * player shows there (recomp_manual.c, sub_0001FD20). */
+/* Indoors (the base interiors of pod 06, Sleg City's pods 10-12): a room
+ * under a roof is all in shadow, so the shadow map's edge beside the player
+ * shows there (recomp_manual.c, sub_0001FD20), and the shadow reaches 32
+ * units around the player, not 12. Pod 05, the infiltration, is outdoors
+ * but has walkways above the ground, so Enhanced+ fades shadow spill below
+ * them there too (nv2a_gpu_set_shadow_indoor: the balcony fade) while the
+ * reach stays outdoor. */
 static int s_indoor_level;
 
 void video_settings_level(const char *path)
@@ -2785,8 +2803,8 @@ void video_settings_level(const char *path)
         lower[n] = (char)(path[n] >= 'A' && path[n] <= 'Z' ? path[n] + 32 : path[n]);
     lower[n] = 0;
     s_flying_level = strstr(lower, "-flight") != NULL;
-    s_indoor_level = strstr(lower, "\\pod-05-") || strstr(lower, "\\pod-06-") || strstr(lower, "-s-city-");
-    nv2a_gpu_set_shadow_indoor(s_indoor_level);
+    s_indoor_level = strstr(lower, "\\pod-06-") || strstr(lower, "-s-city-");
+    nv2a_gpu_set_shadow_indoor(s_indoor_level || strstr(lower, "\\pod-05-") != NULL);
     if (s_indoor_level) fprintf(stderr, "[VIDEO] indoor level: shadows reach further around the player\n");
 }
 
@@ -3806,6 +3824,7 @@ void video_settings_start(const char *game_dir)
         apply_setting(SET_SCENE_WIDTH);   /* likewise */
     apply_setting(SET_SHADOWS);   /* its map scale and exact depth (else only when changed) */
     apply_setting(SET_HEAT_HAZE); /* apply the saved haze mode before the first frame */
+    apply_setting(SET_LIGHTING);
     apply_setting(SET_ICONS);
     apply_setting(SET_MOUSE_LOOK);
     apply_bindings();
