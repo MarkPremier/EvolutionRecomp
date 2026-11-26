@@ -111,14 +111,16 @@ static const char *const k_hazes[] = {"off", "xbox", "enhanced", "gamecube"};
 /* The renderer's API retains its older mode numbers. */
 static const int k_haze_modes[] = {3, 0, 2, 4};
 static const char *const k_shadow_modes[] = {"xbox", "enhanced", "enhanced+"};
-/* Character lighting: the game lights its models per vertex, so a
+/* PPL, per-pixel lighting: the game lights its models per vertex, so a
  * low-polygon character's arms and head share a few values that jump
- * together as it moves or a light comes into range (issue #34). "per pixel"
+ * together as it moves or a light comes into range (issue #34). "on"
  * lights creatures and people per pixel -- the GPU runs the game's own
  * lighting program for each pixel (nv2a_gpu_set_pixel_lighting). Not the
  * scenery: its lights were placed for per-vertex lighting, and per pixel a
- * light's pool ended partway across a wall, at half the frame rate. */
-static const char *const k_lightings[] = {"original", "per pixel"};
+ * light's pool ended partway across a wall, at half the frame rate. (Beta
+ * v0.7.42 called it Character lighting, original / per pixel: still read;
+ * the longer name ran into its value in the menu.) */
+static const char *const k_lightings[] = {"off", "on"};
 static const char *const k_icons[] = {"xbox", "pc"};
 static const char *const k_mouse_looks[] = {"stick", "raw"};
 static const char *const k_controller_aims[] = {"original", "modern"};
@@ -170,7 +172,7 @@ static const VideoSetting k_settings[SETTING_COUNT] = {
     {"lod_range", "lod range", k_lod_ranges, COUNT(k_lod_ranges), 0},
     {"heat_haze", "heat haze", k_hazes, COUNT(k_hazes), 2},
     {"shadows", "shadows", k_shadow_modes, COUNT(k_shadow_modes), 1},
-    {"character_lighting", "character lighting", k_lightings, COUNT(k_lightings), 0},
+    {"per_pixel_lighting", "ppl", k_lightings, COUNT(k_lightings), 0},
     {"button_icons", "button icons", k_icons, COUNT(k_icons), 0},
     {"mouse_look", "mouse look", k_mouse_looks, COUNT(k_mouse_looks), 1},
     {"mouse_speed", "mouse speed", k_speeds, COUNT(k_speeds), 4},
@@ -342,6 +344,10 @@ static int value_index(int setting, const char *text)
         if (!_stricmp(text, "original")) return 1;
         if (!_stricmp(text, "smooth") || !_stricmp(text, "sharp")) return 2;
     }
+    if (setting == SET_LIGHTING && text) {   /* Beta v0.7.42's values */
+        if (!_stricmp(text, "original")) return 0;
+        if (!_stricmp(text, "per pixel")) return 1;
+    }
     for (v = 0; text && v < k_settings[setting].count; v++)
         if (!_stricmp(text, k_settings[setting].values[v])) return v;
     return -1;
@@ -387,6 +393,9 @@ void video_settings_load(void)
         /* 3D width was DLAA width ("dlaa_width") at first. */
         if (!*text && s == SET_SCENE_WIDTH)
             GetPrivateProfileStringA("video", "dlaa_width", "", text, sizeof text, s_ini_path);
+        /* PPL was Character lighting ("character_lighting") in Beta v0.7.42. */
+        if (!*text && s == SET_LIGHTING)
+            GetPrivateProfileStringA("video", "character_lighting", "", text, sizeof text, s_ini_path);
         s_values[s] = value_index(s, text);
         /* Files from before the values were words. */
         if (s_values[s] < 0 && *text && s == SET_RESOLUTION) s_values[s] = resolution_from_scale(text);

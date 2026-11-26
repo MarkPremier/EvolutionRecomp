@@ -24,9 +24,11 @@ int main(void)
     assert(in_game_text(SET_SCENE_WIDTH));
     assert(k_settings[SET_LOD_RANGE].count == 4 && k_settings[SET_LOD_RANGE].fallback == 0);
     assert(in_game_text(SET_LOD_RANGE));
-    /* Character lighting: per vertex by default, as the console. */
+    /* PPL: per vertex by default, as the console; Beta v0.7.42's values read. */
     assert(k_settings[SET_LIGHTING].count == 2 && k_settings[SET_LIGHTING].fallback == 0);
+    assert(value_index(SET_LIGHTING, "off") == 0 && value_index(SET_LIGHTING, "On") == 1);
     assert(value_index(SET_LIGHTING, "original") == 0 && value_index(SET_LIGHTING, "Per Pixel") == 1);
+    assert(strlen(k_settings[SET_LIGHTING].label) <= 15);
     assert(value_index(SET_LIGHTING, "all") < 0);
     assert(in_game_text(SET_LIGHTING) && text_label(SET_LIGHTING) == GAME_TEXT_LIGHTING);
     assert(value_index(SET_HEAT_HAZE, "original") == 1);
