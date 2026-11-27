@@ -1,5 +1,8 @@
 # EvolutionRecomp
 
+The local `linux-native` port is documented in [LINUX.md](LINUX.md). The
+release behavior and performance figures below describe the Windows build.
+
 A static recompilation of **Turok: Evolution** (Xbox, USA) to native Windows,
 built with the xboxrecomp toolkit
 ([sp00nznet/xboxrecomp](https://github.com/sp00nznet/xboxrecomp), with the

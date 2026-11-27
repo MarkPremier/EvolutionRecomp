@@ -11,6 +11,9 @@ cmake_minimum_required(VERSION 3.20)
 # ============================================================================
 
 project(turok_evolution C)
+if(XBOXRECOMP_GPU_NATIVE AND NOT WIN32)
+    enable_language(CXX)
+endif()
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -68,12 +71,17 @@ set(GAME_SOURCES
     src/recomp_manual.c
     src/d3d_wait.c
     src/vy_watch.c
-    src/video_settings.c
     src/game_files.c
     # Add game-specific sources here, e.g.:
     # src/asset_loader.c
     # src/custom_renderer.c
 )
+
+if(WIN32)
+    list(APPEND GAME_SOURCES src/video_settings.c)
+else()
+    list(APPEND GAME_SOURCES src/video_settings_cpu.c)
+endif()
 
 # The recomp pipeline also generates a dispatch header and function declarations.
 # These are included by the generated .c files:
@@ -125,17 +133,23 @@ target_include_directories(${PROJECT_NAME} PRIVATE
     ${XBOXRECOMP_DIR}/include
 )
 
-# Windows SDK libraries needed at link time
-target_link_libraries(${PROJECT_NAME} PRIVATE
-    d3d11
-    dxgi
-    dxguid
-    $<IF:$<BOOL:${MINGW}>,xinput1_4,xinput>   # see src/input/CMakeLists.txt
-    winmm
-    # Lets the fault handler resolve the host RIP back to the generated
-    # function's symbol, i.e. to the guest function that faulted.
-    dbghelp
-)
+if(WIN32)
+    # Windows SDK libraries needed at link time
+    target_link_libraries(${PROJECT_NAME} PRIVATE
+        d3d11
+        dxgi
+        dxguid
+        $<IF:$<BOOL:${MINGW}>,xinput1_4,xinput>   # see src/input/CMakeLists.txt
+        winmm
+        # Lets the fault handler resolve the host RIP back to the generated
+        # function's symbol, i.e. to the guest function that faulted.
+        dbghelp
+    )
+else()
+    find_package(OpenSSL REQUIRED)
+    target_link_libraries(${PROJECT_NAME} PRIVATE ${CMAKE_DL_LIBS} m OpenSSL::Crypto)
+    set_target_properties(${PROJECT_NAME} PROPERTIES ENABLE_EXPORTS ON)
+endif()
 
 # MSVC-specific: large address aware, increase section limit for big generated files
 if(MSVC)

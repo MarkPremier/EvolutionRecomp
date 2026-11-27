@@ -24,7 +24,18 @@
 #include <stdlib.h>   /* getenv */
 #include <string.h>
 #include <math.h>     /* shadow light camera angle */
-#include <intrin.h>   /* _mm_mfence */
+#ifdef _WIN32
+#include <intrin.h>
+#else
+#include <emmintrin.h>
+#include "platform/xbox_winnt.h"
+#endif
+
+#if defined(_MSC_VER)
+#define RECOMP_TLS __declspec(thread)
+#else
+#define RECOMP_TLS _Thread_local
+#endif
 
 /* ── ICALL trace ring buffer ───────────────────────────────── */
 
@@ -50,7 +61,7 @@ typedef void (*recomp_func_t)(void);
 
 /* ── Register state (defined in xbox_memory_layout.c) ──────── */
 
-extern __declspec(thread) uint32_t g_eax;   /* thread-local, like the whole register file */
+extern RECOMP_TLS uint32_t g_eax;   /* thread-local, like the whole register file */
 extern ptrdiff_t g_xbox_mem_offset;
 
 /* The D3D fence-wait wrapper and fence-rescue thread from main are not
@@ -61,7 +72,7 @@ extern ptrdiff_t g_xbox_mem_offset;
 #define TUROK_D3D_DEVICE_PTR   0x001A1AD0u
 
 /* Thread-local like the rest of the register file; see main.c. */
-extern __declspec(thread) uint32_t g_esp;
+extern RECOMP_TLS uint32_t g_esp;
 
 /* ── D3D GetVisibilityTestResult (sub_00194B40) ────────────── */
 
@@ -114,7 +125,7 @@ void sub_00194B40(void)
  * NULL and the process dies (most often when a level is quit and every voice
  * is released at once). An unowned handle has nothing to unlink: ignore it.
  */
-extern __declspec(thread) uint32_t g_ecx;
+extern RECOMP_TLS uint32_t g_ecx;
 extern void sub_001B23DD_gen(void);
 typedef struct MCPXAPUState MCPXAPUState;
 extern MCPXAPUState *g_apu_state;
@@ -190,7 +201,7 @@ void sub_001B22DA(void)
  * still gets its notification. Anything else is unlinked (without writing
  * into the object) and skipped. */
 extern void sub_001AE520_gen(void);
-extern __declspec(thread) uint32_t g_edi, g_esi;
+extern RECOMP_TLS uint32_t g_edi, g_esi;
 
 static int dsound_voice_ok(uint32_t ds, uint32_t obj)
 {
@@ -499,7 +510,7 @@ extern void sub_000F21B0_gen(void);
  * flushed from the brush (the birds that burst up at the start of the first
  * level) always cast theirs, however high they climb. Flying enemies
  * (FlyingEnemyAI) always cast. RECOMP_SHADOW_BIRDS=1: every bird does. */
-extern __declspec(thread) uint32_t g_esi;
+extern RECOMP_TLS uint32_t g_esi;
 #define FLYING_INDIGENOUS_AI_VTABLE 0x0021A240u
 
 /* A bird sitting in the brush is a "Ground" type (BirdForm +0x7F0 0, its
@@ -755,7 +766,7 @@ void sub_00085370(void)
 #define AIM_WOBBLE_RATE   60.0f
 #define GAME_TIMER_PTR    0x00250A84u
 
-static __declspec(thread) int s_wobble_held;   /* sub_00122CD0's wobble is not due */
+static RECOMP_TLS int s_wobble_held;   /* sub_00122CD0's wobble is not due */
 
 #define AIM_WOBBLE_CLOCKS 64u
 static struct { uint32_t self; float owed[4]; } s_wobble_clocks[AIM_WOBBLE_CLOCKS];
@@ -863,7 +874,7 @@ static float frame_seconds(void);   /* the game's frame time, below */
 #define ENEMY_FIRE_CLOCKS 256u
 
 static struct { uint32_t self; float owed; } s_fire_clocks[ENEMY_FIRE_CLOCKS];
-static __declspec(thread) int s_fly_fire_held;   /* this frame's toss is not due */
+static RECOMP_TLS int s_fly_fire_held;   /* this frame's toss is not due */
 
 static int enemy_fire_due(uint32_t self)
 {
@@ -1231,7 +1242,7 @@ void sub_000966F0(void)
 extern void sub_00096EE0_gen(void);
 extern void sub_000B98D0_gen(void);
 extern void sub_000B9700_gen(void);
-extern __declspec(thread) uint32_t g_edx;
+extern RECOMP_TLS uint32_t g_edx;
 recomp_func_t recomp_lookup(uint32_t xbox_va);
 recomp_func_t recomp_lookup_manual(uint32_t xbox_va);
 
@@ -1826,7 +1837,7 @@ extern void sub_00022590_gen(void);
 void sub_00021740(void) { s_cull_widen++; sub_00021740_gen(); s_cull_widen--; }
 void sub_00021860(void) { s_cull_widen++; sub_00021860_gen(); s_cull_widen--; }
 void sub_00022590(void) { s_cull_widen++; sub_00022590_gen(); s_cull_widen--; }
-extern __declspec(thread) uint16_t g_fp_control_word;
+extern RECOMP_TLS uint16_t g_fp_control_word;
 
 /* One x87 operation's result as the generated code rounds it: to float
  * while the control word asks for single precision (as D3D leaves it), else
@@ -2076,9 +2087,11 @@ extern void sub_000FFA00_gen(void);
 extern void sub_000FFF20_gen(void);
 extern void sub_000FFDE0_gen(void);
 void sub_000FFDE0(void);
-extern __declspec(thread) uint32_t g_edx;
+extern RECOMP_TLS uint32_t g_edx;
+#ifdef _WIN32
 __declspec(dllimport) void __stdcall Sleep(unsigned long milliseconds);
 __declspec(dllimport) unsigned long __stdcall GetCurrentThreadId(void);
+#endif
 static clock_t s_loading_since;     /* when the screen went up; 0 when down */
 
 static long loading_hold_ms(void)
@@ -2188,11 +2201,11 @@ typedef union RecompXmm {
     uint64_t q[2];
 } RecompXmm;
 #endif
-extern __declspec(thread) RecompXmm g_xmm0, g_xmm1, g_xmm2, g_xmm3, g_xmm4, g_xmm5, g_xmm6, g_xmm7;
-extern __declspec(thread) uint32_t g_ebx, g_esi, g_edi, g_ebp, g_seh_ebp;
-extern __declspec(thread) int g_fp_top, g_df;
-extern __declspec(thread) double g_fp_stack[8];
-extern __declspec(thread) uint16_t g_fp_cc;
+extern RECOMP_TLS RecompXmm g_xmm0, g_xmm1, g_xmm2, g_xmm3, g_xmm4, g_xmm5, g_xmm6, g_xmm7;
+extern RECOMP_TLS uint32_t g_ebx, g_esi, g_edi, g_ebp, g_seh_ebp;
+extern RECOMP_TLS int g_fp_top, g_df;
+extern RECOMP_TLS double g_fp_stack[8];
+extern RECOMP_TLS uint16_t g_fp_cc;
 
 /* The loader's longest stretch without a tick builds the level's shaders
  * (XGraphics, sub_001ABF4D, 5-17 ms each), a dozen at a time: 130-150 ms
@@ -2311,7 +2324,7 @@ void sub_0002F580(void)
  * A_MDD, where it is gone (grass and plants: 15 to 25 units), 0 for no limit.
  * For the draw distance setting the two are scaled while the fade is worked
  * out, then put back. */
-extern __declspec(thread) uint32_t g_esi;
+extern RECOMP_TLS uint32_t g_esi;
 /* the body: lifted or generated (the "Lifted leaves" section below) */
 void sub_0003C9E0_lifted(void);
 
@@ -2733,7 +2746,7 @@ void recomp_unimpl(const char *text, uint32_t va)
  * and the blocked turn left the ship tumbling in every direction. A path's
  * own orientation is not something collision should bend: for that caller
  * the turn is taken as given. RECOMP_PATH_TURN_DIRECT=0 turns this off. */
-void sub_00042450_gen(void);
+extern void sub_00042450_gen(void);
 void sub_00042450(void)
 {
     static int direct = -1;
@@ -2997,7 +3010,7 @@ void sub_00080EE0(void)
 extern void sub_00160760_gen(void);
 extern void sub_0015FDA0(void);
 extern void sub_001605A0(void);
-extern __declspec(thread) uint32_t g_eax, g_edx, g_esp;
+extern RECOMP_TLS uint32_t g_eax, g_edx, g_esp;
 
 /* Weapon IDs per key, '1' to '9' then '0' (the table at 0x24B790): 1 War
  * Club, 2 Bow, 3 Tek Bow, 4 Spiked Mine, 5 Pistol, 6 Shotgun, 7 Minigun,
@@ -3308,7 +3321,7 @@ void sub_0015F400(void)
  * (sub_0003F380). At 60 fps and below nothing changes. */
 extern void sub_00144B90_gen(void);
 extern void sub_0003F380(void);
-extern __declspec(thread) uint32_t g_eax, g_edx, g_esp;
+extern RECOMP_TLS uint32_t g_eax, g_edx, g_esp;
 
 static float frame_seconds(void)
 {
@@ -3696,7 +3709,7 @@ void sub_00149BE0(void)
  * RECOMP_MATRIX_VERIFY=1 runs the original after it and reports any
  * difference. */
 extern void sub_000E7570_gen(void);
-extern __declspec(thread) uint32_t g_eax, g_edx;
+extern RECOMP_TLS uint32_t g_eax, g_edx;
 
 static double mx_round(double x)
 {
@@ -4158,10 +4171,10 @@ static int native_enabled(const char *own)
 extern void sub_00036D00_gen(void);
 #ifdef RECOMP_HAVE_LIFTED_LIGHTING
 extern void sub_00036D00_native(void);
-extern __declspec(thread) uint32_t g_ebx, g_esi, g_edi, g_seh_ebp;
-extern __declspec(thread) int g_fp_top;
-extern __declspec(thread) double g_fp_stack[8];
-extern __declspec(thread) uint16_t g_fp_cc;
+extern RECOMP_TLS uint32_t g_ebx, g_esi, g_edi, g_seh_ebp;
+extern RECOMP_TLS int g_fp_top;
+extern RECOMP_TLS double g_fp_stack[8];
+extern RECOMP_TLS uint16_t g_fp_cc;
 
 #define LIGHTING_RAM (64u << 20)
 
@@ -4912,9 +4925,9 @@ void sub_00145BD0(void)
 extern void sub_00015DE0_gen(void);
 extern void sub_0017F940_gen(void);
 extern void sub_0001A980_gen(void);
-extern __declspec(thread) int g_fp_top;
-extern __declspec(thread) int g_fp_cmp;
-extern __declspec(thread) uint16_t g_fp_cc;
+extern RECOMP_TLS int g_fp_top;
+extern RECOMP_TLS int g_fp_cmp;
+extern RECOMP_TLS uint16_t g_fp_cc;
 #define MXV(va) ((double)guest_float(va))
 /* The generated code's compare and its status word (recomp_types.h). */
 #ifndef RECOMP_FCMP
@@ -5350,8 +5363,8 @@ void sub_0001A980(void)
  * the same guest RAM and registers and reports any word or register that
  * differs ([LIFTED] lines; another thread writing RAM in that moment shows
  * up too). */
-extern __declspec(thread) uint32_t g_ebx, g_esi, g_edi, g_ebp;
-extern __declspec(thread) double g_fp_stack[8];
+extern RECOMP_TLS uint32_t g_ebx, g_esi, g_edi, g_ebp;
+extern RECOMP_TLS double g_fp_stack[8];
 #define LIFTED_RAM (64u << 20)
 
 typedef struct LiftedRegs {

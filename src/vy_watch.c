@@ -9,6 +9,7 @@
  * stack, with the value written; vy_watch_report() prints what the last
  * period saw, by writer, and the run of values. Nothing is armed unless a
  * caller arms it. */
+#ifdef _WIN32
 #include <windows.h>
 #include <stdint.h>
 #include <stddef.h>
@@ -103,3 +104,21 @@ void vy_watch_report(const char *label)
     fprintf(stderr, "\n");
     s_writer_count = s_value_count = s_lost = 0;
 }
+#else
+#include <stdint.h>
+#include <stdio.h>
+
+void vy_watch_arm(uint32_t guest)
+{
+    static int warned;
+    if (guest && !warned) {
+        warned = 1;
+        fprintf(stderr, "[VYW] Hardware write tracing is available on Windows\n");
+    }
+}
+
+void vy_watch_report(const char *label)
+{
+    (void)label;
+}
+#endif

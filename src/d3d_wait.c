@@ -18,7 +18,7 @@
  * check and the release as BlockOnTime returns), and a set it leaves behind
  * is harmless, as BlockOnTime clears the event (+4, SignalState) before it
  * patches the slot. RECOMP_BLOCK_WATCH=0 turns it off. */
-#include <windows.h>
+#include "platform/xbox_winnt.h"
 #include <stdint.h>
 #include <stddef.h>
 #include <stdio.h>

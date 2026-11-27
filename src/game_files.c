@@ -30,6 +30,7 @@
  * directory) and the name.
  */
 
+#ifdef _WIN32
 #include <windows.h>
 #include <commdlg.h>
 #include <bcrypt.h>
@@ -588,3 +589,72 @@ int game_files_locate(const char *build_dir, char *dir, size_t size)
     }
     return 0;
 }
+
+#else
+#include <openssl/evp.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include "game_files.h"
+
+static int usa_xbe(const char *path)
+{
+    static const unsigned char expected[] = {
+        0x25, 0xe1, 0xd7, 0x7b, 0x21, 0x6a, 0x2e, 0x55, 0x7d, 0x7a,
+        0x5d, 0xe6, 0x26, 0x6c, 0xda, 0x64, 0xae, 0x62, 0x62, 0x7b
+    };
+    FILE *file = fopen(path, "rb");
+    if (!file)
+        return 0;
+    EVP_MD_CTX *ctx = EVP_MD_CTX_new();
+    int ok = ctx && EVP_DigestInit_ex(ctx, EVP_sha1(), NULL);
+    unsigned char buffer[16384], digest[EVP_MAX_MD_SIZE];
+    unsigned length;
+    size_t count;
+    while (ok && (count = fread(buffer, 1, sizeof buffer, file)) != 0)
+        ok = EVP_DigestUpdate(ctx, buffer, count);
+    ok = ok && !ferror(file) && EVP_DigestFinal_ex(ctx, digest, &length) &&
+         length == sizeof expected && !memcmp(digest, expected, length);
+    EVP_MD_CTX_free(ctx);
+    fclose(file);
+    return ok;
+}
+
+int game_files_locate(const char *build_dir, char *dir, size_t size)
+{
+    const char *env = getenv("RECOMP_GAME_DIR");
+    const char *candidates[] = { env && *env ? env : "game", build_dir };
+    for (size_t i = 0; i < sizeof candidates / sizeof candidates[0]; i++) {
+        const char *candidate = candidates[i];
+        if (!candidate || (i && env && *env))
+            break;
+        size_t length = strlen(candidate);
+        if (length >= size)
+            continue;
+        char *path = malloc(length + sizeof "/supertree0.tre");
+        if (!path)
+            break;
+        struct stat tree;
+        sprintf(path, "%s/supertree0.tre", candidate);
+        int ok = stat(path, &tree) == 0 && S_ISREG(tree.st_mode);
+        sprintf(path, "%s/Game.txt", candidate);
+        ok = ok && stat(path, &tree) == 0 && S_ISREG(tree.st_mode);
+        sprintf(path, "%s/default.xbe", candidate);
+        ok = ok && usa_xbe(path);
+        free(path);
+        if (ok) {
+            memcpy(dir, candidate, length + 1);
+            return 1;
+        }
+    }
+    fprintf(stderr, "[GAME] Set RECOMP_GAME_DIR or pass the extracted USA disc directory (%s).\n",
+            candidates[0]);
+    return 0;
+}
+
+void game_files_movies(const char *game_dir)
+{
+    (void)game_dir;  /* Disc images and supplemental movie extraction are Windows-only. */
+}
+#endif
