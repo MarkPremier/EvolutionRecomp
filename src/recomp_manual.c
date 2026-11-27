@@ -347,10 +347,18 @@ extern void sub_00198650_gen(void);
 extern int d3d_wait_begin(uint32_t time, uint32_t outer[3]);
 extern void d3d_wait_end(const uint32_t outer[3]);
 
+#ifndef _WIN32
+extern void d3d_wait_paced(uint32_t time);
+#endif
+
 void sub_00198650(void)
 {
     uint32_t outer[3];
-    int watched = d3d_wait_begin(TUROK_MEM32(g_esp + 4u), outer);
+    int watched;
+#ifndef _WIN32
+    d3d_wait_paced(TUROK_MEM32(g_esp + 4u));
+#endif
+    watched = d3d_wait_begin(TUROK_MEM32(g_esp + 4u), outer);
     sub_00198650_gen();
     if (watched) d3d_wait_end(outer);
 }

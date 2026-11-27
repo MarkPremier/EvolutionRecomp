@@ -58,8 +58,10 @@ def main():
     environment.setdefault("RECOMP_USB_PADS", "1")
     # The GPU renderer's automatic render scale follows the monitor: 4x on a
     # 2256x1504 laptop panel, which saturated the integrated Radeon (title
-    # screen ~4 fps). Native scale measured ~42 fps in menus and ~17 fps in
-    # the first level on the same laptop. Set RECOMP_RENDER_SCALE to override.
+    # screen ~4 fps). With the straight-line combiner shaders the first level
+    # holds the 60 fps cap at scale 1 (GPU about half busy; ~170 fps
+    # uncapped) and at scale 2 (GPU ~96% busy, so busier scenes drop). Set
+    # RECOMP_RENDER_SCALE to override.
     environment.setdefault("RECOMP_RENDER_SCALE", "1")
     print(f"Linux disc view and saves: {view}", flush=True)
     if args.prepare_only:

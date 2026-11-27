@@ -119,6 +119,29 @@ int d3d_wait_begin(uint32_t time, uint32_t outer[3])
     return 1;
 }
 
+#ifndef _WIN32
+#include <time.h>
+/* Before BlockOnTime's own spin: while the toolkit's frame cap holds a flip
+ * the GPU's time cannot move, so sleep until the hold ends rather than spin
+ * through it (~70% of a core at the 60 fps cap in the Chapter 1 jungle).
+ * Once no hold is in progress, BlockOnTime runs as it always did.
+ * RECOMP_BLOCK_SLEEP=0 turns it off. */
+void d3d_wait_paced(uint32_t time)
+{
+    extern long long xbox_Nv2aFlipPaceUntil(void);
+    static int enabled = -1;
+    long long until;
+    if (enabled < 0) {
+        const char *value = getenv("RECOMP_BLOCK_SLEEP");
+        enabled = !(value && *value == '0');
+    }
+    while (enabled && !reached(time) && (until = xbox_Nv2aFlipPaceUntil()) != 0) {
+        struct timespec wake = {(time_t)(until / 1000000000LL), (long)(until % 1000000000LL)};
+        clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &wake, NULL);
+    }
+}
+#endif
+
 void d3d_wait_end(const uint32_t outer[3])
 {
     EnterCriticalSection(&s_lock);
