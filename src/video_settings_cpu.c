@@ -4,7 +4,14 @@
 
 void video_settings_load(void) {}
 void video_settings_start(const char *game_dir) { (void)game_dir; }
-void video_settings_screen(int front_end, int pause_menu) { (void)front_end; (void)pause_menu; }
+/* The keyboard's menu bindings (RECOMP_KBM_MENU_MAP: arrows navigate, Escape
+ * is Back) in the front end, its play bindings in a level and on the pause
+ * menu (Escape resumes) -- as video_settings.c's follow_menus sets them. */
+void video_settings_screen(int front_end, int pause_menu)
+{
+    extern void xbox_KbmSetMenuMode(int on);
+    xbox_KbmSetMenuMode(front_end && !pause_menu);
+}
 void video_settings_menu_screen(uint32_t screen, const char *name) { (void)screen; (void)name; }
 /* This is a guest function override, so it must execute the original body
  * (including its guest return) even without the enhanced menu. */

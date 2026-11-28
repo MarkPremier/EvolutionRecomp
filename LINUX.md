@@ -34,25 +34,38 @@ requires an extracted USA disc; native ISO import is still pending.
 
 ## Controls
 
-The launcher enables the basic keyboard controller on player one. Keys are
-read only from the focused SDL window, and losing focus releases them. A
-physical SDL-compatible controller can be connected before or during play.
-Keyboard controls merge with that controller; `RECOMP_KEYBOARD=0` disables
-them.
+Keyboard and mouse play as in the Windows build (`RECOMP_KBM`, on by
+default), merged onto player one, so a controller keeps working beside them.
+An SDL-compatible controller can be connected before or during play.
 
-| Keys | Xbox control |
-|------|--------------|
-| Enter / Backspace | Start / Back |
-| Arrow keys | D-pad |
-| Z / X / A / S | A / B / X / Y |
-| Q / E | White / Black |
-| 1 / 3 | Left / Right trigger |
-| Keypad 8 / 2 / 4 / 6 | Left stick |
-| I / K / J / L | Right stick |
-| Shift / Ctrl | Left / Right stick click |
+Click in the window to capture the mouse (or touchpad): the pointer hides and
+turns the view. Alt+Esc, or switching to another window, releases it; click
+again to recapture. Keys are read only while the window has the focus.
 
-Mouse look and the enhanced Windows settings menu are not yet available.
-Closing the SDL window exits the game.
+| Keys / mouse | Action (Xbox control) |
+|--------------|-----------------------|
+| W A S D | Move (left stick) |
+| Mouse / touchpad | Look (right stick) |
+| Left mouse | Fire (right trigger) |
+| Right mouse | Weapon mode (left trigger) |
+| Space / Enter | Jump, menu select (A) |
+| Backspace | Menu back (B) |
+| E / wheel down, Q / wheel up | Next / previous weapon (X / Y) |
+| Ctrl or C | Duck (white) |
+| Middle mouse or Z | Zoom (right stick click) |
+| Esc or Tab | Pause (Start); Esc is Back in menus |
+| Arrow keys | Menu navigation |
+
+Mouse speed: `RECOMP_KBM_SENS` is the mouse counts for a full turn rate
+(default 80, lower is faster; a touchpad may want 30-40).
+`RECOMP_KBM_INVERT_Y=1` inverts looking up and down. `RECOMP_KBM_MAP`
+rebinds keys (see the toolkit's `src/input/xinput_device.c`). On GNOME,
+Settings > Mouse & Touchpad > "Disable while typing" stops a touchpad from
+turning while a movement key is held. `RECOMP_KBM=0` returns to the simple
+keyboard pad (`RECOMP_KEYBOARD`): keypad 8/2/4/6 move, I/J/K/L look.
+
+The enhanced Windows settings menu (Options > PC Controls, Video) is not yet
+available. Closing the window exits the game.
 
 ## Next stage
 
